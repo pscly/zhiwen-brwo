@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知纹 · 指纹浏览器机群</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --line:#2a2f3a;
+    --text:#e6e8ee; --dim:#8b93a7; --accent:#5b9dff; --ok:#3ecf8e; --warn:#ffb020; --bad:#ff6b6b;
+    --radius:10px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#f6f7f9;--panel:#fff;--panel2:#f0f2f5;--line:#e2e5ea;--text:#14171d;--dim:#69707f}
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.55 -apple-system,"Segoe UI",system-ui,"Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:14px;padding:14px 22px;border-bottom:1px solid var(--line);
+    background:var(--panel);position:sticky;top:0;z-index:5}
+  header h1{font-size:15px;margin:0;letter-spacing:.5px;font-weight:650}
+  header .badge{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:2px 8px;border-radius:99px}
+  header .grow{flex:1}
+  main{padding:22px;max-width:1280px;margin:0 auto}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;
+    padding:7px 13px;font-size:13px;cursor:pointer;transition:.15s}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover{filter:brightness(1.08);color:#fff}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  input,select{background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:7px 11px;font-size:13px;font-family:inherit}
+  input:focus,select:focus{outline:none;border-color:var(--accent)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:16px}
+  .card h2{font-size:13px;margin:0 0 12px;color:var(--dim);font-weight:600;letter-spacing:.6px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--dim);font-weight:500;font-size:12px;padding:8px 10px;border-bottom:1px solid var(--line)}
+  td{padding:10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:var(--panel2)}
+  .state{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+  .dot.running{background:var(--ok);box-shadow:0 0 0 3px rgba(62,207,142,.16)}
+  .dot.stopped{background:var(--dim)}
+  .dot.failed,.dot.crashed{background:var(--bad)}
+  .dot.starting,.dot.stopping{background:var(--warn)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+  .dim{color:var(--dim)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .kpi{background:var(--panel2);border-radius:8px;padding:11px 13px}
+  .kpi b{display:block;font-size:19px;font-weight:650;margin-bottom:2px}
+  .kpi span{font-size:11px;color:var(--dim)}
+  #toast{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:20}
+  .tmsg{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+    padding:10px 14px;border-radius:8px;font-size:13px;max-width:420px;box-shadow:0 10px 30px rgba(0,0,0,.28)}
+  .tmsg.err{border-left-color:var(--bad)}
+  .tmsg.ok{border-left-color:var(--ok)}
+  dialog{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px;
+    padding:0;max-width:620px;width:92%}
+  dialog .dh{padding:16px 20px;border-bottom:1px solid var(--line);font-weight:600}
+  dialog .db{padding:18px 20px}
+  dialog .df{padding:14px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:9px}
+  pre{background:var(--panel2);padding:12px;border-radius:8px;overflow:auto;font-size:12px;
+    font-family:ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;margin:0}
+  .spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--line);
+    border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <h1>知纹</h1>
+  <span class="badge" id="node">连接中…</span>
+  <div class="grow"></div>
+  <button id="btn-doctor">自检</button>
+  <button id="btn-trim">清理缓存</button>
+  <button class="primary" id="btn-new">＋ 新建环境</button>
+</header>
+
+<main>
+  <div class="card">
+    <h2>概况</h2>
+    <div class="grid" id="kpis">
+      <div class="kpi"><b>—</b><span>环境总数</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>环境列表</h2>
+    <div class="row" style="margin-bottom:12px">
+      <input id="q" placeholder="按名字搜索" style="width:200px">
+      <select id="stateFilter">
+        <option value="">全部状态</option>
+        <option value="running">运行中</option>
+        <option value="stopped">已停止</option>
+        <option value="failed">失败</option>
+        <option value="crashed">崩溃</option>
+      </select>
+      <button id="btn-refresh">刷新</button>
+      <span class="dim" id="hint" style="font-size:12px"></span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:22%">名字</th><th style="width:12%">状态</th><th style="width:12%">指纹种子</th>
+          <th style="width:10%">同步版本</th><th style="width:9%">端口</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"><tr><td colspan="6" class="dim">加载中…</td></tr></tbody>
+    </table>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<dialog id="dlg">
+  <div class="dh" id="dlg-title">详情</div>
+  <div class="db" id="dlg-body"></div>
+  <div class="df"><button onclick="document.getElementById('dlg').close()">关闭</button></div>
+</dialog>
+
+<script>
+const API = '';
+let TOKEN = localStorage.getItem('zw_token') || '';
+let base = location.origin;
+
+function toast(msg, kind){
+  const box = document.getElementById('toast');
+  const el = document.createElement('div');
+  el.className = 'tmsg ' + (kind || '');
+  el.textContent = msg;
+  box.appendChild(el);
+  setTimeout(()=>{ el.style.opacity = '0'; el.style.transition='.4s'; setTimeout(()=>el.remove(), 400); }, kind==='err'?7000:3200);
+}
+
+async function api(method, path, body){
+  const headers = {'Content-Type':'application/json'};
+  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
+  let resp;
+  try{
+    resp = await fetch(base + path, {method, headers, body: body? JSON.stringify(body): undefined});
+  }catch(e){
+    throw new Error('连不上服务：' + e.message);
+  }
+  if (resp.status === 401){
+    const t = prompt('需要访问令牌（ZW_ADMIN_TOKEN）。留空表示未启用令牌：', TOKEN || '');
+    if (t !== null){ TOKEN = t.trim(); localStorage.setItem('zw_token', TOKEN); return api(method, path, body); }
+    throw new Error('未认证');
+  }
+  const ct = resp.headers.get('content-type') || '';
+  if (!ct.includes('json')){
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    return resp;
+  }
+  const data = await resp.json();
+  if (data && data.ok === false){
+    throw new Error(`[${data.code}] ${data.message}${data.hint ? '\n' + data.hint : ''}`);
+  }
+  return data.data !== undefined ? data.data : data;
+}
+
+function dot(state){ return `<span class="state"><i class="dot ${state}"></i>${stateLabel(state)}</span>`; }
+function stateLabel(s){
+  return ({running:'运行中',stopped:'已停止',starting:'启动中',stopping:'停止中',failed:'失败',crashed:'崩溃'}[s] || s);
+}
+function esc(s){ return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadMeta(){
+  try{
+    const m = await api('GET', '/api/v1/meta');
+    document.getElementById('node').textContent = `${m.node_id} · v${m.version}${m.hub_configured ? ' · 已连同步中心' : ''}`;
+  }catch(e){ document.getElementById('node').textContent = '未连接'; }
+}
+
+async function loadStats(){
+  try{
+    const s = await api('GET', '/api/v1/stats');
+    const kpis = [
+      ['环境总数', s.profiles],
+      ['运行中', `${s.running} / ${s.max_running}`],
+      ['端口占用', `${s.port_pool.used} 个`],
+      ['磁盘占用', s.disk_human],
+      ['内核', s.engine.ok ? (s.engine.version || '已就绪') : '缺失'],
+    ];
+    document.getElementById('kpis').innerHTML = kpis.map(([k,v]) =>
+      `<div class="kpi"><b style="font-size:${String(v).length>14?'13px':'19px'}">${esc(v)}</b><span>${esc(k)}</span></div>`).join('');
+  }catch(e){ toast(e.message, 'err'); }
+}
+
+async function loadProfiles(){
+  const q = document.getElementById('q').value.trim();
+  const st = document.getElementById('stateFilter').value;
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (st) params.set('state', st);
+  const tbody = document.getElementById('tbody');
+  try{
+    const data = await api('GET', '/api/v1/profiles?' + params.toString());
+    const rows = data.profiles || [];
+    document.getElementById('hint').textContent = rows.length ? `共 ${rows.length} 个` : '';
+    if (!rows.length){
+      tbody.innerHTML = '<tr><td colspan="6" class="dim">还没有环境。点右上角「新建环境」。</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(p => `
+      <tr data-id="${p.id}" data-name="${esc(p.name)}" data-state="${p.state}">
+        <td><b>${esc(p.name)}</b>${p.note? `<div class="dim" style="font-size:11px">${esc(p.note)}</div>`:''}</td>
+        <td>${dot(p.state)}</td>
+        <td class="mono">${p.fp_seed}</td>
+        <td class="mono">${p.sync_revision || 0}</td>
+        <td class="mono">${p.cdp_port || '—'}</td>
+        <td>
+          ${p.state === 'running'
+            ? `<button data-act="stop">停止</button> <button data-act="cdp">取 CDP</button>`
+            : `<button data-act="start" class="primary">启动</button>`}
+          <button data-act="shot">截图</button>
+          <button data-act="logs">日志</button>
+        </td>
+      </tr>`).join('');
+  }catch(e){
+    tbody.innerHTML = `<tr><td colspan="6" style="color:var(--bad)">${esc(e.message)}</td></tr>`;
+  }
+}
+
+document.getElementById('tbody').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const ref = tr.dataset.name;
+  const act = btn.dataset.act;
+  const old = btn.textContent;
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+  try{
+    if (act === 'start'){
+      const r = await api('POST', `/api/v1/profiles/${encodeURIComponent(ref)}/start`, {});
+      toast(`${ref} 已启动，端口 ${r.local ? r.local.port : '—'}`, 'ok');
+    } else if (act === 'stop'){
+      await api('POST', `/api/v1/profiles/${encodeURIComponent(ref)}/stop`);
+      toast(`${ref} 已停止`, 'ok');
+    } else if (act === 'cdp'){
+      const info = await api('GET', `/api/v1/profiles/${encodeURIComponent(ref)}/cdp`);
+      showDialog(`CDP 连接 · ${ref}`, `
+        <p class="dim" style="margin-top:0">把下面的地址交给 Playwright 的 <span class="mono">connectOverCDP</span>。令牌 ${info.token_ttl} 秒后过期。</p>
+        <pre>${esc(info.playwright)}</pre>
+        <p class="dim">或者先用发现接口取回真实地址：</p>
+        <pre>${esc(info.raw_cdp_json)}</pre>
+      `);
+    } else if (act === 'shot'){
+      const resp = await api('POST', '/api/v1/page/screenshot', {profile: ref});
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      showDialog(`截图 · ${ref}`, `<img src="${url}" style="width:100%;border-radius:8px">`);
+    } else if (act === 'logs'){
+      const l = await api('GET', `/api/v1/profiles/${encodeURIComponent(ref)}/logs?tail=80`);
+      showDialog(`日志 · ${ref}`, `
+        <p class="dim" style="margin-top:0">事件日志</p>
+        <pre>${esc((l.profile||[]).join('\n') || '（空）')}</pre>
+        <p class="dim">浏览器输出</p>
+        <pre>${esc((l.browser||[]).join('\n') || '（空）')}</pre>`);
+    }
+  }catch(e){ toast(e.message, 'err'); }
+  finally{ btn.disabled = false; btn.textContent = old; loadProfiles(); loadStats(); }
+});
+
+function showDialog(title, html){
+  document.getElementById('dlg-title').textContent = title;
+  document.getElementById('dlg-body').innerHTML = html;
+  document.getElementById('dlg').showModal();
+}
+
+document.getElementById('btn-new').onclick = () => {
+  const name = prompt('环境名（唯一）：');
+  if (!name) return;
+  const proxy = prompt('代理（可留空，例如 http://127.0.0.1:7890）：', '') || '';
+  api('POST', '/api/v1/profiles', {name: name.trim(), proxy: proxy.trim()})
+    .then(() => { toast('已创建 ' + name, 'ok'); loadProfiles(); loadStats(); })
+    .catch(e => toast(e.message, 'err'));
+};
+
+document.getElementById('btn-refresh').onclick = () => { loadProfiles(); loadStats(); };
+document.getElementById('btn-doctor').onclick = async () => {
+  try{
+    const d = await api('POST', '/api/v1/maintenance/doctor');
+    showDialog('自检结果', '<table>' + d.checks.map(c =>
+      `<tr><td>${c.ok?'✅':'❌'}</td><td>${esc(c.项)}</td><td class="mono dim">${esc(JSON.stringify(c.详情))}</td></tr>`).join('') + '</table>');
+  }catch(e){ toast(e.message, 'err'); }
+};
+document.getElementById('btn-trim').onclick = async () => {
+  try{
+    const r = await api('POST', '/api/v1/maintenance/trim');
+    toast(`已清理 ${r.profiles} 个环境，释放 ${(r.freed_bytes/1048576).toFixed(1)} MB`, 'ok');
+    loadStats();
+  }catch(e){ toast(e.message, 'err'); }
+};
+['q','stateFilter'].forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => loadProfiles());
+  el.addEventListener('change', () => loadProfiles());
+});
+
+(async function boot(){
+  await loadMeta();
+  await loadStats();
+  await loadProfiles();
+  setInterval(() => { loadProfiles(); loadStats(); }, 8000);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# 知纹同步中心 · 部署在 192.168.3.5
+# 用法：
+#   cd hub && docker compose up -d
+#   日志：docker compose logs -f
+name: zw-hub
+
+services:
+  hub:
+    build: .
+    image: zw-hub:0.1.0
+    container_name: zw-hub
+    restart: unless-stopped
+    ports:
+      # 只绑内网地址，不对公网开
+      - "192.168.3.5:8700:8700"
+    volumes:
+      - /srv/zw-hub/data:/data
+    environment:
+      ZW_DATA_DIR: /data
+      ZW_HUB_PORT: "8700"
+      # 必改：客户端用它作为 Bearer token
+      ZW_HUB_TOKEN: ${ZW_HUB_TOKEN:?请先在 .env 里设置 ZW_HUB_TOKEN}
+      ZW_KEEP_REVISIONS: "10"
+      ZW_LEASE_TTL: "90"
+      ZW_MAX_BLOB_BYTES: "268435456"
+      ZW_LOG_LEVEL: "INFO"
+      # 局域网内简单完整性校验：默认关闭，需要时设 true 并配 secret
+      ZW_REQUIRE_SIGNATURE: "false"
+      ZW_SIGNATURE_SECRET: ${ZW_SIGNATURE_SECRET:-}
+      TZ: Asia/Hong_Kong
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8700/healthz',timeout=3).status==200 else 1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

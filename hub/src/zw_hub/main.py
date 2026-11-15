@@ -1,0 +1,349 @@
+"""zw-hub HTTP 服务。
+
+所有错误统一返回：
+```json
+{"ok": false, "code": "PROFILE_BUSY", "message": "……", "detail": {...}}
+```
+所有成功返回：
+```json
+{"ok": true, "data": {...}}
+```
+这个形状是刻意统一的 —— AI 客户端只需要学一次就能解析全部响应。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import sys
+import time
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
+
+from . import __version__
+from .config import get_settings
+from .store import HubError, Store
+
+logger = logging.getLogger("zw.hub")
+
+app = FastAPI(
+    title="知纹同步中心（zw-hub）",
+    version=__version__,
+    description="局域网内的加密 profile 快照存储与租约协调服务。只存密文，解不开也不需要解。",
+)
+
+_store: Store | None = None
+
+
+def store() -> Store:
+    global _store
+    if _store is None:
+        s = get_settings()
+        _store = Store(s.data_dir, keep_revisions=s.keep_revisions)
+    return _store
+
+
+# ── 响应包装 ──────────────────────────────────────────────
+def ok(data: Any = None) -> dict[str, Any]:
+    return {"ok": True, "data": data}
+
+
+@app.exception_handler(HubError)
+async def _hub_error_handler(_: Request, exc: HubError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"ok": False, "code": exc.code, "message": exc.message})
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("未处理异常 %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "code": "INTERNAL", "message": f"{type(exc).__name__}: {exc}"},
+    )
+
+
+# ── 鉴权 ──────────────────────────────────────────────────
+def _verify_signature(request: Request, raw: bytes, headers: dict[str, str]) -> None:
+    s = get_settings()
+    if not s.require_signature:
+        return
+    ts = headers.get("x-zw-ts", "")
+    sig = headers.get("x-zw-sign", "")
+    if not ts or not sig:
+        raise HubError(401, "SIGNATURE_REQUIRED", "服务端要求请求签名，但请求未带 X-ZW-Ts / X-ZW-Sign")
+    if abs(time.time() - float(ts)) > 300:
+        raise HubError(401, "SIGNATURE_EXPIRED", "请求时间戳超过 ±300 秒，拒绝（防重放）")
+    body_hash = hashlib.sha256(raw).hexdigest()
+    msg = f"{request.method}\n{request.url.path}\n{ts}\n{body_hash}".encode()
+    expect = hmac.new(s.signature_secret.encode(), msg, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expect, sig):
+        raise HubError(401, "SIGNATURE_INVALID", "请求签名不匹配")
+
+
+async def auth(request: Request, authorization: str = Header(default="")) -> None:
+    s = get_settings()
+    if s.token:
+        token = authorization.removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(token, s.token):
+            raise HubError(401, "UNAUTHENTICATED", "访问令牌不正确（请求头需为 Authorization: Bearer <token>）")
+    raw = await request.body()
+    _verify_signature(request, raw, {k.lower(): v for k, v in request.headers.items()})
+
+
+Auth = Depends(auth)
+
+
+# ── 健康与元信息 ──────────────────────────────────────────
+@app.get("/healthz", summary="存活探针（不查磁盘）")
+def healthz() -> dict[str, Any]:
+    return ok({"status": "ok", "version": __version__, "ts": time.time()})
+
+
+@app.get("/readyz", summary="就绪探针（查磁盘可写）")
+def readyz() -> dict[str, Any]:
+    s = get_settings()
+    probe = s.data_dir / ".ready"
+    try:
+        probe.write_text(str(time.time()))
+        probe.unlink()
+        writable = True
+    except Exception:
+        writable = False
+    if not writable:
+        return JSONResponse(status_code=503, content={"ok": False, "code": "STORAGE_READONLY", "message": "数据目录不可写"})
+    return ok({"status": "ready", "storage": str(s.data_dir), "stats": store().stats()})
+
+
+@app.get("/v1/meta", dependencies=[Auth], summary="服务元信息")
+def meta() -> dict[str, Any]:
+    s = get_settings()
+    return ok(
+        {
+            "name": "zhiwen-hub",
+            "version": __version__,
+            "data_dir": str(s.data_dir),
+            "token_required": bool(s.token),
+            "signature_required": s.require_signature,
+            "keep_revisions": s.keep_revisions,
+            "lease_ttl": s.lease_ttl,
+            "max_blob_bytes": s.max_blob_bytes,
+            "server_time": time.time(),
+        }
+    )
+
+
+@app.get("/v1/ai/manifest", dependencies=[Auth], summary="给 AI 的自描述清单")
+def ai_manifest() -> dict[str, Any]:
+    """AI 一进来读这个就知道：这是什么、有哪些能力、怎么调、错误怎么解。
+
+    这是"AI 原生"的第一层：不要求模型先读文档，端点本身就是文档。
+    """
+    return ok(
+        {
+            "service": "zhiwen-hub",
+            "role": "同步中心：托管加密 profile 快照、协调跨机租约",
+            "version": __version__,
+            "concepts": {
+                "profile_id": "环境标识，与 core 侧的 profile id 一致",
+                "revision": "单调递增的快照版本号，从 1 开始",
+                "key_fp": "客户端主密码派生密钥的指纹（前 16 位 hex），hub 用它判断快照能否被某台机器解开",
+                "lease": "跨机互斥锁，防止两台机器同时使用同一个环境",
+            },
+            "workflows": {
+                "推送": "PUT /v1/blobs/{pid}/{rev} → PUT /v1/latest/{pid}",
+                "拉取": "GET /v1/latest/{pid} → GET /v1/blobs/{pid}/{rev}",
+                "占用环境": "POST /v1/leases/{pid} → 定期 POST /v1/leases/{pid}/heartbeat → DELETE /v1/leases/{pid}",
+            },
+            "errors": {
+                "REVISION_EXISTS": "版本号已被占用，换下一个 revision 或先 GET 看最新",
+                "REVISION_NOT_MONOTONIC": "latest 指针只允许前进，确认是否漏了 revision",
+                "PROFILE_BUSY": "环境被别的机器持有，等租约过期或让对方释放",
+                "NO_LATEST": "该环境还没有成功推送过",
+            },
+            "安全模型": "hub 只存 AEAD 密文；主密码不进 hub；传输为局域网 HTTP，完整性由密文自身保证",
+            "endpoints": [
+                {"method": "GET", "path": "/healthz", "desc": "存活"},
+                {"method": "GET", "path": "/readyz", "desc": "就绪 + 存储统计"},
+                {"method": "GET", "path": "/v1/meta", "desc": "元信息"},
+                {"method": "GET", "path": "/v1/index", "desc": "所有环境的版本索引"},
+                {"method": "GET", "path": "/v1/stats", "desc": "容量统计"},
+                {"method": "PUT", "path": "/v1/blobs/{pid}/{rev}", "desc": "上传加密块（默认 CAS）"},
+                {"method": "GET", "path": "/v1/blobs/{pid}/{rev}", "desc": "下载加密块"},
+                {"method": "GET", "path": "/v1/blobs/{pid}", "desc": "列出版本"},
+                {"method": "DELETE", "path": "/v1/blobs/{pid}/{rev}", "desc": "删版本"},
+                {"method": "GET", "path": "/v1/latest/{pid}", "desc": "最新版本指针"},
+                {"method": "PUT", "path": "/v1/latest/{pid}", "desc": "推进最新指针"},
+                {"method": "POST", "path": "/v1/leases/{pid}", "desc": "抢占租约"},
+                {"method": "POST", "path": "/v1/leases/{pid}/heartbeat", "desc": "续租"},
+                {"method": "DELETE", "path": "/v1/leases/{pid}", "desc": "释放租约"},
+                {"method": "GET", "path": "/v1/leases/{pid}", "desc": "查租约"},
+            ],
+        }
+    )
+
+
+@app.get("/v1/index", dependencies=[Auth], summary="全部环境的版本索引")
+def index() -> dict[str, Any]:
+    return ok({"profiles": store().index()})
+
+
+@app.get("/v1/stats", dependencies=[Auth], summary="容量统计")
+def stats() -> dict[str, Any]:
+    return ok(store().stats())
+
+
+# ── 快照块 ────────────────────────────────────────────────
+@app.put("/v1/blobs/{pid}/{rev}", dependencies=[Auth], summary="上传加密快照块")
+async def put_blob(
+    pid: str,
+    rev: int,
+    request: Request,
+    x_zw_key_fp: str = Header(default=""),
+    x_zw_source_node: str = Header(default=""),
+    x_zw_note: str = Header(default=""),
+    x_zw_no_cas: str = Header(default=""),
+) -> dict[str, Any]:
+    s = get_settings()
+    data = await request.body()
+    if not data:
+        raise HubError(400, "EMPTY_BODY", "请求体为空，请上传加密后的快照块")
+    if len(data) > s.max_blob_bytes:
+        raise HubError(413, "BLOB_TOO_LARGE", f"块大小 {len(data)} 超过上限 {s.max_blob_bytes}")
+    # 客户端会把中文备注做 URL 编码，这里还原（未编码的旧客户端也能正常工作）
+    from urllib.parse import unquote
+
+    decoded = request.headers.get("x-zw-encoded", "") == "url"
+    source_node = unquote(x_zw_source_node) if decoded else x_zw_source_node
+    note = unquote(x_zw_note) if decoded else x_zw_note
+    meta = store().put_blob(
+        pid,
+        rev,
+        data,
+        key_fp=x_zw_key_fp or "unknown",
+        source_node=source_node,
+        note=note,
+        cas=not (x_zw_no_cas in ("1", "true")),
+    )
+    logger.info("上传快照 pid=%s rev=%s size=%s sha=%s", pid, rev, meta.size, meta.sha256[:12])
+    return ok(meta.to_dict())
+
+
+@app.get("/v1/blobs/{pid}/{rev}", dependencies=[Auth], summary="下载加密快照块")
+def get_blob(pid: str, rev: int) -> Response:
+    data = store().get_blob(pid, rev)
+    meta = store().get_meta(pid, rev)
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "X-ZW-Sha256": meta.sha256,
+            "X-ZW-Key-Fp": meta.key_fp,
+            "ETag": f'"v{rev}"',
+        },
+    )
+
+
+@app.get("/v1/blobs/{pid}/{rev}/meta", dependencies=[Auth], summary="读取块元信息")
+def blobs_meta(pid: str, rev: int) -> dict[str, Any]:
+    return ok(store().get_meta(pid, rev).to_dict())
+
+
+@app.get("/v1/blobs/{pid}", dependencies=[Auth], summary="列出某环境的全部版本")
+def list_blobs(pid: str) -> dict[str, Any]:
+    revs = store().list_revisions(pid)
+    items = []
+    for r in revs:
+        m = store().get_meta(pid, r)
+        items.append({"revision": r, "size": m.size, "sha256": m.sha256, "key_fp": m.key_fp, "created_at": m.created_at})
+    return ok({"profile_id": pid, "revisions": items})
+
+
+@app.delete("/v1/blobs/{pid}/{rev}", dependencies=[Auth], summary="删除某个版本")
+def delete_blob(pid: str, rev: int) -> dict[str, Any]:
+    store().delete_blob(pid, rev)
+    logger.warning("删除快照 pid=%s rev=%s", pid, rev)
+    return ok({"deleted": True, "profile_id": pid, "revision": rev})
+
+
+# ── latest 指针 ───────────────────────────────────────────
+class LatestBody(BaseModel):
+    revision: int = Field(ge=1, description="要指向的版本号")
+    force: bool = Field(default=False, description="允许回退或覆盖（谨慎）")
+
+
+@app.get("/v1/latest/{pid}", dependencies=[Auth], summary="读取最新版本指针")
+def get_latest(pid: str, if_none_match: str = Header(default="")) -> JSONResponse:
+    payload = store().get_latest(pid)
+    etag = payload.get("etag", "")
+    if if_none_match and if_none_match == etag:
+        return JSONResponse(status_code=304, content=None, headers={"ETag": etag})
+    return JSONResponse(content=ok(payload), headers={"ETag": etag})
+
+
+@app.put("/v1/latest/{pid}", dependencies=[Auth], summary="推进最新版本指针")
+def put_latest(pid: str, body: LatestBody) -> dict[str, Any]:
+    payload = store().set_latest(pid, body.revision, force=body.force)
+    return ok(payload)
+
+
+# ── 租约 ──────────────────────────────────────────────────
+class LeaseBody(BaseModel):
+    owner: str = Field(min_length=3, description="持有者标识，建议 '<主机名>:<pid>:<随机8位>'")
+    kind: str = Field(default="sync", description="用途：run | sync")
+    ttl: int = Field(default=0, description="有效期秒数，0 表示用服务端默认")
+
+
+@app.post("/v1/leases/{pid}", dependencies=[Auth], summary="抢占租约")
+def acquire(pid: str, body: LeaseBody) -> dict[str, Any]:
+    ttl = body.ttl or get_settings().lease_ttl
+    payload = store().acquire_lease(pid, body.owner, body.kind, ttl)
+    return ok(payload)
+
+
+@app.post("/v1/leases/{pid}/heartbeat", dependencies=[Auth], summary="续租")
+def heartbeat(pid: str, body: LeaseBody) -> dict[str, Any]:
+    return ok(store().heartbeat_lease(pid, body.owner))
+
+
+@app.delete("/v1/leases/{pid}", dependencies=[Auth], summary="释放租约")
+def release(pid: str, owner: str) -> dict[str, Any]:
+    store().release_lease(pid, owner)
+    return ok({"released": True, "profile_id": pid, "owner": owner})
+
+
+@app.get("/v1/leases/{pid}", dependencies=[Auth], summary="查询租约")
+def lease(pid: str) -> dict[str, Any]:
+    return ok(store().get_lease(pid))
+
+
+# ── 启动 ──────────────────────────────────────────────────
+def _setup_logging() -> None:
+    s = get_settings()
+    fmt = "%(asctime)s %(levelname)-5s [%(name)s] %(message)s"
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    handlers.append(logging.FileHandler(s.log_dir / "hub.log", encoding="utf-8"))
+    logging.basicConfig(level=getattr(logging, s.log_level, logging.INFO), format=fmt, handlers=handlers)
+
+
+def run() -> None:
+    import uvicorn
+
+    s = get_settings()
+    _setup_logging()
+    logger.info("知纹同步中心启动：http://%s:%s 数据目录=%s", s.host, s.port, s.data_dir)
+    uvicorn.run(
+        "zw_hub.main:app",
+        host=s.host,
+        port=s.port,
+        log_level=s.log_level.lower(),
+        access_log=True,
+    )
+
+
+if __name__ == "__main__":
+    run()

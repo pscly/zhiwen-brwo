@@ -1,0 +1,32 @@
+[project]
+name = "zw-core"
+version = "0.1.0"
+description = "知纹核心（zhiwen core）—— 指纹浏览器机群的编排层、CDP 网关与同步客户端"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "pydantic>=2.9,<3",
+  "httpx>=0.27,<1",
+  "pynacl>=1.5,<2",
+  "argon2-cffi>=23.1,<24",
+  "zstandard>=0.23,<0.24",
+  "websockets>=13,<14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+zw = "zw_core.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zw_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["../../tests"]
+asyncio_mode = "auto"
