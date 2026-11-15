@@ -93,7 +93,7 @@ Chromium 的 `--proxy-server` **不支持用户名密码**：写成 `http://user
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | ✅ **136 项**全通过（`pytest tests -q`） |
+| 单元测试 | ✅ **136 项**全通过（`pytest tests -q`，需先装 dev 依赖，见下） |
 | 单机全能力自检 | ✅ **63 项**通过、0 失败、3 项按环境跳过（`scripts/e2e-check.py`） |
 | 跨机端到端（两台真机器 + 真 hub） | ✅ **30 项**全通过（`scripts/e2e-cross-machine.py`） |
 | 网关接管（Playwright over CDP） | ✅ **20 项**全通过（`scripts/gateway-check.cjs`） |
@@ -183,6 +183,15 @@ sudo docker compose up -d
 | [CHANGELOG](CHANGELOG.md) | 0.2.0 相对 0.1.0 逐条改了什么 |
 
 ## 自检脚本
+
+先装测试依赖（`pyproject.toml` 里它们是可选依赖，默认不装 —— 生产环境不需要 pytest）：
+
+```bash
+uv pip install --python .venv/bin/python -e "./core[dev]" pytest-asyncio
+# 或者：uv pip install --python .venv/bin/python pytest pytest-asyncio
+```
+
+然后：
 
 ```bash
 # 单机：真开浏览器，把全部能力过一遍（63 项）

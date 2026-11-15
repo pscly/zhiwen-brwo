@@ -59,7 +59,8 @@ tests/   136 项单元测试（含真起 hub 的同步集成测试）
 # 依赖
 uv venv .venv && uv pip install --python .venv/bin/python -e ./core -e ./hub
 
-# 测试（必须全绿才算改对）
+# 测试（必须全绿才算改对）。pytest 是可选依赖，clone 后要先装：
+#   uv pip install --python .venv/bin/python -e "./core[dev]" pytest-asyncio
 .venv/bin/python -m pytest tests -q
 
 # 开发服务（pidfile 管理，不要用 pkill 免得误杀自己的 shell）
