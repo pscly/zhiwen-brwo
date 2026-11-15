@@ -95,7 +95,7 @@ const browser = await chromium.connectOverCDP(gateway_ws_url);
 ### Linux（已验证）
 
 ```bash
-git clone <本仓库> && cd zhiwen_brwo
+git clone https://github.com/pscly/zhiwen-brwo.git && cd zhiwen_brwo
 uv venv .venv && uv pip install --python .venv/bin/python -e ./core -e ./hub
 
 # 指定内核（或用系统自带的 chrome/chromium）

@@ -38,3 +38,8 @@ core/src/zw_core/web/dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 本地测试数据与凭据（绝不入库）
+.testdata/
+.env.test
+remote-shot.png
