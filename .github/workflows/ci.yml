@@ -44,6 +44,10 @@ jobs:
           PY
           node --check /tmp/ui.js
           echo "控制台 JS 语法 OK"
+      - name: 文档与代码一致性（错误码 / 端点清单 / 控制台约束）
+        # 这些是"加东西忘了同步"的守门人，曾经真的漏过：
+        # 错误码没进文档、AI 清单里的路径多了一对花括号、控制台重复 id。
+        run: .venv/bin/python -m pytest tests/test_docs_consistency.py -q
       - name: 检查文档里引用的脚本都存在
         run: |
           python - <<'PY'

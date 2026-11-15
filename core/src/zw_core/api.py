@@ -463,8 +463,13 @@ def build_app() -> FastAPI:
                         {"method": "GET", "path": f"{API_PREFIX}/sync/remote", "说明": "hub 上的索引"},
                         {"method": "GET", "path": f"{API_PREFIX}/audit", "说明": "审计日志"},
                         {"method": "GET", "path": f"{API_PREFIX}/events", "说明": "事件流"},
-                        {"method": "GET", "path": "/cdp/{{id}}/json/version", "说明": "CDP 发现接口（地址已重写）"},
-                        {"method": "WS", "path": "/cdp/{{id}}/...", "说明": "CDP 主通道"},
+                        # 注意：这两条不是 f-string，所以写单花括号。
+                        # 之前照抄 f-string 的写法写了 {{id}}，渲染出来就是字面量双花括号，
+                        # AI 照着拼路径会 404（tests/test_docs_consistency.py 会拦住这种错）。
+                        {"method": "GET", "path": "/cdp/{id}/json/version", "说明": "CDP 发现接口（地址已重写）"},
+                        {"method": "GET", "path": "/cdp/{id}/json/list", "说明": "CDP 目标列表（地址已重写）"},
+                        {"method": "PUT", "path": "/cdp/{id}/json/new", "说明": "新建标签页"},
+                        {"method": "WS", "path": "/cdp/{id}/...", "说明": "CDP 主通道"},
                     ],
                     key=lambda x: (x["path"], x["method"]),
                 ),
