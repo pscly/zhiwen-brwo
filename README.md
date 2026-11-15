@@ -78,8 +78,9 @@ const browser = await chromium.connectOverCDP(gateway_ws_url);
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | ✅ 19 项全通过 |
+| 单元测试 | ✅ **39 项**全通过 |
 | 端到端自检（16 项） | ✅ 全通过（见 `scripts/e2e-check.py`） |
+| **Web 控制台交互** | ✅ 真实浏览器点通：启动 / 取 CDP / 日志 / 停止，无前端报错（见 `scripts/ui-check.cjs`） |
 | 建环境 → 启动浏览器 → 拿 CDP | ✅ |
 | 网关地址重写 → Playwright `connectOverCDP` 接管 | ✅ 跨进程实测 |
 | cookie 写 / 读 / netscape 导出 | ✅ |
@@ -87,6 +88,7 @@ const browser = await chromium.connectOverCDP(gateway_ws_url);
 | 另一台机器拉取 → **自动导入** → cookie 真的还原 | ✅ |
 | 错主密码必须在落盘前被拦 | ✅ 返回 `412 KEY_FINGERPRINT_MISMATCH` |
 | MCP 工具清单 + 调用 | ✅ 23 个工具 |
+| 租约残留与令牌堆积 | ✅ 已修并加回归测试（详见 `docs/08` §9） |
 | **Windows 上的完整验证** | ⬜ 待你在 Windows 上跑（见 [交接说明](docs/09-交接说明.md)） |
 | **指纹能否过 browserscan** | ⬜ 未验证。无 GPU 的 Linux 上 WebGL 拿不到，必须到有显卡的 Windows 上测 |
 

@@ -16,6 +16,18 @@ from pathlib import Path
 from typing import Any
 
 
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True      # 存在但不属于我，算活着
+
+
 class LeaseBusy(Exception):
     def __init__(self, owner: str, kind: str, remain: int) -> None:
         super().__init__(f"环境被 {owner} 持有（{kind}，剩余 {remain} 秒）")
@@ -30,6 +42,27 @@ class LeaseBusy(Exception):
 _INPROC: dict[str, int] = {}
 _INPROC_LOCK = threading.Lock()
 
+# 进程级稳定的 owner 标识。
+# 坑：以前 owner 是每个 LocalLease 实例随机生成的，导致 stop() 里新建一个实例去 release 时
+# "owner 对不上"，租约文件永远删不掉 —— 下次 start 就会被自己的旧租约挡住 90 秒。
+# 现在同一进程内所有实例共享同一个 owner，release 才能真正生效。
+_PROC_OWNER = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def process_owner() -> str:
+    return _PROC_OWNER
+
+
+def owner_pid(owner: str) -> int:
+    """从 owner 串里取出 pid（格式 host:pid:rand）。取不到返回 0。"""
+    parts = (owner or "").split(":")
+    if len(parts) >= 2:
+        try:
+            return int(parts[-2])
+        except ValueError:
+            return 0
+    return 0
+
 
 class LocalLease:
     """基于文件 + 心跳的租约，跨进程也有效（同一台机器上跑两个 core 也能互斥）。"""
@@ -37,7 +70,7 @@ class LocalLease:
     def __init__(self, profile_dir: Path, ttl: int = 90) -> None:
         self.path = Path(profile_dir) / "lease.json"
         self.ttl = ttl
-        self.owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        self.owner = _PROC_OWNER
         self._lock = threading.Lock()
 
     def _read(self) -> dict[str, Any] | None:
@@ -68,6 +101,12 @@ class LocalLease:
                     cur = self._read() or {}
                     return {"owner": cur.get("owner", self.owner), "kind": cur.get("kind", kind), "reentrant": True}
             cur = self._read()
+            if cur and cur.get("owner") == self.owner:
+                # 本进程持有 → 重入（不依赖计数器，双保险）
+                with _INPROC_LOCK:
+                    _INPROC[key] = _INPROC.get(key, 0) + 1
+                self._write({**cur, "heartbeat": time.time()})
+                return {**cur, "reentrant": True}
             if cur:
                 remain = int(float(cur.get("ttl", 0)) - (time.time() - float(cur.get("heartbeat", 0))))
                 if remain > 0 and cur.get("owner") != self.owner:
@@ -106,6 +145,37 @@ class LocalLease:
                     self.path.unlink()
                 except OSError:
                     pass
+
+    def force_release(self) -> bool:
+        """无条件删除租约文件。给 stop / unlock 这类"明确要释放"的操作用。
+
+        它们本来就该释放，不该因为 owner 不匹配而失败。
+        """
+        with self._lock:
+            with _INPROC_LOCK:
+                _INPROC.pop(str(self.path.parent), None)
+            if self.path.exists():
+                try:
+                    self.path.unlink()
+                    return True
+                except OSError:
+                    return False
+            return False
+
+    def reap_if_stale(self) -> bool:
+        """如果租约的持有进程已经不在了，就把它清掉。返回是否清理过。"""
+        cur = self._read()
+        if not cur:
+            return False
+        if cur.get("owner") == self.owner:
+            return False
+        pid = owner_pid(cur.get("owner", ""))
+        host = (cur.get("owner", "").split(":") or [""])[0]
+        if host != socket.gethostname():
+            return False          # 别的机器上的租约，这里不管
+        if pid and _pid_alive(pid):
+            return False          # 进程还活着，尊重它
+        return self.force_release()
 
     def _write(self, payload: dict[str, Any]) -> None:
         tmp = self.path.with_suffix(".tmp")

@@ -356,7 +356,8 @@ def stop(ref: str, force: bool = False) -> dict[str, Any]:
         freed = engines.trim(udd_path(p["id"]))
 
     _update(p["id"], state="stopped", pid=None, last_stop_at=time.time())
-    LocalLease(profile_dir(p["id"])).release()
+    # 明确要释放，不能因为 owner 不匹配而失败
+    LocalLease(profile_dir(p["id"])).force_release()
     get_db().audit("profile.stop", p["id"], detail={"method": method, "freed": freed})
     logger.info("停止环境 name=%s 方式=%s", p["name"], method)
     return {"profile": get_profile(p["id"]), "method": method, "trim": freed}
@@ -378,17 +379,47 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# 每个环境最多同时保留多少个有效令牌。
+# 令牌是"一次连接凭证"，正常情况下客户端拿到就用；封顶是为了防止
+# 某个 UI 反复点"取 CDP"把表撑大。
+MAX_LIVE_TOKENS_PER_PROFILE = 20
+
+
 def issue_cdp_token(profile_id: str, ttl: int | None = None, issued_to: str = "") -> str:
     s = get_settings()
     ttl = min(max(ttl or s.cdp_token_ttl, 60), 7200)
     raw = "zwc_" + secrets.token_urlsafe(32)
     now = time.time()
     with get_db().conn() as c:
+        # 先清掉这个环境的过期令牌
+        c.execute("DELETE FROM cdp_tokens WHERE profile_id=? AND expires_at < ?", (profile_id, now))
+        # 再按数量封顶：这次插入之后总数不能超过 MAX，所以先裁到 MAX-1
+        keep = max(0, MAX_LIVE_TOKENS_PER_PROFILE - 1)
+        live = c.execute(
+            "SELECT token_hash FROM cdp_tokens WHERE profile_id=? ORDER BY issued_at DESC", (profile_id,)
+        ).fetchall()
+        for row in live[keep:]:
+            c.execute("DELETE FROM cdp_tokens WHERE token_hash=?", (row["token_hash"],))
         c.execute(
             "INSERT INTO cdp_tokens(token_hash,profile_id,issued_to,issued_at,expires_at) VALUES(?,?,?,?,?)",
             (_token_hash(raw), profile_id, issued_to, now, now + ttl),
         )
     return raw
+
+
+def purge_expired_tokens() -> int:
+    """清理全库过期令牌。由健康巡检周期调用，返回删除行数。"""
+    with get_db().conn() as c:
+        cur = c.execute("DELETE FROM cdp_tokens WHERE expires_at < ?", (time.time(),))
+        return cur.rowcount or 0
+
+
+def token_stats() -> dict[str, Any]:
+    now = time.time()
+    with get_db().conn() as c:
+        total = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens").fetchone()["n"]
+        live = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens WHERE expires_at > ?", (now,)).fetchone()["n"]
+    return {"total": total, "live": live, "expired": total - live}
 
 
 def verify_cdp_token(profile_id: str, token: str) -> bool:
@@ -469,6 +500,18 @@ def rebuild_gateway_routes() -> dict[str, Any]:
 
     restored: list[str] = []
     crashed: list[str] = []
+    reaped: list[str] = []
+
+    # 先清理"持有者进程已经死了"的本地租约，否则它会挡住下一次启动 90 秒
+    for p in list_profiles():
+        if p["state"] == "running":
+            continue
+        try:
+            if LocalLease(profile_dir(p["id"])).reap_if_stale():
+                reaped.append(p["name"])
+        except Exception:
+            pass
+
     for p in list_profiles(state="running"):
         port = p.get("cdp_port") or 0
         if port and engines.probe(port):
@@ -478,9 +521,9 @@ def rebuild_gateway_routes() -> dict[str, Any]:
         else:
             _update(p["id"], state="crashed", last_error="core 重启时发现调试端口已不可达")
             crashed.append(p["name"])
-    if restored or crashed:
-        logger.info("网关路由重建：恢复 %s，判定崩溃 %s", restored, crashed)
-    return {"restored": restored, "crashed": crashed}
+    if restored or crashed or reaped:
+        logger.info("网关路由重建：恢复 %s，判定崩溃 %s，清理死租约 %s", restored, crashed, reaped)
+    return {"restored": restored, "crashed": crashed, "reaped_leases": reaped}
 
 
 def health_tick() -> list[dict[str, Any]]:
@@ -528,6 +571,7 @@ def stats() -> dict[str, Any]:
         "root": str(s.root),
         "engine": _engine_summary(),
         "node_id": s.node_id,
+        "cdp_tokens": token_stats(),
     }
 
 

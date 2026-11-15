@@ -35,6 +35,9 @@ async def _health_loop() -> None:
             events = await asyncio.to_thread(mgr.health_tick)
             for ev in events:
                 logger.warning("巡检事件：%s", json.dumps(ev, ensure_ascii=False))
+            purged = await asyncio.to_thread(mgr.purge_expired_tokens)
+            if purged:
+                logger.info("清理过期 CDP 令牌 %s 个", purged)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # 巡检永远不能把服务带崩

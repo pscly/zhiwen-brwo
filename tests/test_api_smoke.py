@@ -97,3 +97,52 @@ def test_mcp_initialize(client):
     assert r.json()["result"]["serverInfo"]["name"] == "zhiwen"
     tools = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()["result"]["tools"]
     assert len(tools) >= 20
+
+
+def test_profile_detail_does_not_issue_cdp_token(client):
+    """详情接口被 UI 反复调用，绝不能每调一次就签发一个令牌，否则表会无限增长。"""
+    from zw_core.db import get_db
+
+    r = client.post("/api/v1/profiles", headers=H, json={"name": "p-token"})
+    pid = r.json()["data"]["id"]
+
+    with get_db().conn() as c:
+        before = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens").fetchone()["n"]
+
+    for _ in range(5):
+        d = client.get(f"/api/v1/profiles/{pid}", headers=H).json()["data"]
+        assert "cdp" not in d or d["cdp"] is None
+        assert d["cdp_ready"] is False
+        assert "cdp_hint" in d
+
+    with get_db().conn() as c:
+        after = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens").fetchone()["n"]
+    assert after == before, "详情接口不应该签发令牌"
+
+
+def test_token_cap_and_purge(client):
+    from zw_core.db import get_db
+    from zw_core.services import manager as mgr
+
+    r = client.post("/api/v1/profiles", headers=H, json={"name": "p-cap"})
+    pid = r.json()["data"]["id"]
+
+    for _ in range(30):
+        mgr.issue_cdp_token(pid, ttl=60)
+
+    with get_db().conn() as c:
+        n = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens WHERE profile_id=?", (pid,)).fetchone()["n"]
+    assert n <= mgr.MAX_LIVE_TOKENS_PER_PROFILE, f"令牌没有被封顶：{n}"
+
+    # 过期的应被清理
+    mgr.issue_cdp_token(pid, ttl=60)
+    with get_db().conn() as c:
+        c.execute("UPDATE cdp_tokens SET expires_at=? WHERE profile_id=?", (1.0, pid))
+    assert mgr.purge_expired_tokens() >= 1
+    st = mgr.token_stats()
+    assert st["expired"] == 0
+
+
+def test_stats_includes_token_stats(client):
+    d = client.get("/api/v1/stats", headers=H).json()["data"]
+    assert "cdp_tokens" in d and "live" in d["cdp_tokens"]

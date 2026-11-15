@@ -351,7 +351,17 @@ def build_app() -> FastAPI:
     def profiles_get(ref: str) -> dict[str, Any]:
         p = mgr.get_profile(ref)
         lease = LocalLease(mgr.profile_dir(p["id"])).status()
-        return ok({**p, "lease": lease, "cdp": mgr.cdp_info(p) if p["state"] == "running" else None})
+        # 注意：这里**不签发** CDP 令牌。
+        # 签发一次就要在库子里留一行，而详情接口会被 UI/轮询反复调用，
+        # 每调一次发一个令牌会让 cdp_tokens 表无限增长。要地址请显式调 GET /cdp。
+        return ok(
+            {
+                **p,
+                "lease": lease,
+                "cdp_ready": p["state"] == "running" and bool(p.get("cdp_port")),
+                "cdp_hint": "运行中可以直接 GET /api/v1/profiles/{ref}/cdp 取连接地址（会签发一个短期令牌）",
+            }
+        )
 
     @app.patch(f"{API_PREFIX}/profiles/{{ref}}", tags=["环境"], dependencies=[Auth], summary="修改环境")
     def profiles_patch(ref: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -377,7 +387,7 @@ def build_app() -> FastAPI:
     def profiles_unlock(ref: str) -> dict[str, Any]:
         p = mgr.get_profile(ref)
         lease = LocalLease(mgr.profile_dir(p["id"]))
-        lease.release()
+        lease.force_release()
         get_db().audit("profile.unlock", p["id"], result="ok")
         logger.warning("强制释放租约 name=%s", p["name"])
         return ok({"released": True, "profile_id": p["id"]})
@@ -797,6 +807,17 @@ def build_app() -> FastAPI:
         await gateway.proxy_ws(websocket, profile_id, "/", get_settings().cdp_max_conn_per_profile)
 
     # ── Web 控制台 ────────────────────────────────────────
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon() -> Response:
+        """内联一个极简图标，避免控制台因为 404 在 devtools 里报错（看着像 bug）。"""
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+            '<rect width="32" height="32" rx="7" fill="#5b9dff"/>'
+            '<path d="M9 10h14l-8 6 8 6H9" fill="none" stroke="#fff" stroke-width="2.4" '
+            'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        )
+        return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> str:
         html = Path(__file__).parent / "web" / "index.html"
