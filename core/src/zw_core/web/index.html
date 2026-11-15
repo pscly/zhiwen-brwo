@@ -1068,6 +1068,43 @@ function openDialog(cfg) {
 }
 function closeDialog() { const d = $('#dlg'); if (d.open) d.close(); }
 
+
+/** 输入单行文本的弹窗（替代原生 prompt）。
+ *
+ * 为什么不用 window.prompt：它样式由浏览器决定、在 headless/远程环境里会阻塞，
+ * 而且和本项目"所有弹窗都是自定义玻璃卡片"的设计不一致。
+ * resolve 传 null 表示用户取消；传字符串表示确认（可能是空串）。
+ */
+function askText(cfg) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    const footer = `<div class="grow"></div>
+      <button class="btn sm" data-act="dlg-close" id="at-cancel">取消</button>
+      <button class="btn sm primary" id="at-ok">${esc(cfg.okLabel || '确定')}</button>`;
+    const body = `
+      ${cfg.hint ? `<div class="notice info"><span class="nic">i</span><div>${esc(cfg.hint)}</div></div>` : ''}
+      <div class="field">
+        <label>${esc(cfg.label || '')}</label>
+        <input class="input mono" type="${cfg.password ? 'password' : 'text'}" id="at-input"
+               placeholder="${escAttr(cfg.placeholder || '')}" autocomplete="off" spellcheck="false">
+      </div>`;
+    openDialog({
+      title: cfg.title || '请输入', body, footer, narrow: true,
+      onMount: () => {
+        const input = $('#at-input');
+        const okBtn = $('#at-ok');
+        const submit = () => { const v = input.value; finish(v); closeDialog(); };
+        okBtn.addEventListener('click', submit);
+        input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') submit(); });
+        // 关掉弹窗（右上角 × / 取消 / Esc）都按"取消"处理
+        $('#dlg').addEventListener('close', () => finish(null), { once: true });
+        setTimeout(() => input.focus(), 50);
+      },
+    });
+  });
+}
+
 /** 危险操作确认：必须手打指定文字。删除类操作没法撤销，手打是目前唯一有效的"停一秒"。 */
 function confirmDanger(cfg) {
   const need = cfg.confirmText || '';
@@ -3102,8 +3139,24 @@ async function exportProfile(id) {
   const btn = $(`[data-act="export"][data-id="${CSS.escape(id)}"]`);
   if (btn) btn.classList.add('loading');
   try {
-    // 契约写 body {password?}；实现把 password 放在 query 上。空密码时两边都安全，所以都带上。
-    const resp = await api('POST', `/api/v1/profiles/${encodeURIComponent(id)}/export`, {}, { raw: true });
+    // 主密码必须显式带上：导出包是用它加密的，而服务端进程不一定有 ZW_SYNC_PASSWORD
+    // （Windows 上一键部署会写进 .env，但不该假设总在）。用户在同步页填过就复用。
+    let usePw = (S.syncPw || (($('#sync-pw') || {}).value) || localStorage.getItem('zw_sync_pw') || '');
+    if (!usePw) {
+      const typed = await askText({
+        title: '导出需要主密码',
+        label: '主密码',
+        password: true,
+        placeholder: '与同步用的是同一个主密码',
+        hint: '导出包用它加密，导入时必须输入同一个。本次只在内存里用，不写 localStorage。',
+        okLabel: '导出',
+      });
+      if (typed === null) { if (btn) btn.classList.remove('loading'); return; }
+      usePw = typed.trim();
+      if (usePw) S.syncPw = usePw;   // 本次会话内复用，别让用户反复输
+    }
+    const resp = await api('POST', `/api/v1/profiles/${encodeURIComponent(id)}/export`,
+      usePw ? { password: usePw } : {}, { raw: true });
     const blob = await resp.blob();
     const fname = pickFilename(resp, `${p.name || 'profile'}.zwp`);
     downloadBlob(blob, fname);

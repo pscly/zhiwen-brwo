@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   132 项单元测试（含真起 hub 的同步集成测试）
+tests/   136 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由 `fingerprint-chromium`（`--fingerprint=<种子>`）或系统 Chrome 提供。
@@ -87,11 +87,11 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 
 **提交前必须做**：
 ```bash
-.venv/bin/python -m pytest tests -q          # 132 passed
+.venv/bin/python -m pytest tests -q          # 136 passed
 .venv/bin/python scripts/e2e-check.py        # 63 项全过（真开浏览器）
 .venv/bin/python scripts/e2e-cross-machine.py # 30 项（两台真机器 + hub，可选）
 node scripts/gateway-check.cjs               # 20 项（Playwright 通过网关接管）
-node scripts/ui-check.cjs                    # 16 项（控制台逐视图点一遍）
+node scripts/ui-check.cjs                    # 21 项（控制台逐视图点一遍）
 ```
 
 ---
@@ -109,7 +109,7 @@ node scripts/ui-check.cjs                    # 16 项（控制台逐视图点一
 ## 七、当前状态与待办
 
 **已验证**（2026-11-16，Linux + 两台真机器）：
-- 132 单元测试、63 项单机端到端、30 项跨机端到端、20 项网关接管、16 项控制台交互 —— 全绿
+- 136 单元测试、63 项单机端到端、30 项跨机端到端、20 项网关接管、21 项控制台交互 —— 全绿
 - hub 0.2.0 在 3.5 的 Docker 里跑着；3.5 上另有一个 core（8731）参与跨机验收
 - 详见 `docs/09-交接说明.md`
 

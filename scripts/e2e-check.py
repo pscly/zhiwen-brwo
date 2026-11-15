@@ -276,7 +276,11 @@ def main() -> int:
 
     print("== 10. 导出 / 导入 ==")
     if PW:
-        r = call_raw("POST", f"/api/v1/profiles/{pid}/export")
+        # 密码显式放进 body：服务端进程不一定有 ZW_SYNC_PASSWORD，
+        # 一个自检脚本不该因为"服务端环境变量没设"而失败。
+        r = call_raw("POST", f"/api/v1/profiles/{pid}/export",
+                     content=json.dumps({"password": PW}).encode(),
+                     headers={"Content-Type": "application/json"})
         exported = r.status_code == 200 and r.content[:4] == b"ZWBN"
         check("导出 .zwp", exported, f"HTTP {r.status_code} {r.text[:200] if not exported else ''}")
         if exported:

@@ -221,6 +221,12 @@ class BatchBody(BaseModel):
     concurrency: int = 3
 
 
+class ExportBody(BaseModel):
+    """导出时可显式带主密码（不填就用查询串或服务端环境变量）。"""
+
+    password: str | None = None
+
+
 class ProxyBody(BaseModel):
     label: str = ""
     scheme: str = "http"
@@ -805,8 +811,22 @@ def build_app() -> FastAPI:
         return ok(out)
 
     @app.post(f"{API_PREFIX}/profiles/{{ref}}/export", tags=["环境"], dependencies=[Auth], summary="导出环境为单文件")
-    def profiles_export(ref: str, password: str | None = Query(default=None)) -> Response:
-        blob, filename = mgr.export_profile(ref, password=password)
+    def profiles_export(
+        ref: str,
+        body: ExportBody | None = None,
+        password: str | None = Query(default=None),
+    ) -> Response:
+        """导出加密单文件。
+
+        主密码三个来源（优先级从高到低）：JSON body 的 password、查询串的 password、
+        服务端环境变量 ZW_SYNC_PASSWORD。**三种都收** 是有意的：
+        - 浏览器里点「导出」时前端只能用 fetch 带 JSON body（它不好加查询串）；
+        - curl / 脚本更喜欢 `?password=`；
+        - 而长期部署的人会把它放在 `.env` 里，不想每次都传。
+        只认其中一种就会让另外两种场景莫名其妙地报 PASSWORD_REQUIRED。
+        """
+        pw = (body.password if body and body.password else None) or password
+        blob, filename = mgr.export_profile(ref, password=pw)
         from urllib.parse import quote as _q
 
         return Response(

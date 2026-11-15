@@ -406,3 +406,33 @@ def test_cidr_guard(client, monkeypatch):
     # 白名单为空 = 不限制（这是默认行为，保留给"只在内网"的场景）
     monkeypatch.setattr(s, "allowed_cidrs", [])
     assert client.get("/api/v1/meta", headers=H).status_code == 200
+
+
+def test_export_accepts_password_in_body(client, monkeypatch):
+    """导出/导入的主密码三条来源都要认：body、查询串、服务端环境变量。
+
+    只认其中一种会让另外两种场景莫名其妙地报 PASSWORD_REQUIRED ——
+    浏览器里点导出只能带 body，curl 更喜欢查询串，长期部署会放 .env。
+    """
+    from zw_core.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "sync_password", "")   # 服务端没配
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "exp-pw"}).json()["data"]
+
+    r = client.post(f"/api/v1/profiles/{p['id']}/export", headers=H, json={"password": "pw-from-body"})
+    assert r.status_code == 200 and r.content[:4] == b"ZWBN", r.text[:200]
+
+    r2 = client.post(f"/api/v1/profiles/{p['id']}/export?password=pw-from-query", headers=H)
+    assert r2.status_code == 200 and r2.content[:4] == b"ZWBN", r2.text[:200]
+
+    # 都没给 → 明确报缺密码，而不是 500
+    r3 = client.post(f"/api/v1/profiles/{p['id']}/export", headers=H)
+    assert r3.status_code == 400 and r3.json()["code"] == "PASSWORD_REQUIRED"
+
+    # 配置在服务端也可以
+    monkeypatch.setattr(s, "sync_password", "pw-from-env")
+    r4 = client.post(f"/api/v1/profiles/{p['id']}/export", headers=H)
+    assert r4.status_code == 200
+
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)

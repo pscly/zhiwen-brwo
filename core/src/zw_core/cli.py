@@ -287,7 +287,14 @@ def cmd_profile_probe(args: argparse.Namespace) -> None:
 
 
 def cmd_profile_export(args: argparse.Namespace) -> None:
-    resp = _call_raw("POST", f"/api/v1/profiles/{args.ref}/export")
+    body: bytes | None = None
+    headers: dict[str, str] = {}
+    pw = getattr(args, "password", None)
+    if pw:
+        # 显式给密码：服务端不一定配了 ZW_SYNC_PASSWORD，用户也不该被迫去改服务配置
+        body = json.dumps({"password": pw}).encode()
+        headers["Content-Type"] = "application/json"
+    resp = _call_raw("POST", f"/api/v1/profiles/{args.ref}/export", content=body, headers=headers)
     if resp.status_code >= 400:
         print(f"失败：{resp.text[:300]}", file=sys.stderr)
         raise SystemExit(1)
@@ -302,7 +309,13 @@ def cmd_profile_export(args: argparse.Namespace) -> None:
 def cmd_profile_import(args: argparse.Namespace) -> None:
     with open(args.file, "rb") as fh:
         raw = fh.read()
-    resp = _call_raw("POST", "/api/v1/profiles/import", content=raw, headers={"Content-Type": "application/octet-stream"})
+    path = "/api/v1/profiles/import"
+    pw = getattr(args, "password", None)
+    if pw:
+        from urllib.parse import quote
+
+        path += f"?password={quote(pw)}"
+    resp = _call_raw("POST", path, content=raw, headers={"Content-Type": "application/octet-stream"})
     data = resp.json()
     if not data.get("ok"):
         print(f"失败 [{data.get('code')}] {data.get('message')}", file=sys.stderr)
@@ -619,6 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
             s1.add_argument("--confirm", required=True, help="把环境名写一遍表示确认")
         if name == "export":
             s1.add_argument("--out", help="输出文件名（默认按环境名生成）")
+            s1.add_argument("--password", help="导出用的主密码（不给则用服务端的 ZW_SYNC_PASSWORD）")
         if name == "bind-ext":
             s1.add_argument("slug")
             s1.add_argument("--version")
@@ -629,6 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s1 = psub.add_parser("import", help="从导出包导入环境")
     s1.add_argument("file", help=".zwp 文件路径")
+    s1.add_argument("--password", help="导入用的主密码（不给则用服务端的 ZW_SYNC_PASSWORD）")
     j(s1)
     s1.set_defaults(func=cmd_profile_import)
 

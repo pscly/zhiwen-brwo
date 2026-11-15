@@ -185,15 +185,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (expProfile) {
     const decoded = await page.evaluate(async ({ core, id }) => {
       const t = localStorage.getItem('zw_token') || '';
+      // 密码走 body（前端导出的实际路径）；服务端不一定配了 ZW_SYNC_PASSWORD
       const r = await fetch(`${core}/api/v1/profiles/${id}/export`, {
-        method: 'POST', headers: { Authorization: 'Bearer ' + t },
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: 'ui-check-pass-2026' }),
       });
       const raw = r.headers.get('X-ZW-Filename') || '';
       let name = '';
       try { name = decodeURIComponent(raw); } catch (_) { name = raw; }
-      return { raw, name, hasChinese: /[\u4e00-\u9fa5]/.test(name) };
+      return { raw, name, status: r.status, hasChinese: /[\u4e00-\u9fa5]/.test(name) };
     }, { core: B, id: expProfile });
     check('导出文件名能解出中文', decoded.hasChinese, JSON.stringify(decoded));
+    check('导出 body 里带主密码可用', decoded.status === 200, JSON.stringify(decoded));
     await fetch(`${B}/api/v1/profiles/${expProfile}?purge=true`, { method: 'DELETE', headers: H }).catch(() => {});
   } else {
     skipExport = true;
