@@ -749,6 +749,15 @@ def build_app() -> FastAPI:
         checks.append({"项": "并发余量", "ok": st["running"] < s.max_running, "详情": f"{st['running']}/{s.max_running}"})
         return ok({"checks": checks, "all_ok": all(c["ok"] for c in checks), "stats": st})
 
+    @app.post(f"{API_PREFIX}/maintenance/reap-orphans", tags=["运维"], dependencies=[Auth], summary="清理孤儿浏览器进程")
+    def maintenance_reap() -> dict[str, Any]:
+        """清掉"数据库里没有对应环境、或者环境状态不是 running"却还在跑的浏览器。
+
+        典型来源：core 被 kill -9、数据库被重置、手动删了环境目录。
+        这些进程会一直占内存和端口，还会让同名环境下次启动撞 SingletonLock。
+        """
+        return ok(mgr.reap_orphan_browsers())
+
     @app.post(f"{API_PREFIX}/maintenance/cleanup", tags=["运维"], dependencies=[Auth], summary="清理 staging 与备份")
     def maintenance_cleanup() -> dict[str, Any]:
         s = get_settings()

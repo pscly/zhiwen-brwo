@@ -398,3 +398,83 @@ def dir_size(path: Path) -> int:
     if not path.exists():
         return 0
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+# ── 孤儿浏览器清理 ────────────────────────────────────────
+# 场景：core 被 kill -9 / 数据库被重置 / 手动删了环境目录，
+# 但浏览器进程还在跑。它会一直占内存和一个调试端口，而且下次同名环境
+# 起来时会撞 SingletonLock。启动时清一遍。
+def _extract_udd(cmdline: str) -> str | None:
+    """从命令行里取出 --user-data-dir 的值。没有则返回 None。"""
+    for token in cmdline.split("\x00") if "\x00" in cmdline else cmdline.split():
+        if token.startswith("--user-data-dir="):
+            return token.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+def _is_child_process(cmdline: str) -> bool:
+    """Chromium 的子进程（zygote/gpu/renderer）也带 --user-data-dir，但它们不是根进程。"""
+    return "--type=" in cmdline
+
+
+def list_browser_processes(profiles_root: Path) -> list[dict[str, Any]]:
+    """列出所有以我们的目录为 user-data-dir 的**根**浏览器进程。"""
+    root = str(Path(profiles_root).resolve())
+    found: list[dict[str, Any]] = []
+
+    if IS_WIN:
+        try:
+            ps = (
+                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='chromium.exe'\" "
+                "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+            )
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True, text=True, timeout=20,
+            )
+            data = json.loads(out.stdout or "[]")
+            if isinstance(data, dict):
+                data = [data]
+            for item in data:
+                cmd = item.get("CommandLine") or ""
+                if _is_child_process(cmd):
+                    continue
+                udd = _extract_udd(cmd)
+                if udd and str(Path(udd).resolve()).startswith(root):
+                    found.append({"pid": int(item["ProcessId"]), "udd": udd, "cmdline": cmd})
+        except Exception:
+            return []
+        return found
+
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except (OSError, PermissionError):
+            continue
+        if not raw:
+            continue
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+        if _is_child_process(cmdline):
+            continue
+        udd = _extract_udd(cmdline)
+        if udd and str(Path(udd).resolve()).startswith(root):
+            found.append({"pid": int(entry.name), "udd": udd, "cmdline": cmdline})
+    return found
+
+
+def kill_browser_processes(procs: list[dict[str, Any]], grace: int = 3) -> list[int]:
+    """按 pid 干掉（含子进程树）。返回实际处理过的 pid。"""
+    handled: list[int] = []
+    for p in procs:
+        pid = int(p["pid"])
+        try:
+            terminate(pid, grace=grace)
+            handled.append(pid)
+        except Exception:
+            pass
+    return handled

@@ -521,9 +521,56 @@ def rebuild_gateway_routes() -> dict[str, Any]:
         else:
             _update(p["id"], state="crashed", last_error="core 重启时发现调试端口已不可达")
             crashed.append(p["name"])
-    if restored or crashed or reaped:
-        logger.info("网关路由重建：恢复 %s，判定崩溃 %s，清理死租约 %s", restored, crashed, reaped)
-    return {"restored": restored, "crashed": crashed, "reaped_leases": reaped}
+    # 最后清一遍孤儿浏览器（数据库重置、手删目录、core 被 kill 都会留下）
+    orphans: dict[str, Any] = {"orphans": 0, "killed": []}
+    try:
+        orphans = reap_orphan_browsers()
+    except Exception as exc:
+        logger.error("清理孤儿浏览器失败：%s", exc)
+
+    if restored or crashed or reaped or orphans["killed"]:
+        logger.info(
+            "启动重建：恢复 %s，崩溃 %s，清死租约 %s，清孤儿浏览器 %s 个",
+            restored, crashed, reaped, len(orphans["killed"]),
+        )
+    return {"restored": restored, "crashed": crashed, "reaped_leases": reaped, "orphans": orphans}
+
+
+def decide_orphans(procs: list[dict[str, Any]], known: dict[str, str]) -> list[dict[str, Any]]:
+    """判断哪些浏览器进程是"孤儿"。
+
+    `known` 是 {环境id: state}。规则：
+    - 环境在库里且 state == running → **不是孤儿**（控制面重启不该杀正在用的浏览器）
+    - 环境在库里但 state 不是 running → 孤儿（崩了/被手动改成 stopped 但进程还在）
+    - 环境根本不在库里（数据库被重置/目录被手删）→ 孤儿
+    """
+    from pathlib import Path as _P
+
+    profiles_root = _P(get_settings().profiles_dir).resolve()
+    out: list[dict[str, Any]] = []
+    for proc in procs:
+        try:
+            rel = _P(proc["udd"]).resolve().relative_to(profiles_root)
+            pid_id = rel.parts[0]
+        except (ValueError, KeyError, OSError):
+            continue
+        state = known.get(pid_id)
+        if state == "running":
+            continue
+        out.append({**proc, "profile_id": pid_id, "reason": "环境不在库里" if state is None else f"环境状态是 {state}"})
+    return out
+
+
+def reap_orphan_browsers() -> dict[str, Any]:
+    """清理孤儿浏览器进程。启动时自动跑，也可以手动 POST /maintenance/reap-orphans。"""
+    known = {p["id"]: p["state"] for p in list_profiles()}
+    procs = engines.list_browser_processes(get_settings().profiles_dir)
+    orphans = decide_orphans(procs, known)
+    killed = engines.kill_browser_processes(orphans) if orphans else []
+    if killed:
+        logger.warning("清理孤儿浏览器 %s 个：%s", len(killed), [o["pid"] for o in orphans])
+        get_db().audit("maintenance.reap_orphans", detail={"killed": killed, "details": orphans})
+    return {"scanned": len(procs), "orphans": len(orphans), "killed": killed, "details": orphans}
 
 
 def health_tick() -> list[dict[str, Any]]:
