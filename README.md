@@ -86,6 +86,20 @@ Chromium 的 `--proxy-server` **不支持用户名密码**：写成 `http://user
 
 知纹会自动为带凭据的代理生成一个 MV3 认证扩展（挂 `chrome.proxy` + `onAuthRequired`），和用户扩展一起加载。凭据不会进命令行、不会回显到接口响应、也不会写进日志。
 
+## 界面
+
+控制台是单文件、零构建、无外部依赖（内网离线环境要求），深色/浅色双主题。
+
+| 总览 | 环境列表 |
+|---|---|
+| ![总览（深色）](docs/screenshots/01-总览-深色.png) | ![环境（深色）](docs/screenshots/02-环境-深色.png) |
+| **指纹体检**（详情抽屉里读真机指纹并指出自相矛盾处） | **数据**（cookie / localStorage / 页面操作） |
+| ![指纹体检](docs/screenshots/10-指纹体检.png) | ![数据](docs/screenshots/03-数据-深色.png) |
+
+其余截图在 [docs/screenshots/](docs/screenshots/)：总览浅色、环境浅色、新建表单、同步、运维。
+
+---
+
 ## 已验证 / 未验证
 
 > 下表是**真跑过**的结果。测试环境：Ubuntu 24.04 / 14 核 / 28G / 无 GPU，Chromium 150；
