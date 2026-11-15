@@ -1,7 +1,13 @@
 """核心配置。全部来自环境变量 / .env 文件，便于 Docker 与裸装两种部署。
 
 Windows 上无需设置任何变量即可跑起来（有默认值），这是刻意的：
-用户明天拿到手，双击/一条命令就应该能起。
+用户拿到手，双击/一条命令就应该能起。
+
+## 一条约定
+
+**配置只在这里读，别的地方一律走 `get_settings()`。** 因为 settings 是单例，
+测试里靠 `reset_settings()` 换掉整套环境变量；谁绕过它直接读 os.environ，
+测试之间就会串味（这个坑在 0.1.0 里踩过）。
 """
 
 from __future__ import annotations
@@ -68,6 +74,8 @@ class Settings:
     )
     # 是否允许以 root 运行（仅 Linux 容器内需要）
     allow_root: bool = field(default_factory=lambda: _env_bool("ZW_ALLOW_ROOT", False))
+    # 找不到内核时是否允许"自动下载"（默认关闭：不想替用户从网络上拉二进制）
+    engine_autofetch: bool = field(default_factory=lambda: _env_bool("ZW_ENGINE_AUTOFETCH", False))
 
     # ── 端口池 ──────────────────────────────────────────
     port_pool_start: int = field(default_factory=lambda: _env_int("ZW_PORT_POOL_START", 21001))
@@ -78,7 +86,11 @@ class Settings:
     launch_timeout: int = field(default_factory=lambda: _env_int("ZW_LAUNCH_TIMEOUT", 45))
     stop_grace: int = field(default_factory=lambda: _env_int("ZW_STOP_GRACE", 6))
     health_interval: int = field(default_factory=lambda: _env_int("ZW_HEALTH_INTERVAL", 15))
-    idle_timeout: int = field(default_factory=lambda: _env_int("ZW_IDLE_TIMEOUT", 0))  # 0 = 不自动回收
+    # 空闲回收：某环境连续多少秒没有 CDP 连接就自动停掉。0 = 不回收
+    idle_timeout: int = field(default_factory=lambda: _env_int("ZW_IDLE_TIMEOUT", 0))
+    # 崩溃自动重启的最大连续次数与退避基数（防崩溃循环）
+    restart_max_attempts: int = field(default_factory=lambda: _env_int("ZW_RESTART_MAX_ATTEMPTS", 3))
+    restart_backoff: float = field(default_factory=lambda: float(_env("ZW_RESTART_BACKOFF") or 5.0))
 
     # ── 网关 ────────────────────────────────────────────
     gateway_enabled: bool = field(default_factory=lambda: _env_bool("ZW_GATEWAY_ENABLED", True))
@@ -87,11 +99,14 @@ class Settings:
     cdp_max_conn_per_profile: int = field(default_factory=lambda: _env_int("ZW_CDP_MAX_CONN", 8))
 
     # ── 网络访问控制 ────────────────────────────────────
+    # 逗号分隔的 CIDR。留空 = 不限制。想只给局域网用就写 127.0.0.1/32,192.168.3.0/24
     allowed_cidrs: list[str] = field(
-        default_factory=lambda: [c.strip() for c in _env("ZW_ALLOWED_CIDRS", "127.0.0.1/32").split(",") if c.strip()]
+        default_factory=lambda: [c.strip() for c in _env("ZW_ALLOWED_CIDRS", "").split(",") if c.strip()]
     )
     # 绑 0.0.0.0 时是否强制要求 token
     force_token_on_public: bool = field(default_factory=lambda: _env_bool("ZW_FORCE_TOKEN_ON_PUBLIC", True))
+    # 是否信任反向代理传来的 X-Forwarded-For（放在 nginx 后面时才开）
+    trust_proxy_headers: bool = field(default_factory=lambda: _env_bool("ZW_TRUST_PROXY_HEADERS", False))
 
     # ── 同步 ────────────────────────────────────────────
     hub_url: str = field(default_factory=lambda: _env("ZW_HUB_URL", ""))
@@ -99,6 +114,8 @@ class Settings:
     # 同步主密码：不落盘，只从环境变量或交互式输入
     sync_password: str = field(default_factory=lambda: _env("ZW_SYNC_PASSWORD", ""))
     sync_enabled: bool = field(default_factory=lambda: _env_bool("ZW_SYNC_ENABLED", True))
+    # 跨机推送时单个环境的体积上限（超过就拒绝，避免把 hub 撑爆）
+    sync_max_bundle_bytes: int = field(default_factory=lambda: _env_int("ZW_SYNC_MAX_BUNDLE_BYTES", 128 * 1024 * 1024))
 
     # ── 日志 ────────────────────────────────────────────
     log_level: str = field(default_factory=lambda: _env("ZW_LOG_LEVEL", "INFO").upper())
@@ -111,6 +128,7 @@ class Settings:
     ext_dir: Path = field(default=Path("."))
     log_dir: Path = field(default=Path("."))
     staging_dir: Path = field(default=Path("."))
+    runtime_dir: Path = field(default=Path("."))
 
     def resolve(self) -> "Settings":
         self.root = Path(self.root).expanduser().resolve()
@@ -119,10 +137,15 @@ class Settings:
         self.ext_dir = self.root / "extensions"
         self.log_dir = self.root / "logs"
         self.staging_dir = self.root / "staging"
+        # 运行时生成的辅助文件（代理认证扩展等），与用户的扩展库分开
+        self.runtime_dir = self.root / "runtime"
         if not self.engine_dir:
             self.engine_dir = self.root / "engines"
         self.engine_dir = Path(self.engine_dir).expanduser().resolve()
-        for d in (self.root, self.profiles_dir, self.ext_dir, self.log_dir, self.staging_dir, self.engine_dir):
+        for d in (
+            self.root, self.profiles_dir, self.ext_dir, self.log_dir,
+            self.staging_dir, self.engine_dir, self.runtime_dir,
+        ):
             Path(d).mkdir(parents=True, exist_ok=True)
 
         if self.port_pool_end <= self.port_pool_start:
@@ -142,11 +165,34 @@ class Settings:
 
     @property
     def gateway_public_base(self) -> str:
-        """对外可访问的网关地址（含协议与端口）。"""
+        """对外可访问的网关地址（含协议与端口）。
+
+        注意：这是**给客户端用**的地址。绑 0.0.0.0 时不能把自己写成 0.0.0.0，
+        所以优先用 ZW_GATEWAY_PUBLIC_BASE，其次用主机名解析出的局域网地址，
+        最后才退回回环（只有本机可用，但这种情况下客户端本来也只在本机）。
+        """
         if self.gw_public_base:
             return self.gw_public_base.rstrip("/")
-        host = "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
-        return f"http://{host}:{self.port}"
+        if self.host in ("0.0.0.0", "::"):
+            return f"http://{_lan_ip()}:{self.port}"
+        return f"http://{self.host}:{self.port}"
+
+
+def _lan_ip() -> str:
+    """探测本机在局域网里的可用地址（不会真的发包）。"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.settimeout(0.2)
+            sk.connect(("192.168.3.1", 9))
+            ip = sk.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "127.0.0.1"
 
 
 _settings: Settings | None = None

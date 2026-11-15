@@ -1,0 +1,43 @@
+知纹在 Windows 上的额外准备事项
+================================
+
+1) Python 3.11+
+   https://www.python.org/downloads/windows/
+   安装时勾选 "Add python.exe to PATH"。
+
+2) 浏览器内核（二选一）
+   A. 系统 Chrome —— 最省事，但没有 --fingerprint 支持，
+      多个环境之间只有 cookie 隔离，指纹是同一台机器。
+   B. fingerprint-chromium —— 推荐。同一个种子 = 同一台"设备"。
+
+      下载：https://github.com/adryfish/fingerprint-chromium/releases
+      解压到：%LOCALAPPDATA%\zhiwen\engines\
+      程序会自动在这个目录下递归找 chrome.exe。
+      国内直连 GitHub 可能超时，可以用代理或网盘。
+
+      杀毒软件可能报这个未签名构建，把该目录加白名单即可。
+
+3) 端口池
+   Windows 会把一段端口预留给 Hyper-V / WSL。如果 21001 在里面，
+   netstat 会显示端口不可用，启动环境时报 PORT_EXHAUSTED 或
+   PORT_MISMATCH。用这条命令看保留段：
+       netsh int ipv4 show excludedportrange protocol=tcp
+   然后在 .env 里改：
+       ZW_PORT_POOL_START=31001
+       ZW_PORT_POOL_END=31100
+
+4) 防火墙
+   如果要在**另一台电脑**上用这台机器的 CDP 网关，需要放行 8730：
+       netsh advfirewall firewall add rule name="zhiwen" dir=in action=allow protocol=TCP localport=8730
+   只在本机用则不需要。
+
+5) 中文路径
+   数据目录默认在 %LOCALAPPDATA%\zhiwen，没问题。
+   但不要把项目放在包含中文或空格的路径下（例如 C:\用户\张三\...），
+   某些内核参数解析会出问题。用 C:\dev\zhiwen_brwo 这种纯英文路径最稳。
+
+6) 开机自启（可选）
+   本程序不带服务注册。想开机自启可以用任务计划程序：
+     任务计划程序 → 创建任务 → 触发器「登录时」→
+     操作「启动程序」→ 程序填 scripts\windows\启动.cmd
+   或者用 nssm 把它注册成真正的 Windows 服务。

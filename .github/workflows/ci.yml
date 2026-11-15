@@ -15,11 +15,52 @@ jobs:
         run: |
           uv venv .venv
           uv pip install --python .venv/bin/python -e ./core -e ./hub
-          uv pip install --python .venv/bin/python pytest
+          uv pip install --python .venv/bin/python pytest pytest-asyncio
       - name: 单元测试
+        # 含真起 hub 子进程的同步集成测试，不需要浏览器也不花钱
         run: .venv/bin/python -m pytest tests -q
-      - name: hub 冒烟
+      - name: hub 冒烟（真进程）
         run: |
           ZW_DATA_DIR=/tmp/hub ZW_HUB_PORT=8710 .venv/bin/python -m zw_hub.main &
-          sleep 4
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8710/healthz > /dev/null; then break; fi
+            sleep 1
+          done
           curl -fsS http://127.0.0.1:8710/healthz
+          curl -fsS http://127.0.0.1:8710/readyz
+      - name: 检查控制台没有语法错误
+        run: |
+          python - <<'PY'
+          import re, pathlib
+          html = pathlib.Path("core/src/zw_core/web/index.html").read_text(encoding="utf-8")
+          blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+          assert blocks, "控制台里没有找到 <script>"
+          pathlib.Path("/tmp/ui.js").write_text("\n".join(blocks), encoding="utf-8")
+          print(f"提取 {len(blocks)} 个 script 块，共 {sum(len(b) for b in blocks)} 字符")
+          # 基本健全性：不应该引用任何外部资源（内网离线环境要求）
+          for bad in ("http://cdn", "https://cdn", "unpkg.com", "jsdelivr", "googleapis"):
+              assert bad not in html, f"控制台引用了外部资源：{bad}"
+          print("没有外部依赖 ✓")
+          PY
+          node --check /tmp/ui.js
+          echo "控制台 JS 语法 OK"
+      - name: 检查文档里引用的脚本都存在
+        run: |
+          python - <<'PY'
+          import pathlib, re
+          missing = []
+          for doc in pathlib.Path("docs").glob("*.md"):
+              text = doc.read_text(encoding="utf-8")
+              for m in re.finditer(r"`(scripts/[\w\-./]+)`", text):
+                  p = pathlib.Path(m.group(1))
+                  if not p.exists():
+                      missing.append(f"{doc.name} -> {m.group(1)}")
+          readme = pathlib.Path("README.md").read_text(encoding="utf-8")
+          for m in re.finditer(r"`(scripts/[\w\-./]+)`", readme):
+              p = pathlib.Path(m.group(1))
+              if not p.exists():
+                  missing.append(f"README.md -> {m.group(1)}")
+          if missing:
+              raise SystemExit("文档引用了不存在的脚本：\n" + "\n".join(missing))
+          print("文档里的脚本引用都有效 ✓")
+          PY

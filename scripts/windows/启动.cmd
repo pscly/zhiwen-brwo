@@ -1,38 +1,38 @@
 @echo off
 chcp 65001 >nul
-setlocal
+setlocal EnableDelayedExpansion
 cd /d "%~dp0..\.."
+set "ROOT=%CD%"
+set "VPY=%ROOT%\.venv\Scripts\python.exe"
 
-echo ============================================
-echo   知纹 (zhiwen) 指纹浏览器机群 - 启动
-echo ============================================
-echo.
-
-if not exist ".venv\Scripts\python.exe" (
-  echo [错误] 没找到 .venv，请先在项目根目录执行：
-  echo    uv venv .venv
-  echo    uv pip install --python .venv\Scripts\python.exe -e .\core
+if not exist "%VPY%" (
+  echo [错误] 没有 .venv。请先双击 scripts\windows\部署.cmd
   pause
   exit /b 1
 )
 
-rem 令牌：优先用已存在的用户环境变量，否则提示输入（当前窗口有效）
-if "%ZW_ADMIN_TOKEN%"=="" (
-  set /p ZW_ADMIN_TOKEN=请设置访问令牌（留空则仅本机可用）:
-)
-if "%ZW_HUB_URL%"=="" (
-  set /p ZW_HUB_URL=同步中心地址（例如 http://192.168.3.5:8700，留空跳过）:
-)
-if not "%ZW_HUB_URL%"=="" if "%ZW_HUB_TOKEN%"=="" (
-  set /p ZW_HUB_TOKEN=同步中心令牌:
-)
-if not "%ZW_HUB_URL%"=="" if "%ZW_SYNC_PASSWORD%"=="" (
-  set /p ZW_SYNC_PASSWORD=同步主密码（千万别丢）:
+rem 读 .env（这是唯一的配置来源；不要在脚本里再硬编码密钥）
+if exist ".env" (
+  for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do (
+    if not "%%a"=="" if not "%%b"=="" set "%%a=%%b"
+  )
+) else (
+  echo [错误] 没有 .env。请先双击 scripts\windows\部署.cmd 生成它。
+  pause
+  exit /b 1
 )
 
+echo ============================================================
+echo   知纹 zhiwen ^- 启动
+echo ============================================================
+echo   控制台：http://127.0.0.1:8730
+echo   数据目录：%LOCALAPPDATA%\zhiwen    ^(可用 .env 里的 ZW_ROOT 改^)
+echo   关闭本窗口即停止服务。
+echo ============================================================
 echo.
-echo 正在启动…… 启动后打开 http://127.0.0.1:8730
-echo 关闭本窗口即停止服务。
+
+"%VPY%" -m zw_core.main
 echo.
-.venv\Scripts\python -m zw_core.main
+echo 服务已退出（退出码 %errorlevel%）。
+echo 如果是异常退出，日志在：%LOCALAPPDATA%\zhiwen\logs\
 pause

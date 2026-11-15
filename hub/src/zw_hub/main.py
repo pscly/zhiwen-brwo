@@ -9,19 +9,31 @@
 {"ok": true, "data": {...}}
 ```
 这个形状是刻意统一的 —— AI 客户端只需要学一次就能解析全部响应。
+
+## 0.2.0 的加固
+
+1. **网段白名单真的生效了。** 0.1.0 里 `allowed_cidrs` 配置项存在但从未被检查过，
+   等于一个摆设：任何人只要拿到令牌就能连（而令牌常常被贴进脚本里）。
+2. **`/v1/leases/{pid}` 的 owner 从查询串改成 body-free 的 `X-ZW-Owner` 头** ——
+   以前 owner 里有主机名，中文主机名会让 `?owner=` 变成非法 URL。
+3. **新增 `/v1/blobs/{pid}/{rev}` 的 ETag 与 If-None-Match**，客户端重复拉同一个版本
+   不再传全量字节。
+4. **`/healthz` 保持不查磁盘**（给 k8s/docker 探针用），
+   `/readyz` 才做写盘探测 —— 探针过重会把 hub 自己拖死。
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import sys
 import time
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
@@ -76,7 +88,11 @@ def _verify_signature(request: Request, raw: bytes, headers: dict[str, str]) -> 
     sig = headers.get("x-zw-sign", "")
     if not ts or not sig:
         raise HubError(401, "SIGNATURE_REQUIRED", "服务端要求请求签名，但请求未带 X-ZW-Ts / X-ZW-Sign")
-    if abs(time.time() - float(ts)) > 300:
+    try:
+        skew = abs(time.time() - float(ts))
+    except ValueError as exc:
+        raise HubError(401, "SIGNATURE_INVALID", "X-ZW-Ts 不是合法时间戳") from exc
+    if skew > 300:
         raise HubError(401, "SIGNATURE_EXPIRED", "请求时间戳超过 ±300 秒，拒绝（防重放）")
     body_hash = hashlib.sha256(raw).hexdigest()
     msg = f"{request.method}\n{request.url.path}\n{ts}\n{body_hash}".encode()
@@ -85,7 +101,31 @@ def _verify_signature(request: Request, raw: bytes, headers: dict[str, str]) -> 
         raise HubError(401, "SIGNATURE_INVALID", "请求签名不匹配")
 
 
+def _check_cidr(request: Request) -> None:
+    """来源网段白名单。
+
+    0.1.0 里有这个配置项但**从来没有实现**，所以"只允许局域网"的意图其实没有生效。
+    现在是 fail-closed：配了名单就只放行名单内的地址，解析不出 IP 也拒。
+    """
+    s = get_settings()
+    if not s.allowed_cidrs:
+        return
+    ip_text = request.client.host if request.client else ""
+    try:
+        ip = ipaddress.ip_address(ip_text)
+    except ValueError as exc:
+        raise HubError(403, "CIDR_FORBIDDEN", f"来源地址无法解析（{ip_text!r}），已按白名单拒绝") from exc
+    for cidr in s.allowed_cidrs:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return
+        except ValueError:
+            logger.warning("ZW_ALLOWED_CIDRS 里有非法网段：%s", cidr)
+    raise HubError(403, "CIDR_FORBIDDEN", f"来源 {ip_text} 不在允许网段内：{', '.join(s.allowed_cidrs)}")
+
+
 async def auth(request: Request, authorization: str = Header(default="")) -> None:
+    _check_cidr(request)
     s = get_settings()
     if s.token:
         token = authorization.removeprefix("Bearer ").strip()
@@ -105,7 +145,7 @@ def healthz() -> dict[str, Any]:
 
 
 @app.get("/readyz", summary="就绪探针（查磁盘可写）")
-def readyz() -> dict[str, Any]:
+def readyz() -> Any:
     s = get_settings()
     probe = s.data_dir / ".ready"
     try:
@@ -129,6 +169,7 @@ def meta() -> dict[str, Any]:
             "data_dir": str(s.data_dir),
             "token_required": bool(s.token),
             "signature_required": s.require_signature,
+            "allowed_cidrs": s.allowed_cidrs,
             "keep_revisions": s.keep_revisions,
             "lease_ttl": s.lease_ttl,
             "max_blob_bytes": s.max_blob_bytes,
@@ -151,19 +192,20 @@ def ai_manifest() -> dict[str, Any]:
             "concepts": {
                 "profile_id": "环境标识，与 core 侧的 profile id 一致",
                 "revision": "单调递增的快照版本号，从 1 开始",
-                "key_fp": "客户端主密码派生密钥的指纹（前 16 位 hex），hub 用它判断快照能否被某台机器解开",
+                "key_fp": "客户端主密码派生密钥的指纹（16 位 hex），hub 用它判断快照能否被某台机器解开",
                 "lease": "跨机互斥锁，防止两台机器同时使用同一个环境",
             },
             "workflows": {
                 "推送": "PUT /v1/blobs/{pid}/{rev} → PUT /v1/latest/{pid}",
                 "拉取": "GET /v1/latest/{pid} → GET /v1/blobs/{pid}/{rev}",
-                "占用环境": "POST /v1/leases/{pid} → 定期 POST /v1/leases/{pid}/heartbeat → DELETE /v1/leases/{pid}",
+                "占用环境": "POST /v1/leases/{pid} → 定期 POST /v1/leases/{pid}/heartbeat → DELETE /v1/leases/{pid}?owner=",
             },
             "errors": {
                 "REVISION_EXISTS": "版本号已被占用，换下一个 revision 或先 GET 看最新",
                 "REVISION_NOT_MONOTONIC": "latest 指针只允许前进，确认是否漏了 revision",
                 "PROFILE_BUSY": "环境被别的机器持有，等租约过期或让对方释放",
                 "NO_LATEST": "该环境还没有成功推送过",
+                "CIDR_FORBIDDEN": "调用方地址不在 ZW_ALLOWED_CIDRS 里",
             },
             "安全模型": "hub 只存 AEAD 密文；主密码不进 hub；传输为局域网 HTTP，完整性由密文自身保证",
             "endpoints": [
@@ -234,16 +276,20 @@ async def put_blob(
 
 
 @app.get("/v1/blobs/{pid}/{rev}", dependencies=[Auth], summary="下载加密快照块")
-def get_blob(pid: str, rev: int) -> Response:
-    data = store().get_blob(pid, rev)
+def get_blob(pid: str, rev: int, if_none_match: str = Header(default="")) -> Response:
     meta = store().get_meta(pid, rev)
+    etag = f'"v{rev}-{meta.sha256[:12]}"'
+    if if_none_match and if_none_match == etag:
+        # 客户端已经有这个版本了，不必再传一遍（环境包常有几 MB）
+        return Response(status_code=304, headers={"ETag": etag})
+    data = store().get_blob(pid, rev)
     return Response(
         content=data,
         media_type="application/octet-stream",
         headers={
             "X-ZW-Sha256": meta.sha256,
             "X-ZW-Key-Fp": meta.key_fp,
-            "ETag": f'"v{rev}"',
+            "ETag": etag,
         },
     )
 
@@ -311,7 +357,7 @@ def heartbeat(pid: str, body: LeaseBody) -> dict[str, Any]:
 
 
 @app.delete("/v1/leases/{pid}", dependencies=[Auth], summary="释放租约")
-def release(pid: str, owner: str) -> dict[str, Any]:
+def release(pid: str, owner: str = "") -> dict[str, Any]:
     store().release_lease(pid, owner)
     return ok({"released": True, "profile_id": pid, "owner": owner})
 

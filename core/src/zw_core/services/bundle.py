@@ -34,6 +34,12 @@ Chromium 解不开时不会说"密钥不可用"，它说"**损坏**"，然后把
 ```
 
 header 作为 AAD 参与认证 —— 防止有人改了 revision 或 seed 还让包"看起来合法"。
+
+## v0.2 的补充
+
+manifest 里多了一个 `profile` 字典，装着**环境自身的设置**（分组、标签、代理、
+扩展 slug、窗口尺寸、指纹参数……）。0.1.0 只搬了目录，导入到新机器后环境是"裸"的：
+代理丢了、扩展丢了、窗口尺寸回到默认 —— 用户得手动重建一遍。现在一并搬。
 """
 
 from __future__ import annotations
@@ -41,13 +47,11 @@ from __future__ import annotations
 import io
 import json
 import os
-import shutil
 import tarfile
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import zstandard as zstd
 
@@ -65,11 +69,16 @@ INCLUDE = [
     "Default/IndexedDB",
     "Default/Web Data",
     "Default/Preferences",
+    "Default/Secure Preferences",
     "Default/Bookmarks",
     "Default/Extension State",
+    "Default/Extensions",
     "Default/Local Extension Settings",
     "Default/Service Worker/Database",
-    "Default/Service Worker/ScriptCache",
+    "Default/Storage",
+    "Default/Session Storage",
+    "Default/Favicons",
+    "Default/History",
     "Local State",
 ]
 
@@ -80,12 +89,13 @@ SKIP_ALWAYS = [
     # 缓存
     "Cache", "Code Cache", "GPUCache", "ShaderCache", "GrShaderCache", "DawnCache",
     "DawnGraphiteCache", "DawnWebGPUCache", "download_cache", "CacheStorage",
-    "Default/Service Worker/CacheStorage",
+    "Default/Service Worker/CacheStorage", "Default/Service Worker/ScriptCache",
     # 崩溃与日志
     "Crashpad", "Safe Browsing", "CertificateRevocation",
     # Chromium 组件与词典
     "WasmTtsEngine", "OnDeviceHeadSuggestModel", "OptimizationHints", "ZxcvbnData",
     "hyphen-data", "WidevineCdm", "MEIPreload", "FileTypePolicies",
+    "component_crx_cache", "extensions_crx_cache", "GraphiteDawnCache",
 ]
 
 # 跨机时必须排除：OS 密钥加密，搬过去必挂（改用 cookies.json + CDP 写回）
@@ -94,12 +104,15 @@ SKIP_CROSS_MACHINE = [
     "Default/Network",
     "Default/Login Data",
     "Default/Login Data For Account",
+    "Local State",   # 里面装着 os_crypt 的加密密钥，跨机搬运会连带把"旧密钥"搬过去
 ]
 
 # 单目录体积上限（超出则跳过并在 manifest 里记 skipped）
 SIZE_LIMITS = {
     "Default/IndexedDB": 64 * 1024 * 1024,
     "Default/Service Worker": 32 * 1024 * 1024,
+    "Default/Extensions": 64 * 1024 * 1024,
+    "Default/Storage": 64 * 1024 * 1024,
 }
 
 
@@ -146,6 +159,7 @@ class Manifest:
     files: list[dict[str, Any]] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     cross_machine: bool = True
+    profile: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -163,6 +177,7 @@ class Manifest:
                 "files": self.files,
                 "skipped": self.skipped,
                 "cross_machine": self.cross_machine,
+                "profile": self.profile,
             },
             ensure_ascii=False,
             indent=2,
@@ -186,7 +201,7 @@ def is_excluded(rel: str, cross_machine: bool = True) -> bool:
     # 只排除 Chromium 自己写的调试日志与 sqlite 的回滚日志。
     if name.startswith("chrome_debug.log") or name.endswith(".bdic") or name.endswith("-journal"):
         return True
-    if name.endswith(".log") and "/Local Storage/" not in f"/{rel}":
+    if name.endswith(".log") and "/Local Storage/" not in f"/{rel}" and "/Session Storage/" not in f"/{rel}":
         return True
     return False
 
@@ -251,9 +266,10 @@ def pack(
     storage: dict[str, Any] | None = None,
     engine_version: str = "",
     source_node: str = "",
-    extensions: list[dict[str, str]] | None = None,
+    extensions: list[Any] | None = None,
     cross_machine: bool = True,
     kdf: crypto.KdfParams | None = None,
+    profile_meta: dict[str, Any] | None = None,
 ) -> tuple[bytes, Manifest]:
     """把一个环境的必要文件 + 明文 cookie 打成一个加密包。返回 (blob, manifest)。"""
     udd = Path(udd)
@@ -261,6 +277,13 @@ def pack(
         raise BundleError("PROFILE_DIR_MISSING", f"环境目录不存在：{udd}")
 
     files, skipped = collect_files(udd, cross_machine=cross_machine)
+
+    ext_list: list[dict[str, str]] = []
+    for e in extensions or []:
+        if isinstance(e, dict):
+            ext_list.append({str(k): str(v) for k, v in e.items()})
+        else:
+            ext_list.append({"slug": str(e), "path": ""})
 
     manifest = Manifest(
         profile_id=profile_id,
@@ -272,8 +295,9 @@ def pack(
         fingerprint=fingerprint,
         cookie_count=len(cookies or []),
         storage_origins=sorted((storage or {}).keys()),
-        extensions=extensions or [],
+        extensions=ext_list,
         cross_machine=cross_machine,
+        profile=profile_meta or {},
     )
 
     # tar → zstd → 加密
@@ -299,7 +323,8 @@ def pack(
             except (OSError, PermissionError) as exc:
                 skipped.append({"path": rel, "reason": f"读取失败：{exc}"})
 
-        # manifest 最后放，但它先算好（不含 files 的自引用问题：这里允许 hashes 后补）
+        # manifest 最后放，但它的内容在这里已经算好（files 已填满）
+        manifest.skipped = skipped
         manifest_bytes = manifest.to_json().encode()
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(manifest_bytes)
@@ -380,7 +405,7 @@ def unpack(
     if len(ct) != header.body_len:
         raise BundleError("BUNDLE_TRUNCATED", f"正文长度 {len(ct)} 与头部声明 {header.body_len} 不符")
     compressed = crypto.decrypt(key, header.nonce, ct, aad=header_prefix)
-    raw = zstd.ZstdDecompressor().decompress(compressed, max_output_size=512 * 1024 * 1024)
+    raw = zstd.ZstdDecompressor().decompress(compressed, max_output_size=1024 * 1024 * 1024)
 
     manifest: Manifest | None = None
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tar:
@@ -396,7 +421,7 @@ def unpack(
 
 
 def extract_to(raw_tar: bytes, dest: Path, udd_name: str = "udd") -> Path:
-    """把 tar 里的 `udd/**` 解到 `dest/`，`cookies.json` / `storage.json` / `manifest.json` 解到 `dest/` 根。
+    """把 tar 里的 `udd/**` 解到 `dest/udd`，`cookies.json` / `storage.json` / `manifest.json` 解到 `dest/` 根。
 
     安全：拒绝路径穿越（`..`）与绝对路径。
     """
@@ -420,10 +445,8 @@ def extract_to(raw_tar: bytes, dest: Path, udd_name: str = "udd") -> Path:
 def read_side_files(dest: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     """从解包目录读回 cookies / storage / manifest。"""
     dest = Path(dest)
-    cookies: list[dict[str, Any]] = []
-    storage: dict[str, Any] = {}
-    manifest: dict[str, Any] = {}
-    for name, target, default in (
+    out: dict[str, Any] = {"cookies": [], "storage": {}, "manifest": {}}
+    for name, key, default in (
         ("cookies.json", "cookies", []),
         ("storage.json", "storage", {}),
         ("manifest.json", "manifest", {}),
@@ -431,18 +454,10 @@ def read_side_files(dest: Path) -> tuple[list[dict[str, Any]], dict[str, Any], d
         p = dest / name
         if p.exists():
             try:
-                val = json.loads(p.read_text(encoding="utf-8"))
+                out[key] = json.loads(p.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
-                val = default
-        else:
-            val = default
-        if target == "cookies":
-            cookies = val
-        elif target == "storage":
-            storage = val
-        else:
-            manifest = val
-    return cookies, storage, manifest
+                out[key] = default
+    return out["cookies"], out["storage"], out["manifest"]
 
 
 def inspect_blob(blob: bytes) -> dict[str, Any]:

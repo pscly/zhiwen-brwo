@@ -1,6 +1,20 @@
 """程序入口。
 
 `python -m zw_core` / `zw serve` 启动 HTTP 服务；后台同时跑健康巡检。
+
+## 0.2.0 修的一处安全问题
+
+`/mcp` 以前**完全不鉴权**：任何能访问 8730 端口的人都能通过 MCP 直接
+读写 cookie、截图、甚至开浏览器。现在它和 REST 端点走同一套 Bearer 令牌，
+并同样受网段白名单约束。
+
+MCP 客户端（Claude Desktop / Codex 等）配置时把令牌写进 header 即可：
+```json
+{"mcpServers": {"zhiwen": {"url": "http://<host>:8730/mcp",
+  "headers": {"Authorization": "Bearer <ZW_ADMIN_TOKEN>"}}}}
+```
+如果客户端不支持自定义 header（有些只支持 command），用 stdio 方式 `zw mcp`
+——它在本机进程内直接跑，不需要令牌也没有网络暴露面。
 """
 
 from __future__ import annotations
@@ -9,13 +23,14 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from . import __version__
-from .api import build_app
+from .api import build_app, cidr_guard, require_auth
 from .config import get_settings
 from .logging_conf import setup_logging
 from .mcp_server import handle as mcp_handle
@@ -48,7 +63,7 @@ async def _health_loop() -> None:
 async def _lifespan(app: Any):
     """启动 / 关闭钩子（FastAPI 新版推荐写法，不用已废弃的 on_event）。"""
     s = get_settings()
-    logger.info("知纹核心启动 node=%s root=%s", s.node_id, s.root)
+    logger.info("知纹核心启动 node=%s root=%s port=%s", s.node_id, s.root, s.port)
     try:
         rebuilt = await asyncio.to_thread(mgr.rebuild_gateway_routes)
         if rebuilt["restored"] or rebuilt["crashed"]:
@@ -61,6 +76,7 @@ async def _lifespan(app: Any):
         logger.warning("没有找到浏览器内核：%s", eng.get("error", ""))
 
     app.state.health_task = asyncio.create_task(_health_loop())
+    started = time.time()
     try:
         yield
     finally:
@@ -69,6 +85,28 @@ async def _lifespan(app: Any):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        logger.info("知纹核心停止（运行 %.0f 秒）", time.time() - started)
+
+
+def _mcp_authorized(request: Request) -> JSONResponse | None:
+    """MCP 与 REST 共用同一套鉴权 + 网段白名单。失败时返回可直接吐给客户端的响应。"""
+    try:
+        require_auth(
+            authorization=request.headers.get("authorization", ""),
+            x_zw_token=request.headers.get("x-zw-token", ""),
+        )
+        cidr_guard(request)
+    except Exception as exc:
+        from .api import ApiError
+
+        if isinstance(exc, ApiError):
+            return JSONResponse(
+                status_code=exc.status,
+                content={"jsonrpc": "2.0", "id": None, "error": {"code": -32001, "message": f"[{exc.code}] {exc.message}"}},
+                headers={"WWW-Authenticate": "Bearer"} if exc.status == 401 else None,
+            )
+        raise
+    return None
 
 
 def create_app() -> Any:
@@ -79,6 +117,9 @@ def create_app() -> Any:
     # ── MCP over HTTP ────────────────────────────────────
     @app.post("/mcp", include_in_schema=False)
     async def mcp_http(request: Request) -> JSONResponse:
+        denied = _mcp_authorized(request)
+        if denied is not None:
+            return denied
         try:
             payload = await request.json()
         except json.JSONDecodeError:
@@ -89,19 +130,23 @@ def create_app() -> Any:
         if isinstance(payload, list):
             out = [r for r in (mcp_handle(p) for p in payload) if r is not None]
             return JSONResponse(content=out)
-        resp = mcp_handle(payload)
+        # 工具调用里会跑 CDP / 文件 IO，丢线程池，别阻塞事件循环
+        resp = await asyncio.to_thread(mcp_handle, payload)
         if resp is None:
             return JSONResponse(content={"jsonrpc": "2.0", "id": None, "result": {}})
         return JSONResponse(content=resp)
 
     @app.get("/mcp", include_in_schema=False)
-    def mcp_info() -> dict[str, Any]:
+    def mcp_info(request: Request) -> Any:
+        denied = _mcp_authorized(request)
+        if denied is not None:
+            return denied
         from .mcp_server import TOOLS
 
         return {
             "ok": True,
             "data": {
-                "说明": "MCP over HTTP。用 POST 发 JSON-RPC 2.0（initialize / tools/list / tools/call）。",
+                "说明": "MCP over HTTP。用 POST 发 JSON-RPC 2.0（initialize / tools/list / tools/call），需要 Bearer 令牌。",
                 "工具数": len(TOOLS),
                 "工具": [{"name": n, "description": d} for n, (d, _s, _f) in TOOLS.items()],
             },

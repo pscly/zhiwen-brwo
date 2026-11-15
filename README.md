@@ -3,6 +3,10 @@
 > 个人专用的**指纹浏览器机群管理器**：在一台机器上管理任意多个隔离的浏览器环境，把调试端口安全地给局域网用，并且能在多台电脑之间同步登录态。
 > 全中文文档 · AI 原生（MCP + 自描述端点）· Windows / Linux 双平台 · 局域网内零 HTTPS 依赖
 
+版本 **0.2.0**。相对 0.1.0 修了 20 多个真实缺陷、补了代理库/扩展库/分组/导出导入/指纹体检/网段白名单等能力，
+并把控制台重写成可用的一体化面板。逐条清单见 [CHANGELOG](CHANGELOG.md)，
+"哪些验过、哪些没验"见 [09-交接说明](docs/09-交接说明.md)。
+
 ---
 
 ## 这是什么
@@ -18,7 +22,8 @@
 │   · CDP 网关：把只绑 127.0.0.1 的调试端口      │
 │                安全暴露给局域网                │
 │   · 数据桥：cookie / localStorage 明文读写     │
-│   · AI 层：MCP 23 个工具 + 自描述端点          │
+│   · 代理：库 + 凭据注入（带密码的代理也能用）  │
+│   · AI 层：MCP 工具 + 自描述端点               │
 └──────────────────┬───────────────────────────┘
                    │ 局域网 HTTP（包体自带 AEAD 加密）
 ┌──────────────────▼───────────────────────────┐
@@ -31,14 +36,17 @@
 
 指纹本身由 **fingerprint-chromium**（BSD-3，C++ 引擎级指纹，`--fingerprint=<种子>` 可持久化）或你系统里已有的 Chrome/Chromium 负责 —— 知纹不重复造这个轮子。
 
-## 三个核心特性
+## 四个核心特性
 
 ### 1. 无限环境，一个入口
 
+控制台、CLI、MCP 三条路都能管同一批环境，改任何一边另一边立刻看到。
+
 ```bash
-zw profile create --name 小红一号
+zw profile create --name 小红一号 --timezone Asia/Shanghai --lang zh-CN
 zw profile start 小红一号
 zw profile cdp   小红一号
+zw profile probe 小红一号        # 指纹体检：读真机实际暴露的值并指出自相矛盾处
 ```
 
 每条命令都能加 `--json`，输出给脚本或 AI 直接消费。
@@ -46,8 +54,6 @@ zw profile cdp   小红一号
 ### 2. CDP 能出局域网（这是全行业的空白）
 
 Chrome 只肯监听 `127.0.0.1`，而且它的发现接口里**写死了回环地址**，所以"把 CDP 转发出去"不是加个 nginx 就行 —— 必须重写响应。
-
-知纹的网关做的正是这件事：
 
 ```bash
 # 在另一台机器上
@@ -72,45 +78,65 @@ const browser = await chromium.connectOverCDP(gateway_ws_url);
 目标机：校验密钥指纹（不一致立刻中止，一个字节都不落盘）→ 原子换目录 → 用 CDP 把 cookie 写回去
 ```
 
+包内还带**环境自身的设置**（代理、扩展、窗口、时区、分组、标签），所以换台机器拉过去就能直接用，不是一个"裸环境"。
+
+### 4. 带密码的代理真的能用
+
+Chromium 的 `--proxy-server` **不支持用户名密码**：写成 `http://user:pass@host:port` 时它会把整串当主机名，结果连不上而且报错完全看不出原因。
+
+知纹会自动为带凭据的代理生成一个 MV3 认证扩展（挂 `chrome.proxy` + `onAuthRequired`），和用户扩展一起加载。凭据不会进命令行、不会回显到接口响应、也不会写进日志。
+
 ## 已验证 / 未验证
 
-> 下表是**真跑过**的结果，不是设计意图。测试环境：Ubuntu 24.04 / 14 核 / 28G / 无 GPU，Chromium 150。
+> 下表是**真跑过**的结果。测试环境：Ubuntu 24.04 / 14 核 / 28G / 无 GPU，Chromium 150；
+> 跨机部分是 192.168.3.6 ↔ 192.168.3.5 两台真机器，中间过真实局域网。
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | ✅ **45 项**全通过 |
-| 端到端自检（16 项） | ✅ 全通过（见 `scripts/e2e-check.py`） |
-| **Web 控制台交互** | ✅ 真实浏览器点通：启动 / 取 CDP / 日志 / 停止，无前端报错（见 `scripts/ui-check.cjs`） |
-| 建环境 → 启动浏览器 → 拿 CDP | ✅ |
-| 网关地址重写 → Playwright `connectOverCDP` 接管 | ✅ 跨进程实测 |
-| cookie 写 / 读 / netscape 导出 | ✅ |
-| 推到 hub（真实网络上的 3.5） | ✅ |
-| 另一台机器拉取 → **自动导入** → cookie 真的还原 | ✅ |
-| 错主密码必须在落盘前被拦 | ✅ 返回 `412 KEY_FINGERPRINT_MISMATCH` |
-| MCP 工具清单 + 调用 | ✅ 23 个工具 |
-| 租约残留与令牌堆积 | ✅ 已修并加回归测试（详见 `docs/08` §9.1–9.2） |
-| 孤儿浏览器进程 | ✅ 启动时自动清理，绝不误杀 running 的（`docs/08` §9.3） |
-| **Windows 上的完整验证** | ⬜ 待你在 Windows 上跑（见 [交接说明](docs/09-交接说明.md)） |
-| **指纹能否过 browserscan** | ⬜ 未验证。无 GPU 的 Linux 上 WebGL 拿不到，必须到有显卡的 Windows 上测 |
+| 单元测试 | ✅ **132 项**全通过（`pytest tests -q`） |
+| 单机全能力自检 | ✅ **63 项**通过、0 失败、3 项按环境跳过（`scripts/e2e-check.py`） |
+| 跨机端到端（两台真机器 + 真 hub） | ✅ **30 项**全通过（`scripts/e2e-cross-machine.py`） |
+| 网关接管（Playwright over CDP） | ✅ **20 项**全通过（`scripts/gateway-check.cjs`） |
+| Web 控制台 | ✅ 七个视图 + 新建表单 + 详情抽屉，深色/浅色两套主题，真实浏览器点通、console 零报错 |
+| 建环境 → 启动浏览器 → 拿 CDP → 地址重写 | ✅ |
+| cookie 写 / 读 / netscape 导出 / 清空 | ✅ |
+| localStorage 写 / 读（在专属管理页里，不劫持用户页面） | ✅ |
+| 页面导航 / 可见文字 / 执行 JS / 截图 | ✅ |
+| 推到 hub（真实网络上的 3.5）→ 另一台机器拉取 → 自动导入 → cookie 真的还原 | ✅ |
+| 跨机搬运环境设置（代理/窗口/时区/分组/种子） | ✅ |
+| 错主密码必须在落盘前被拦 | ✅ 返回 `412 KEY_FINGERPRINT_MISMATCH`，本地不留半成品 |
+| 导出 `.zwp` → 删除 → 导入还原 | ✅ |
+| 代理库增删查 + 出口检测 + 凭据不泄漏 | ✅ |
+| 扩展库安装/绑定/解绑/删除 + 被绑定时的保护 | ✅ |
+| 带凭据代理走认证扩展 | ⚠️ 扩展生成与注入路径已验证；**真实代理的认证握手未实测**（本机没有可用代理） |
+| MCP 工具清单 + 调用 + 鉴权 | ✅ |
+| **Windows 实机整体跑通** | ⬜ **未验证**。代码路径已按 Windows 分支单测（`test_windows_parity.py`），但没在真 Windows 上跑过 |
+| 指纹能否过 browserscan | ⬜ 未验证。无 GPU 的 Linux 上 WebGL 拿不到真实显卡，必须到有显卡的 Windows 上测 |
+| 指纹种子的一致性（同种子两次启动是否同指纹） | ⬜ 未验证。当前测试机上的 Chromium 不是 fingerprint-chromium，`--fingerprint` 被忽略 |
 
 ## 五分钟上手
 
-### Linux（已验证）
+### Windows（推荐路径）
+
+```powershell
+git clone https://github.com/pscly/zhiwen-brwo.git C:\dev\zhiwen_brwo
+cd C:\dev\zhiwen_brwo
+.\scripts\windows\部署.cmd
+```
+
+它会建虚拟环境、装依赖、**随机生成**访问令牌与同步主密码写进 `.env`、自动找系统里的 Chrome，然后启动服务。
+控制台在 <http://127.0.0.1:8730>。详见 [快速开始](docs/01-快速开始.md)。
+
+### Linux
 
 ```bash
 git clone https://github.com/pscly/zhiwen-brwo.git && cd zhiwen_brwo
 uv venv .venv && uv pip install --python .venv/bin/python -e ./core -e ./hub
 
-# 指定内核（或用系统自带的 chrome/chromium）
-export ZW_CHROME_BIN=/path/to/chrome
+export ZW_CHROME_BIN=/path/to/chrome      # 或用系统自带的 chrome/chromium
 export ZW_ADMIN_TOKEN=换成你的令牌
-
-.venv/bin/python -m zw_core.main    # 打开 http://127.0.0.1:8730
+.venv/bin/python -m zw_core.main          # 打开 http://127.0.0.1:8730
 ```
-
-### Windows
-
-见 [快速开始](docs/01-快速开始.md)，有专门的一节和一键脚本 `scripts/windows/启动.cmd`。
 
 ### 同步中心（可选，但强烈建议）
 
@@ -128,10 +154,15 @@ sudo docker compose up -d
 | 入口 | 说明 |
 |---|---|
 | `GET /api/v1/ai/manifest` | **自描述端点**：AI 一进来就知道这是什么、怎么调、错误码怎么解，不用先读文档 |
-| `zw mcp` | MCP over stdio，Claude Desktop / Cursor / Codex 直接挂载 |
-| `POST /mcp` | MCP over HTTP，远端 AI 可用 |
+| `zw mcp` | MCP over stdio，Claude Desktop / Cursor / Codex 直接挂载（进程内直调，无需令牌） |
+| `POST /mcp` | MCP over HTTP，远端 AI 可用（**需要 Bearer 令牌**） |
 | `AGENTS.md` / `SKILL.md` | 仓库内给 AI 的工作手册与技能描述 |
 | 统一错误形状 | `{ok:false, code, message, hint}`，`code` 稳定可编程，`hint` 给人看 |
+
+```json
+{"mcpServers": {"zhiwen": {"url": "http://192.168.3.6:8730/mcp",
+  "headers": {"Authorization": "Bearer <ZW_ADMIN_TOKEN>"}}}}
+```
 
 详见 [AI 接入指南](docs/05-AI接入指南.md)。
 
@@ -147,7 +178,24 @@ sudo docker compose up -d
 | [06-同步与加密](docs/06-同步与加密.md) | 包格式、白黑名单、密钥指纹门禁、冲突处理 |
 | [07-排错手册](docs/07-排错手册.md) | 按现象查原因的排查表 |
 | [08-运维与日志](docs/08-运维与日志.md) | 日志在哪、怎么看、怎么归档 |
-| [09-交接说明](docs/09-交接说明.md) | **明天在 Windows 上怎么验收** |
+| [09-交接说明](docs/09-交接说明.md) | **明天怎么验收**，以及哪些没验过 |
+| [10-前端对接契约](docs/10-前端对接契约.md) | 前端与后端的接口形状（改端点先改这里） |
+| [CHANGELOG](CHANGELOG.md) | 0.2.0 相对 0.1.0 逐条改了什么 |
+
+## 自检脚本
+
+```bash
+# 单机：真开浏览器，把全部能力过一遍（63 项）
+ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
+  python scripts/e2e-check.py
+
+# 跨机：两台 core + 一台 hub（30 项）
+ZW_A=http://192.168.3.6:8730 ZW_TA=xx ZW_B=http://192.168.3.5:8731 ZW_TB=xx \
+  ZW_SYNC_PASSWORD=xx python scripts/e2e-cross-machine.py
+
+# 网关：Playwright 通过网关接管（20 项）
+ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xx node scripts/gateway-check.cjs
+```
 
 ## 许可
 
@@ -155,8 +203,9 @@ MIT。见 [LICENSE](LICENSE)。
 
 ## 已知限制（写在最前面，别当成 bug）
 
-1. **指纹质量取决于内核，不取决于本项目**。知纹管的是编排与同步，不是伪造指纹。
-2. **无 GPU 的机器上 WebGL 拿不到**（实测 `getContext('webgl')` 返回 `null`）。承担"真人身份"的环境请放在有显卡的机器上。
+1. **指纹质量取决于内核，不取决于本项目**。知纹管的是编排与同步，不是伪造指纹。用系统 Chrome 时 `--fingerprint` 会被忽略，多环境之间只剩 cookie 隔离。
+2. **无 GPU 的机器上 WebGL 拿不到真实显卡**（实测 `getContext('webgl')` 只能拿到 SwiftShader）。承担"真人身份"的环境请放在有显卡的机器上。
 3. **同一环境同一时刻只能一个持有者**。这是刻意的，为了不让两台机器同时用一个号。
 4. **主密码丢了，远端快照就解不开了**。端到端加密的必然代价。
-5. **传输层是明文 HTTP**（局域网，按你的要求）。机密性靠包体自带加密，完整性靠 AEAD 认证标签。
+5. **传输层是明文 HTTP**（局域网）。机密性靠包体自带加密，完整性靠 AEAD 认证标签。跨公网请走隧道，别直接开端口。
+6. **控制面与浏览器不是同一个进程**。core 重启不会杀掉正在跑的浏览器（启动时会重新接管），但 core 挂了期间没人做健康巡检。

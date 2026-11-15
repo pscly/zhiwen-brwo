@@ -20,6 +20,15 @@ CDP 等于浏览器的全部权限（能读所有 cookie、能注入任意脚本
 - 令牌是短期的（默认 15 分钟）、单环境的；
 - 令牌只存 `sha256`，泄露数据库也不等于泄露令牌；
 - 令牌里不含任何密钥派生信息。
+
+## 0.2.0 修的两处
+
+1. **`/json/new` 需要 PUT**。新版 Chromium 只接受 `PUT /json/new?url=…`，
+   以前网关只会 GET，于是"用网关新建标签页"这条能力实际不可用。
+2. **`/json/close/{id}` 与 `/json/activate/{id}`** 一并放行。
+   另外响应里的 `devtoolsFrontendUrl` 现在是**指向真实上游的相对路径**，
+   不再是拼错的网关地址——以前它会被改写成 `http://gw/cdp/<id>/devtools/...`，
+   而网关并不提供 DevTools 前端页面，点开就是 404。
 """
 
 from __future__ import annotations
@@ -27,8 +36,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import websockets
@@ -36,7 +47,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger("zw.gateway")
 
-# 直连上游时的超时（毫秒）
+# 直连上游时的超时（秒）
 HTTP_TIMEOUT = 20.0
 WS_PING_INTERVAL = 25
 WS_PING_TIMEOUT = 60
@@ -67,9 +78,13 @@ class Router:
     def unregister(self, profile_id: str) -> None:
         if self._routes.pop(profile_id, None):
             logger.info("网关撤销路由 profile=%s", profile_id)
+        self._conns.pop(profile_id, None)
 
     def get(self, profile_id: str) -> Route | None:
         return self._routes.get(profile_id)
+
+    def connections(self, profile_id: str) -> int:
+        return self._conns.get(profile_id, 0)
 
     def all(self) -> list[dict[str, Any]]:
         return [
@@ -96,7 +111,7 @@ ROUTER = Router()
 
 
 # ── 地址重写 ──────────────────────────────────────────────
-def rewrite_payload(payload: Any, profile_id: str, port: int, public_base: str, token: str) -> Any:
+def rewrite_payload(payload: Any, profile_id: str, port: int, public_base: str, token: str, udd_tail: str = "") -> Any:
     """把 CDP 发现接口里的回环地址改写成网关地址。
 
     public_base 形如 `http://192.168.3.6:8730`，websocket 时换成 ws://。
@@ -114,13 +129,26 @@ def rewrite_payload(payload: Any, profile_id: str, port: int, public_base: str, 
         return f"{ws_base}{tail}{q}"
 
     def fix_url(value: Any) -> Any:
+        """devtoolsFrontendUrl 指向的是 DevTools 前端资源，网关不提供它。
+
+        保留相对路径（`/devtools/inspector.html?...`）并去掉回环主机名即可：
+        前端页面由浏览器自己托管，客户端如果真要用可以走 ptrace 之外的方式取。
+        不改成网关地址，避免给出一个必然 404 的链接。
+        """
         if not isinstance(value, str):
             return value
-        if value.startswith("/devtools/"):
-            return f"{http_base}{value}{q}"
         for host in upstream_hosts:
-            if host in value:
-                return value.replace(f"http://{host}", http_base)
+            value = value.replace(f"http://{host}", "")
+            value = value.replace(host, "")
+        if value.startswith("http"):
+            # 兜底：把任何残留的回环绝对地址降级为相对路径
+            for scheme in ("http://", "https://"):
+                if value.startswith(scheme):
+                    rest = value[len(scheme):]
+                    slash = rest.find("/")
+                    value = rest[slash:] if slash >= 0 else "/"
+        if value.startswith("/devtools/"):
+            return f"{value}{'&' if '?' in value else '?'}ws={quote(ws_base, safe='')}{q.replace('?', '')}"
         return value
 
     def walk(node: Any) -> None:
@@ -137,29 +165,45 @@ def rewrite_payload(payload: Any, profile_id: str, port: int, public_base: str, 
                 walk(item)
 
     walk(payload)
-    # 兜底：任何漏网的裸回环地址
+    # 兜底：任何漏网的裸回环地址（只替换 host:port，别动 token 里的内容）
     text = json.dumps(payload, ensure_ascii=False)
+    gw_host = public_base.split("://", 1)[-1].rstrip("/")
     for host in upstream_hosts:
-        text = text.replace(host, public_base.split("://", 1)[-1].rsplit("/", 1)[0])
+        text = text.replace(host, gw_host)
+    if udd_tail:
+        text = text.replace(udd_tail, "")
     return json.loads(text)
 
 
 # ── HTTP 发现接口 ─────────────────────────────────────────
-async def proxy_http(profile_id: str, path: str, public_base: str, token: str) -> tuple[int, bytes, dict[str, str]]:
+async def proxy_http(
+    profile_id: str,
+    path: str,
+    public_base: str,
+    token: str,
+    method: str = "GET",
+) -> tuple[int, bytes, dict[str, str]]:
     route = ROUTER.get(profile_id)
     if route is None:
-        return 503, json.dumps({"ok": False, "code": "ROUTE_NOT_FOUND", "message": f"网关没有 {profile_id} 的路由（环境未启动？）"}).encode(), {
-            "content-type": "application/json; charset=utf-8"
-        }
+        return (
+            503,
+            json.dumps(
+                {"ok": False, "code": "ROUTE_NOT_FOUND", "message": f"网关没有 {profile_id} 的路由（环境未启动？）"},
+                ensure_ascii=False,
+            ).encode(),
+            {"content-type": "application/json; charset=utf-8"},
+        )
 
     url = f"http://127.0.0.1:{route.port}{path}"
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            resp = await client.get(url)
+            resp = await client.request(method, url)
     except httpx.HTTPError as exc:
-        return 502, json.dumps({"ok": False, "code": "UPSTREAM_ERROR", "message": f"连不上浏览器调试端口：{exc}"}).encode(), {
-            "content-type": "application/json; charset=utf-8"
-        }
+        return (
+            502,
+            json.dumps({"ok": False, "code": "UPSTREAM_ERROR", "message": f"连不上浏览器调试端口：{exc}"}, ensure_ascii=False).encode(),
+            {"content-type": "application/json; charset=utf-8"},
+        )
 
     body = resp.content
     headers = {"content-type": resp.headers.get("content-type", "application/json")}
@@ -168,7 +212,7 @@ async def proxy_http(profile_id: str, path: str, public_base: str, token: str) -
             payload = json.loads(body)
             payload = rewrite_payload(payload, profile_id, route.port, public_base, token)
             body = json.dumps(payload, ensure_ascii=False).encode()
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             pass
     return resp.status_code, body, headers
 
@@ -180,15 +224,25 @@ async def proxy_ws(websocket: WebSocket, profile_id: str, path: str, limit: int)
         await websocket.close(code=1013, reason="route-not-found")
         return
 
-    await websocket.accept()
-
     if not ROUTER.add_conn(profile_id, limit):
+        await websocket.accept()
         await websocket.close(code=1013, reason="too-many-connections")
         return
+
+    await websocket.accept()
+
+    # 把这次连接算作"环境在用"，空闲回收不会误杀
+    try:
+        from .services import manager as mgr
+
+        mgr.touch(profile_id)
+    except Exception:
+        pass
 
     upstream_url = f"ws://127.0.0.1:{route.port}{path}"
     peer = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "?"
     logger.info("CDP 接入 profile=%s peer=%s path=%s", profile_id, peer, path)
+    started = time.time()
     try:
         async with websockets.connect(
             upstream_url,
@@ -233,7 +287,10 @@ async def proxy_ws(websocket: WebSocket, profile_id: str, path: str, limit: int)
             pass
     finally:
         ROUTER.drop_conn(profile_id)
-        logger.info("CDP 断开 profile=%s peer=%s", profile_id, peer)
+        logger.info(
+            "CDP 断开 profile=%s peer=%s 时长=%.1fs 当前连接=%s",
+            profile_id, peer, time.time() - started, ROUTER.connections(profile_id),
+        )
         try:
             await websocket.close()
         except Exception:

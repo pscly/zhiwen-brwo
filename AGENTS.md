@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   19 项单元测试
+tests/   132 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由 `fingerprint-chromium`（`--fingerprint=<种子>`）或系统 Chrome 提供。
@@ -30,6 +30,13 @@ tests/   19 项单元测试
 | `core/src/zw_core/services/bundle.py` 顶部 | 为什么跨机**不能**搬 `Default/Cookies`（DPAPI，且 Chromium 会把解不开的 cookie 当损坏删掉） |
 
 改这三处之前，先在回复里说明你理解了上面的原因。
+
+还有两处**也**必须先读，它们是 0.2.0 踩出来的新坑：
+
+| 文件 | 为什么必须读 |
+|---|---|
+| `core/src/zw_core/api.py` 顶部 | **路由顺序陷阱**：`/profiles/batch`、`/profiles/import`、`/sync/push-all` 必须声明在 `/profiles/{ref}`、`/sync/{ref}/*` 之前，否则会被当成"环境名叫 batch" |
+| `core/src/zw_core/services/engines.py` 的 `wait_ready` | **端口归属校验**：只信 `/json/version` 会在端口被别的 chrome 占住时把别人的 ws 登记成自己的路由（串号） |
 
 ---
 
@@ -59,8 +66,9 @@ uv venv .venv && uv pip install --python .venv/bin/python -e ./core -e ./hub
 bash scripts/run-dev.sh
 bash scripts/stop-dev.sh
 
-# 端到端（需要两个 core 在 8730 / 8731，hub 可达）
-.venv/bin/python scripts/e2e-check.py
+# 端到端（单机，真开浏览器；服务需先跑起来）
+ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
+  .venv/bin/python scripts/e2e-check.py
 ```
 
 环境变量见 `docs/03-部署指南.md` §4。开发用的样例在 `.env.test`（不入 git）。
@@ -79,8 +87,11 @@ bash scripts/stop-dev.sh
 
 **提交前必须做**：
 ```bash
-.venv/bin/python -m pytest tests -q          # 19 passed
-.venv/bin/python scripts/e2e-check.py        # 16 项全过
+.venv/bin/python -m pytest tests -q          # 132 passed
+.venv/bin/python scripts/e2e-check.py        # 63 项全过（真开浏览器）
+.venv/bin/python scripts/e2e-cross-machine.py # 30 项（两台真机器 + hub，可选）
+node scripts/gateway-check.cjs               # 20 项（Playwright 通过网关接管）
+node scripts/ui-check.cjs                    # 16 项（控制台逐视图点一遍）
 ```
 
 ---
@@ -97,13 +108,18 @@ bash scripts/stop-dev.sh
 
 ## 七、当前状态与待办
 
-**已验证**：Linux 上 19 单元 + 16 端到端全过；hub 在 3.5 运行中。
-**未验证**：Windows 实机（用户在测）、指纹能否过 browserscan、Windows 跨机 CDP。
+**已验证**（2026-11-16，Linux + 两台真机器）：
+- 132 单元测试、63 项单机端到端、30 项跨机端到端、20 项网关接管、16 项控制台交互 —— 全绿
+- hub 0.2.0 在 3.5 的 Docker 里跑着；3.5 上另有一个 core（8731）参与跨机验收
+- 详见 `docs/09-交接说明.md`
+
+**未验证**：Windows 实机整体跑通、指纹能否过 browserscan、fingerprint-chromium 的种子一致性、
+带认证的真实代理握手。这四项都写在交接说明的「未验证」表里，别当成已通过。
 
 **待办（按优先级）**：
 1. `zw sync rekey`（换主密码逐包重加密）
-2. 按环境绑定扩展的 UI
-3. hub 多用户/权限
+2. hub 多用户/权限
+3. 控制台打包成可双击的 exe（免装 Python）
 4. Windows 上 `--fingerprint` 种子一致性实测
 
 ---

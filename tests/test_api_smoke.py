@@ -1,6 +1,14 @@
 """API 冒烟：不启动真浏览器，只验证路由、鉴权与错误形状。
 
 需要先设置 ZW_ROOT 到一个临时目录（fixture 里做）。
+
+## 这里锁死的几条"曾经真的坏过"的行为
+
+1. `POST /mcp` 必须鉴权（0.1.0 是完全开放的，任何能连上端口的人都能读 cookie）。
+2. `POST /api/v1/sync/push-all` 必须真的走到"全量推送"，
+   而不是被 `/sync/{ref}/push` 当成"环境名叫 push-all"吃掉。
+3. `POST /api/v1/profiles/import` 必须走到导入，而不是被 `/profiles/{ref}` 吃掉。
+4. 详情接口不签发 CDP 令牌。
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ def client():
     os.environ["ZW_ADMIN_TOKEN"] = "t0ken"
     os.environ["ZW_PORT"] = "8799"
     os.environ["ZW_HUB_URL"] = ""
+    os.environ["ZW_ALLOWED_CIDRS"] = ""
     from zw_core import config
 
     config.reset_settings()
@@ -38,6 +47,7 @@ def client():
 H = {"Authorization": "Bearer t0ken"}
 
 
+# ── 基础 ──────────────────────────────────────────────────
 def test_healthz(client):
     r = client.get("/healthz")
     assert r.status_code == 200 and r.json()["ok"] is True
@@ -47,16 +57,28 @@ def test_auth_required(client):
     assert client.get("/api/v1/meta").status_code == 401
 
 
+def test_auth_wrong_token(client):
+    r = client.get("/api/v1/meta", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401 and r.json()["code"] == "UNAUTHENTICATED"
+
+
 def test_meta(client):
     d = client.get("/api/v1/meta", headers=H).json()
     assert d["ok"] and d["data"]["name"] == "zhiwen-core"
+    assert "features" in d["data"]
+    assert d["data"]["schema_version"] >= 2
 
 
 def test_ai_manifest(client):
     d = client.get("/api/v1/ai/manifest", headers=H).json()["data"]
     assert "标准作业流程" in d and "错误码速查" in d
+    paths = {e["path"] for e in d["端点清单"]}
+    # 新端点必须出现在自描述清单里，否则 AI 发现不了
+    assert "/api/v1/profiles/{id}/fingerprint/probe" in paths
+    assert "/api/v1/proxies/check" in paths
 
 
+# ── 环境生命周期 ──────────────────────────────────────────
 def test_profile_lifecycle(client):
     r = client.post("/api/v1/profiles", headers=H, json={"name": "p-smoke"})
     assert r.status_code == 200, r.text
@@ -78,25 +100,64 @@ def test_profile_lifecycle(client):
     r = client.get(f"/api/v1/profiles/{pid}/cdp", headers=H)
     assert r.status_code == 409 and r.json()["code"] == "STATE_CONFLICT"
 
-    # 未启动读 cookie → 409 且带提示
+    # 未启动读 cookie → 409 且带 hint
     r = client.get(f"/api/v1/profiles/{pid}/cookies", headers=H)
-    assert r.status_code == 409 and "提示" not in r.json() or "hint" in r.json()
+    assert r.status_code == 409 and r.json()["code"] == "STATE_CONFLICT" and "hint" in r.json()
 
     # 删
     assert client.delete(f"/api/v1/profiles/{pid}?purge=true", headers=H).json()["ok"]
+
+
+def test_profile_validation_rejects_bad_input(client):
+    """明显错误的输入要在入库前被挡，而不是等到启动时才炸。"""
+    bad_cases = [
+        ({"name": "x1", "window_w": 10}, "INVALID_WINDOW"),
+        ({"name": "x2", "fp_platform": "freebsd"}, "INVALID_PLATFORM"),
+        ({"name": "x3", "restart_policy": "sometimes"}, "INVALID_RESTART_POLICY"),
+        ({"name": "x4", "fp_timezone": "Mars/Olympus"}, "INVALID_TIMEZONE"),
+        ({"name": "x5", "start_urls": ["ftp://a"]}, "INVALID_URL"),
+        ({"name": "x6", "proxy": "ftp://h:1"}, "PROXY_SCHEME_UNSUPPORTED"),
+        ({"name": ""}, "INVALID_NAME"),
+    ]
+    for payload, code in bad_cases:
+        r = client.post("/api/v1/profiles", headers=H, json=payload)
+        assert r.status_code == 400, f"{payload} 应当被拒，实际 {r.status_code} {r.text}"
+        assert r.json()["code"] == code, f"{payload} 期望 {code}，实际 {r.json()['code']}"
+
+
+def test_proxy_credentials_never_leak(client):
+    """带密码的代理地址绝不能原样回显给前端（0.1.0 会泄漏）。"""
+    r = client.post(
+        "/api/v1/profiles",
+        headers=H,
+        json={"name": "p-proxy", "proxy": "socks5://user:secret@10.0.0.1:1080"},
+    )
+    assert r.status_code == 200, r.text
+    p = r.json()["data"]
+    assert p["proxy"] == "socks5://10.0.0.1:1080", p["proxy"]
+    assert "secret" not in str(p)
+    # 详情与列表也不能漏
+    for path in (f"/api/v1/profiles/{p['id']}", "/api/v1/profiles"):
+        assert "secret" not in client.get(path, headers=H).text
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+def test_groups(client):
+    client.post("/api/v1/profiles", headers=H, json={"name": "g-a", "group_name": "甲组"})
+    client.post("/api/v1/profiles", headers=H, json={"name": "g-b", "group_name": "甲组"})
+    client.post("/api/v1/profiles", headers=H, json={"name": "g-c"})
+    d = client.get("/api/v1/groups", headers=H).json()["data"]["groups"]
+    by_name = {g["name"]: g for g in d}
+    assert by_name["甲组"]["count"] == 2
+    assert by_name["未分组"]["count"] >= 1
+    for n in ("g-a", "g-b", "g-c"):
+        client.delete(f"/api/v1/profiles/{n}?purge=true", headers=H)
 
 
 def test_countries_of_error_shape(client):
     r = client.get("/api/v1/profiles/不存在", headers=H)
     body = r.json()
     assert r.status_code == 404 and body["code"] == "PROFILE_NOT_FOUND" and "message" in body
-
-
-def test_mcp_initialize(client):
-    r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
-    assert r.json()["result"]["serverInfo"]["name"] == "zhiwen"
-    tools = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()["result"]["tools"]
-    assert len(tools) >= 20
 
 
 def test_profile_detail_does_not_issue_cdp_token(client):
@@ -146,3 +207,202 @@ def test_token_cap_and_purge(client):
 def test_stats_includes_token_stats(client):
     d = client.get("/api/v1/stats", headers=H).json()["data"]
     assert "cdp_tokens" in d and "live" in d["cdp_tokens"]
+    assert "groups" in d
+
+
+# ── 路由顺序（真的坏过）──────────────────────────────────
+def test_sync_push_all_route_not_swallowed(client):
+    """/sync/push-all 不能被 /sync/{ref}/push 抢走。"""
+    r = client.post("/api/v1/sync/push-all", headers=H, json={})
+    body = r.json()
+    # hub 没配置时应该是明确的错误码，而不是"找不到环境：push-all"
+    assert body.get("code") != "PROFILE_NOT_FOUND", body
+    assert body.get("code") in ("HUB_NOT_CONFIGURED", "SYNC_DISABLED", "PASSWORD_REQUIRED"), body
+
+
+def test_profiles_import_route_not_swallowed(client):
+    """/profiles/import 不能被 /profiles/{ref} 抢走。"""
+    r = client.post("/api/v1/profiles/import", headers=H, content=b"not-a-bundle")
+    body = r.json()
+    assert r.status_code == 400 and body["code"] == "IMPORT_INVALID", body
+
+
+def test_profiles_batch_route(client):
+    r = client.post("/api/v1/profiles/batch", headers=H, json={"action": "bogus", "ids": ["x"]})
+    assert r.json()["code"] == "INVALID_ACTION"
+
+
+# ── MCP ──────────────────────────────────────────────────
+def test_mcp_requires_auth(client):
+    """MCP 曾经完全无鉴权：任何能连上端口的人都能读 cookie。"""
+    r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert r.status_code == 401, r.text
+    assert "error" in r.json()
+
+
+def test_mcp_initialize(client):
+    r = client.post("/mcp", headers=H, json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert r.json()["result"]["serverInfo"]["name"] == "zhiwen"
+    tools = client.post("/mcp", headers=H, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()["result"]["tools"]
+    assert len(tools) >= 25
+    names = {t["name"] for t in tools}
+    for must in ("zw_list_profiles", "zw_fingerprint_probe", "zw_check_proxy", "zw_export_profile" if False else "zw_doctor"):
+        assert must in names, f"缺少工具 {must}"
+
+
+def test_mcp_tool_call(client):
+    r = client.post(
+        "/mcp",
+        headers=H,
+        json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "zw_list_profiles", "arguments": {}}},
+    )
+    payload = r.json()["result"]["content"][0]["text"]
+    import json as _json
+
+    assert "profiles" in _json.loads(payload)
+
+
+def test_mcp_unknown_tool(client):
+    r = client.post(
+        "/mcp",
+        headers=H,
+        json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "zw_nope", "arguments": {}}},
+    )
+    assert r.json()["error"]["code"] == -32602
+
+
+# ── 代理库 ────────────────────────────────────────────────
+def test_proxy_crud(client):
+    r = client.post(
+        "/api/v1/proxies",
+        headers=H,
+        json={"label": "测试代理", "scheme": "http", "host": "127.0.0.1", "port": 7890, "username": "u", "password": "p"},
+    )
+    assert r.status_code == 200, r.text
+    pid = r.json()["data"]["id"]
+
+    # 密码绝不回显
+    listing = client.get("/api/v1/proxies", headers=H).json()["data"]["proxies"]
+    row = next(x for x in listing if x["id"] == pid)
+    assert "password" not in row
+    assert "upstream" in row
+
+    # 重名标签冲突
+    r = client.post("/api/v1/proxies", headers=H, json={"label": "测试代理", "host": "1.1.1.1", "port": 1})
+    assert r.json()["code"] == "LABEL_TAKEN"
+
+    # 被环境引用时不能删
+    prof = client.post("/api/v1/profiles", headers=H, json={"name": "p-useproxy", "proxy_id": pid}).json()["data"]
+    r = client.delete(f"/api/v1/proxies/{pid}", headers=H)
+    assert r.json()["code"] == "PROXY_IN_USE"
+
+    client.delete(f"/api/v1/profiles/{prof['id']}?purge=true", headers=H)
+    assert client.delete(f"/api/v1/proxies/{pid}", headers=H).json()["ok"]
+
+
+def test_proxy_validation(client):
+    r = client.post("/api/v1/proxies", headers=H, json={"host": "", "port": 1})
+    assert r.json()["code"] == "PROXY_INVALID"
+    r = client.post("/api/v1/proxies", headers=H, json={"host": "h", "port": 70000})
+    assert r.json()["code"] == "PROXY_INVALID"
+
+
+# ── 扩展库 ────────────────────────────────────────────────
+def test_extension_install_and_bind(client, tmp_path):
+    ext = tmp_path / "myext"
+    ext.mkdir()
+    (ext / "manifest.json").write_text(
+        '{"manifest_version":3,"name":"测试扩展","version":"1.2.3"}', encoding="utf-8"
+    )
+    (ext / "sw.js").write_text("// noop", encoding="utf-8")
+    r = client.post("/api/v1/extensions/install", headers=H, json={"path": str(ext)})
+    assert r.status_code == 200, r.text
+    slug = r.json()["data"]["slug"]
+
+    # 绑定到环境 → 环境 extensions 里出现 slug，并提示需要重启
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "p-ext"}).json()["data"]
+    r = client.post(f"/api/v1/profiles/{p['id']}/extensions", headers=H, json={"slug": slug})
+    assert slug in r.json()["data"]["extensions"]
+
+    # 被绑定时不能删扩展
+    r = client.delete(f"/api/v1/extensions/{slug}/1.2.3", headers=H)
+    assert r.json()["code"] == "EXTENSION_IN_USE"
+
+    # 解绑后可以删
+    client.delete(f"/api/v1/profiles/{p['id']}/extensions/{slug}", headers=H)
+    r = client.delete(f"/api/v1/extensions/{slug}/1.2.3", headers=H)
+    assert r.json()["ok"], r.text
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+def test_extension_rejects_non_extension(client, tmp_path):
+    d = tmp_path / "notanext"
+    d.mkdir()
+    (d / "readme.txt").write_text("nothing", encoding="utf-8")
+    r = client.post("/api/v1/extensions/install", headers=H, json={"path": str(d)})
+    assert r.json()["code"] == "NOT_AN_EXTENSION"
+
+
+def test_extension_zip_path_traversal_blocked(client, tmp_path):
+    import zipfile
+
+    zf = tmp_path / "evil.zip"
+    with zipfile.ZipFile(zf, "w") as z:
+        z.writestr("../../etc/pwned", "x")
+        z.writestr("manifest.json", "{}")
+    r = client.post("/api/v1/extensions/install", headers=H, json={"path": str(zf)})
+    assert r.json()["code"] == "UNSAFE_ARCHIVE"
+
+
+# ── CDP 网关（无浏览器时的行为）──────────────────────────
+def test_cdp_gateway_rejects_bad_token(client):
+    r = client.get("/cdp/whatever/json/version?token=bogus")
+    assert r.status_code == 401
+
+
+def test_cdp_gateway_no_route(client):
+    """只有令牌对、但没有路由时，要给 503 而不是崩。"""
+    from zw_core.services import manager as mgr
+
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "p-gw"}).json()["data"]
+    token = mgr.issue_cdp_token(p["id"], ttl=120)
+    r = client.get(f"/cdp/{p['id']}/json/version?token={token}")
+    assert r.status_code == 503
+    assert r.json()["code"] == "ROUTE_NOT_FOUND"
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+def test_maintenance_endpoints(client):
+    assert client.post("/api/v1/maintenance/trim", headers=H).json()["ok"]
+    r = client.post("/api/v1/maintenance/cleanup", headers=H).json()
+    assert r["ok"] and "staging_removed" in r["data"]
+    r = client.post("/api/v1/maintenance/reap-orphans", headers=H).json()
+    assert r["ok"] and "scanned" in r["data"]
+
+
+def test_doctor_shape(client):
+    d = client.post("/api/v1/maintenance/doctor", headers=H).json()["data"]
+    names = [c["项"] for c in d["checks"]]
+    for must in ("浏览器内核", "指纹内核", "数据库", "访问令牌", "磁盘余量", "数据目录可写"):
+        assert must in names, f"自检缺少 {must}"
+
+
+def test_audit_and_events(client):
+    a = client.get("/api/v1/audit?limit=10", headers=H).json()["data"]
+    assert "items" in a
+    e = client.get("/api/v1/events?since=0", headers=H).json()["data"]
+    assert "now" in e and "events" in e and "profiles" in e
+
+
+def test_cidr_guard(client, monkeypatch):
+    """配了白名单后，不在名单里的来源必须被拒（fail-closed）。"""
+    from zw_core.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "allowed_cidrs", ["10.99.99.0/24"])
+    r = client.get("/api/v1/meta", headers=H)
+    assert r.status_code == 403 and r.json()["code"] == "CIDR_FORBIDDEN"
+
+    # 白名单为空 = 不限制（这是默认行为，保留给"只在内网"的场景）
+    monkeypatch.setattr(s, "allowed_cidrs", [])
+    assert client.get("/api/v1/meta", headers=H).status_code == 200

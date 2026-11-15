@@ -2,6 +2,12 @@
 
 为什么用 SQLite：单机、几百个环境、零运维。跨机只需要"每台机器一个自己的库"，
 中心数据在 hub 上，不在这里。
+
+## 迁移约定（重要）
+
+`SCHEMA_VERSION` 每次加字段就要 +1，并在 `_MIGRATIONS` 里补一条幂等语句。
+0.1.0 的库必须能**原地升级**——用户手里已经有环境了，不能要求他重建。
+迁移只做"加列 / 加表 / 加索引"，不做删改，这样任何一步失败都不会毁数据。
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ from typing import Any, Iterator
 
 from .config import get_settings
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DDL = """
 PRAGMA journal_mode=WAL;
@@ -35,14 +41,18 @@ CREATE TABLE IF NOT EXISTS profiles (
 
   fp_seed          INTEGER NOT NULL,
   fp_platform      TEXT NOT NULL DEFAULT 'host',
+  fp_platform_version TEXT NOT NULL DEFAULT '',
   fp_brand         TEXT NOT NULL DEFAULT '',
   fp_brand_version TEXT NOT NULL DEFAULT '',
   fp_hardware      INTEGER,
   fp_timezone      TEXT NOT NULL DEFAULT '',
   fp_lang          TEXT NOT NULL DEFAULT '',
+  fp_accept_lang    TEXT NOT NULL DEFAULT '',
+  fp_disable_spoofing TEXT NOT NULL DEFAULT '',
   fp_ua            TEXT NOT NULL DEFAULT '',
 
   proxy           TEXT NOT NULL DEFAULT '',
+  proxy_id        INTEGER,
   start_urls      TEXT NOT NULL DEFAULT '[]',
   window_w        INTEGER NOT NULL DEFAULT 1280,
   window_h        INTEGER NOT NULL DEFAULT 800,
@@ -56,6 +66,7 @@ CREATE TABLE IF NOT EXISTS profiles (
   last_error      TEXT NOT NULL DEFAULT '',
 
   restart_policy  TEXT NOT NULL DEFAULT 'on-failure',
+  restart_count   INTEGER NOT NULL DEFAULT 0,
   headless        INTEGER NOT NULL DEFAULT 0,
   ephemeral       INTEGER NOT NULL DEFAULT 0,
   trim_on_stop    INTEGER NOT NULL DEFAULT 0,
@@ -68,7 +79,8 @@ CREATE TABLE IF NOT EXISTS profiles (
   created_at      REAL NOT NULL,
   updated_at      REAL NOT NULL,
   last_start_at   REAL,
-  last_stop_at    REAL
+  last_stop_at    REAL,
+  last_active_at  REAL
 );
 CREATE INDEX IF NOT EXISTS idx_profiles_state ON profiles(state);
 CREATE INDEX IF NOT EXISTS idx_profiles_group ON profiles(group_name);
@@ -135,6 +147,19 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
+# v1 → v2：补指纹细节字段、代理库引用、崩溃重启计数、空闲计时
+_MIGRATIONS: dict[int, list[str]] = {
+    2: [
+        "ALTER TABLE profiles ADD COLUMN fp_platform_version TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE profiles ADD COLUMN fp_accept_lang TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE profiles ADD COLUMN fp_disable_spoofing TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE profiles ADD COLUMN proxy_id INTEGER",
+        "ALTER TABLE profiles ADD COLUMN restart_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profiles ADD COLUMN last_active_at REAL",
+        "CREATE INDEX IF NOT EXISTS idx_profiles_proxy ON profiles(proxy_id)",
+    ],
+}
+
 
 class Database:
     def __init__(self, path: Path) -> None:
@@ -155,13 +180,28 @@ class Database:
         finally:
             c.close()
 
+    # ── 建表与迁移 ────────────────────────────────────────
     def init_schema(self) -> None:
         with self.conn() as c:
             c.executescript(DDL)
             row = c.execute("SELECT value FROM settings WHERE key='schema_version'").fetchone()
-            if row is None:
+            current = int(row["value"]) if row else 0
+            if current == 0:
+                # 全新库：DDL 已是最新形状（列都建出来了），迁移语句不能再跑
                 self.set_setting(c, "schema_version", str(SCHEMA_VERSION))
                 self.set_setting(c, "node_id", get_settings().node_id)
+                self.set_setting(c, "created_at", str(time.time()))
+                return
+            if current < SCHEMA_VERSION:
+                for version in range(current + 1, SCHEMA_VERSION + 1):
+                    for stmt in _MIGRATIONS.get(version, []):
+                        try:
+                            c.execute(stmt)
+                        except sqlite3.OperationalError as exc:
+                            # "duplicate column name" 是幂等重跑的常态，其余要冒出来
+                            if "duplicate column" not in str(exc).lower():
+                                raise
+                self.set_setting(c, "schema_version", str(SCHEMA_VERSION))
 
     # ── 便捷方法 ──────────────────────────────────────────
     @staticmethod
@@ -176,6 +216,12 @@ class Database:
         with self.conn() as c:
             row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
             return row["value"] if row else default
+
+    def schema_version(self) -> int:
+        try:
+            return int(self.get_setting("schema_version", "0") or 0)
+        except ValueError:
+            return 0
 
     def audit(
         self,
@@ -200,9 +246,18 @@ class Database:
         except Exception:
             return False
 
-    def purge_cdp_tokens(self) -> None:
+    def purge_cdp_tokens(self) -> int:
         with self.conn() as c:
-            c.execute("DELETE FROM cdp_tokens WHERE expires_at < ?", (time.time(),))
+            cur = c.execute("DELETE FROM cdp_tokens WHERE expires_at < ?", (time.time(),))
+            return cur.rowcount or 0
+
+    def prune_audit(self, keep: int = 20000) -> int:
+        """审计表只保留最近 N 行。长期跑下去它涨得比日志还快。"""
+        with self.conn() as c:
+            cur = c.execute(
+                "DELETE FROM audit_log WHERE id <= (SELECT MAX(id) FROM audit_log) - ?", (keep,)
+            )
+            return cur.rowcount or 0
 
 
 _db: Database | None = None

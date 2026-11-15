@@ -7,9 +7,15 @@
 
 用法：
 ```bash
-zw mcp                      # 走 stdio，供本机 AI 客户端拉起
-curl -X POST /mcp -d '{...}' # 走 HTTP，供远端 AI 调用
+zw mcp                      # 走 stdio，供本机 AI 客户端拉起（进程内直调，无需令牌）
+curl -X POST /mcp -d '{...}' -H "Authorization: Bearer $ZW_ADMIN_TOKEN"   # 走 HTTP
 ```
+
+## 设计取向
+
+工具刻意做成"少而厚"：每个工具都能一步完成一件真实的事，不需要模型自己
+串四五个调用。代价是参数多一点，但 MCP 的 schema 会告诉模型每个参数是干什么的。
+不做 `delete_profile` / `reset_fingerprint` 这类不可逆操作——那该由人来点。
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from typing import Any, Callable
 from . import __version__
 from .services import cookies as ck
 from .services import manager as mgr
+from .services import proxy as proxysvc
 from .services import sync as syncsvc
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -49,23 +56,26 @@ def _ws(ref: str, start: bool = True) -> str:
             raise RuntimeError(f"{p['name']} 没有在运行（当前 {p['state']}）")
         mgr.start(p["id"])
         p = mgr.get_profile(p["id"])
-    port = p.get("cdp_port")
-    if not port:
-        raise RuntimeError(f"{p['name']} 关闭了调试端口")
-    import httpx
-
-    return httpx.get(f"http://127.0.0.1:{port}/json/version", timeout=5).json()["webSocketDebuggerUrl"]
+    ws = mgr.local_ws(p)
+    if ws is None:
+        raise RuntimeError(f"{p['name']} 没有可用的调试端口（cdp_enabled=false？）")
+    mgr.touch(p["id"])
+    return ws
 
 
 # ── 环境 ──────────────────────────────────────────────────
 @tool(
     "zw_list_profiles",
-    "列出本机全部浏览器环境（含状态、指纹种子、同步版本）。开始任何操作前先调它。",
-    _obj({"state": {"type": "string", "description": "只看某个状态：running/stopped/…"}, "q": {"type": "string", "description": "按名字搜索"}}),
+    "列出本机全部浏览器环境（含状态、指纹种子、同步版本、分组）。开始任何操作前先调它。",
+    _obj({
+        "state": {"type": "string", "description": "只看某个状态：running/stopped/crashed/failed"},
+        "group": {"type": "string", "description": "只看某个分组"},
+        "q": {"type": "string", "description": "按名字/备注/标签模糊搜"},
+    }),
 )
 def _list_profiles(args: dict[str, Any]) -> Any:
-    items = mgr.list_profiles(state=args.get("state"), q=args.get("q"))
-    return {"profiles": items, "total": len(items)}
+    items = mgr.list_profiles(state=args.get("state"), group=args.get("group"), q=args.get("q"))
+    return {"profiles": items, "total": len(items), "groups": mgr.groups()}
 
 
 @tool(
@@ -75,11 +85,16 @@ def _list_profiles(args: dict[str, Any]) -> Any:
         {
             "name": {"type": "string", "description": "环境名，全局唯一"},
             "group_name": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
             "note": {"type": "string"},
-            "proxy": {"type": "string", "description": "例如 http://127.0.0.1:7890"},
+            "proxy": {"type": "string", "description": "例如 http://127.0.0.1:7890；带用户名密码也可以（会自动走认证扩展）"},
             "start_urls": {"type": "array", "items": {"type": "string"}},
             "window_w": {"type": "integer"},
             "window_h": {"type": "integer"},
+            "fp_timezone": {"type": "string", "description": "例如 Asia/Shanghai，要和出口 IP 一致"},
+            "fp_lang": {"type": "string", "description": "例如 zh-CN"},
+            "extensions": {"type": "array", "items": {"type": "string"}, "description": "扩展库里的 slug"},
+            "headless": {"type": "boolean"},
         },
         ["name"],
     ),
@@ -106,9 +121,27 @@ def _stop_profile(args: dict[str, Any]) -> Any:
     return mgr.stop(args["profile"], force=bool(args.get("force")))
 
 
-@tool("zw_restart_profile", "重启一个环境（等价于 stop 后等端口释放再 start）。", _obj({"profile": {"type": "string"}}, ["profile"]))
+@tool("zw_restart_profile", "重启一个环境（等价于 stop 后等端口释放再 start）。改过代理/扩展后必须重启才生效。", _obj({"profile": {"type": "string"}}, ["profile"]))
 def _restart_profile(args: dict[str, Any]) -> Any:
     return mgr.restart(args["profile"])
+
+
+@tool(
+    "zw_update_profile",
+    "修改环境的设置（代理、时区、语言、窗口、扩展、备注等）。改指纹种子会被拒（SEED_IMMUTABLE）。运行中的环境改完需要 restart。",
+    _obj(
+        {
+            "profile": {"type": "string"},
+            "fields": {
+                "type": "object",
+                "description": "要改的字段，例如 {proxy, fp_timezone, fp_lang, note, group_name, extensions, window_w, window_h}",
+            },
+        },
+        ["profile", "fields"],
+    ),
+)
+def _update_profile(args: dict[str, Any]) -> Any:
+    return mgr.update_profile(args["profile"], args["fields"] or {})
 
 
 @tool(
@@ -123,9 +156,18 @@ def _get_cdp(args: dict[str, Any]) -> Any:
     return mgr.cdp_info(p, ttl=args.get("ttl"))
 
 
-@tool("zw_profile_stats", "返回环境总量、运行中数量、端口池占用、磁盘占用、内核版本。", _obj({}))
+@tool("zw_profile_stats", "返回环境总量、运行中数量、端口池占用、磁盘占用、内核版本、分组分布。", _obj({}))
 def _stats(_: dict[str, Any]) -> Any:
     return mgr.stats()
+
+
+@tool(
+    "zw_fingerprint_probe",
+    "指纹体检：读真机实际暴露的 UA/平台/时区/WebGL/canvas/字体，并给出自相矛盾的警告。判断环境是否像真人的第一步。",
+    _obj({"profile": {"type": "string"}, "start_if_needed": {"type": "boolean"}}, ["profile"]),
+)
+def _fingerprint_probe(args: dict[str, Any]) -> Any:
+    return mgr.probe_fingerprint(args["profile"], start_if_needed=bool(args.get("start_if_needed", True)))
 
 
 # ── 数据 ──────────────────────────────────────────────────
@@ -160,7 +202,16 @@ def _write_cookies(args: dict[str, Any]) -> Any:
     return ck.load_cookies_sync(ws, args["cookies"], clear=(args.get("mode", "replace") == "replace"))
 
 
-@tool("zw_read_storage", "读取某个环境里指定站点的 localStorage。", _obj({"profile": {"type": "string"}, "origin": {"type": "string"}}, ["profile", "origin"]))
+@tool("zw_clear_cookies", "清空某个环境的全部 cookie（不可撤销，慎用）。", _obj({"profile": {"type": "string"}}, ["profile"]))
+def _clear_cookies(args: dict[str, Any]) -> Any:
+    return ck.clear_cookies_sync(_ws(args["profile"]))
+
+
+@tool(
+    "zw_read_storage",
+    "读取某个环境里指定站点的 localStorage。注意这个操作会在专属管理标签页里打开该站点，不影响用户正在看的页面。",
+    _obj({"profile": {"type": "string"}, "origin": {"type": "string", "description": "例如 https://www.xiaohongshu.com"}}, ["profile", "origin"]),
+)
 def _read_storage(args: dict[str, Any]) -> Any:
     ws = _ws(args["profile"])
     return ck.dump_storage_sync(ws, [args["origin"]])
@@ -182,9 +233,9 @@ def _page_text(args: dict[str, Any]) -> Any:
     return {"text": ck.run(ck.page_text(_ws(args["profile"])))}
 
 
-@tool("zw_screenshot", "对当前页面截图，返回 base64 PNG。", _obj({"profile": {"type": "string"}}, ["profile"]))
+@tool("zw_screenshot", "对当前页面截图，返回 base64 PNG。", _obj({"profile": {"type": "string"}, "full_page": {"type": "boolean"}}, ["profile"]))
 def _screenshot(args: dict[str, Any]) -> Any:
-    data = ck.screenshot_sync(_ws(args["profile"]))
+    data = ck.screenshot_sync(_ws(args["profile"]), full_page=bool(args.get("full_page")))
     return {"format": "png", "base64": base64.b64encode(data).decode(), "bytes": len(data)}
 
 
@@ -201,6 +252,48 @@ def _type(args: dict[str, Any]) -> Any:
 @tool("zw_list_tabs", "列出该环境当前打开的所有标签页。", _obj({"profile": {"type": "string"}}, ["profile"]))
 def _list_tabs(args: dict[str, Any]) -> Any:
     return {"targets": ck.run(ck.list_targets(_ws(args["profile"], start=False)))}
+
+
+# ── 代理 ──────────────────────────────────────────────────
+@tool("zw_list_proxies", "列出代理库（不含密码）与每个代理被哪些环境使用。", _obj({}))
+def _list_proxies(_: dict[str, Any]) -> Any:
+    from .db import get_db
+
+    with get_db().conn() as c:
+        rows = [dict(r) for r in c.execute("SELECT * FROM proxies ORDER BY id DESC")]
+    for r in rows:
+        r.pop("password", None)
+    return {"proxies": rows, "total": len(rows)}
+
+
+@tool(
+    "zw_check_proxy",
+    "检测一个代理的出口 IP 与延迟。可以直接测未保存的代理，也可以用 id 测库里已有的。",
+    _obj({
+        "id": {"type": "integer"},
+        "scheme": {"type": "string"},
+        "host": {"type": "string"},
+        "port": {"type": "integer"},
+        "username": {"type": "string"},
+        "password": {"type": "string"},
+    }),
+)
+def _check_proxy(args: dict[str, Any]) -> Any:
+    from .db import get_db
+
+    if args.get("id"):
+        with get_db().conn() as c:
+            row = c.execute("SELECT * FROM proxies WHERE id=?", (int(args["id"]),)).fetchone()
+        if row is None:
+            raise RuntimeError(f"代理不存在：{args['id']}")
+        auth = f"{row['username']}:{row['password']}@" if row["username"] else ""
+        spec = proxysvc.parse_proxy(f"{row['scheme']}://{auth}{row['host']}:{row['port']}")
+    else:
+        if not args.get("host") or not args.get("port"):
+            raise RuntimeError("要么给 id，要么给 host+port")
+        auth = f"{args.get('username','')}:{args.get('password','')}@" if args.get("username") else ""
+        spec = proxysvc.parse_proxy(f"{args.get('scheme','http')}://{auth}{args['host']}:{args['port']}")
+    return proxysvc.check_egress(spec) if spec else {"ok": False, "error": "代理配置不完整"}
 
 
 # ── 同步 ──────────────────────────────────────────────────
@@ -222,9 +315,9 @@ def _sync_pull(args: dict[str, Any]) -> Any:
     return syncsvc.pull(args["profile"], password=args.get("password"), revision=args.get("revision"))
 
 
-@tool("zw_sync_diff", "对比本地与远端的同步版本，判断要不要 push/pull。", _obj({"profile": {"type": "string"}}, ["profile"]))
+@tool("zw_sync_diff", "对比本地与远端的同步版本，判断要不要 push/pull。", _obj({"profile": {"type": "string"}, "password": {"type": "string"}}, ["profile"]))
 def _sync_diff(args: dict[str, Any]) -> Any:
-    return syncsvc.diff(args["profile"])
+    return syncsvc.diff(args["profile"], password=args.get("password"))
 
 
 @tool("zw_sync_index", "列出同步中心上所有环境的版本索引。", _obj({}))
@@ -233,20 +326,19 @@ def _sync_index(_: dict[str, Any]) -> Any:
 
 
 # ── 排错 ──────────────────────────────────────────────────
-@tool("zw_doctor", "自检：内核、数据库、令牌、同步中心、并发余量。出问题先跑这个。", _obj({}))
+@tool("zw_doctor", "自检：内核、指纹内核、数据库、令牌、同步中心、磁盘、并发余量。出问题先跑这个。", _obj({}))
 def _doctor(_: dict[str, Any]) -> Any:
-    from .api import build_app  # 避免循环导入
-
-    del build_app
-    from .services.hub import HubClient
     from pathlib import Path
 
     from .config import get_settings
     from .db import get_db
+    from .services.hub import HubClient
 
     s = get_settings()
+    eng = mgr._engine_summary()
     checks = [
-        {"项": "浏览器内核", "ok": mgr._engine_summary()["ok"], "详情": mgr._engine_summary()},
+        {"项": "浏览器内核", "ok": eng["ok"], "详情": eng},
+        {"项": "指纹内核", "ok": bool(eng.get("fingerprint_supported")), "详情": "支持 --fingerprint" if eng.get("fingerprint_supported") else "当前内核不认 --fingerprint，环境之间只有 cookie 隔离"},
         {"项": "数据库", "ok": get_db().integrity_ok(), "详情": str(s.db_path)},
         {"项": "数据目录", "ok": Path(s.root).exists(), "详情": str(s.root)},
     ]
@@ -295,12 +387,14 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
                     "知纹（zhiwen）指纹浏览器机群管理器。"
                     "先调 zw_list_profiles 看现状；zw_start_profile 会返回 gateway_ws_url，"
                     "把它交给 Playwright 的 connectOverCDP 就能接管页面。"
+                    "不想接 CDP 时直接用 zw_navigate / zw_page_text / zw_screenshot 也能干活。"
                     "跨机搬运登录态用 zw_sync_push / zw_sync_pull，需要主密码。"
+                    "怀疑指纹不真实时先跑 zw_fingerprint_probe，它的 warnings 会告诉你哪里自相矛盾。"
                 ),
             },
         }
 
-    if method in ("notifications/initialized", "initialized"):
+    if method in ("notifications/initialized", "initialized", "notifications/cancelled"):
         return None
 
     if method == "tools/list":
@@ -311,7 +405,11 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
         args = params.get("arguments") or {}
         entry = TOOLS.get(name)
         if entry is None:
-            return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"没有这个工具：{name}"}}
+            return {
+                "jsonrpc": "2.0",
+                "id": rid,
+                "error": {"code": -32602, "message": f"没有这个工具：{name}（可用：{', '.join(sorted(TOOLS))}）"},
+            }
         _desc, _schema, fn = entry
         try:
             result = fn(args)
@@ -321,23 +419,42 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
                 "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, default=str)}]},
             }
         except Exception as exc:
+            code = getattr(exc, "code", type(exc).__name__)
             return {
                 "jsonrpc": "2.0",
                 "id": rid,
                 "result": {
                     "isError": True,
-                    "content": [{"type": "text", "text": json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)}],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"ok": False, "code": code, "message": getattr(exc, "message", str(exc))},
+                                ensure_ascii=False,
+                            ),
+                        }
+                    ],
                 },
             }
 
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
 
+    if method == "resources/list":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"resources": []}}
+
+    if method == "prompts/list":
+        return {"jsonrpc": "2.0", "id": rid, "result": {"prompts": []}}
+
     return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"不支持的方法：{method}"}}
 
 
 def serve_stdio() -> None:
-    """stdio 传输：一行一条 JSON-RPC 消息。"""
+    """stdio 传输：一行一条 JSON-RPC 消息。
+
+    注意别往 stdout 打任何调试信息 —— 那会被客户端当成协议数据。
+    日志走 stderr。
+    """
     print(json.dumps({"jsonrpc": "2.0", "method": "notifications/ready", "params": {"name": "zhiwen"}}), flush=True)
     for line in sys.stdin:
         line = line.strip()

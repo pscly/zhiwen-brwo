@@ -7,7 +7,7 @@ name: zw-hub
 services:
   hub:
     build: .
-    image: zw-hub:0.1.0
+    image: zw-hub:0.2.0
     container_name: zw-hub
     restart: unless-stopped
     ports:

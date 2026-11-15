@@ -3,15 +3,24 @@
 全部请求都是普通 HTTP（局域网），**不依赖 HTTPS**：
 - 机密性：包体本身是 AEAD 密文，hub 解不开；
 - 完整性：包体自带认证标签，改一个字节就解不开；
-- 可选加固：`ZW_HUB_SIGN=1` 时对请求做 HMAC 签名 + 时间戳防重放（hub 侧需同样开启）。
+- 可选加固：配置了 sign_secret 时对请求做 HMAC 签名 + 时间戳防重放（hub 侧需同样开启）。
+
+## 0.2.0 修的两点
+
+1. `_json` 以前把 `resp.json()` 的错误吞掉后返回原始 dict，导致
+   `latest()` 在 hub 返回非 JSON（比如 nginx 502 页面）时抛的是
+   JSONDecodeError 而不是 HubError —— 上层看到的错误码就乱了。现在统一收敛。
+2. 增加了 `delete_blob` / `stats` / `health` 的完整错误处理。
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -41,7 +50,7 @@ class HubClient:
 
     # ── 内部 ──────────────────────────────────────────────
     def _headers(self, method: str, path: str, body: bytes = b"") -> dict[str, str]:
-        h: dict[str, str] = {"User-Agent": "zhiwen-core/0.1"}
+        h: dict[str, str] = {"User-Agent": "zhiwen-core/0.2"}
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
         if self.sign_secret:
@@ -72,10 +81,15 @@ class HubClient:
         return resp
 
     def _json(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        raw = b"" if body is None else __import__("json").dumps(body, ensure_ascii=False).encode()
+        raw = b"" if body is None else json.dumps(body, ensure_ascii=False).encode()
         resp = self._call(method, path, raw, {"Content-Type": "application/json"} if body else None)
-        data = resp.json()
-        return data.get("data", data)
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise HubError("HUB_BAD_RESPONSE", f"同步中心返回的不是 JSON（HTTP {resp.status_code}）：{resp.text[:200]}") from exc
+        if isinstance(data, dict) and data.get("ok") is False:
+            raise HubError(data.get("code") or "HUB_ERROR", data.get("message") or "同步中心返回失败", status=resp.status_code)
+        return data.get("data", data) if isinstance(data, dict) else {"data": data}
 
     def close(self) -> None:
         self._client.close()
@@ -83,6 +97,9 @@ class HubClient:
     # ── 业务 ──────────────────────────────────────────────
     def health(self) -> dict[str, Any]:
         return self._json("GET", "/healthz")
+
+    def ready(self) -> dict[str, Any]:
+        return self._json("GET", "/readyz")
 
     def meta(self) -> dict[str, Any]:
         return self._json("GET", "/v1/meta")
@@ -93,6 +110,9 @@ class HubClient:
 
     def index(self) -> list[dict[str, Any]]:
         return self._json("GET", "/v1/index").get("profiles", [])
+
+    def stats(self) -> dict[str, Any]:
+        return self._json("GET", "/v1/stats")
 
     def latest(self, profile_id: str) -> dict[str, Any] | None:
         try:
@@ -116,8 +136,6 @@ class HubClient:
         cas: bool = True,
     ) -> dict[str, Any]:
         # HTTP 头只能是 ascii，备注里常有中文 —— 统一 URL 编码后再放进去
-        from urllib.parse import quote
-
         headers = {
             "Content-Type": "application/octet-stream",
             "X-ZW-Key-Fp": key_fp,
@@ -128,7 +146,10 @@ class HubClient:
         if not cas:
             headers["X-ZW-No-Cas"] = "1"
         resp = self._call("PUT", f"/v1/blobs/{profile_id}/{revision}", blob, headers)
-        return resp.json().get("data", {})
+        try:
+            return resp.json().get("data", {})
+        except Exception:
+            return {}
 
     def get_blob(self, profile_id: str, revision: int) -> tuple[bytes, dict[str, str]]:
         resp = self._call("GET", f"/v1/blobs/{profile_id}/{revision}")
@@ -136,6 +157,9 @@ class HubClient:
             "sha256": resp.headers.get("X-ZW-Sha256", ""),
             "key_fp": resp.headers.get("X-ZW-Key-Fp", ""),
         }
+
+    def delete_blob(self, profile_id: str, revision: int) -> dict[str, Any]:
+        return self._json("DELETE", f"/v1/blobs/{profile_id}/{revision}")
 
     def publish_latest(self, profile_id: str, revision: int, force: bool = False) -> dict[str, Any]:
         return self._json("PUT", f"/v1/latest/{profile_id}", {"revision": revision, "force": force})
@@ -148,7 +172,7 @@ class HubClient:
 
     def release_lease(self, profile_id: str, owner: str) -> None:
         try:
-            self._call("DELETE", f"/v1/leases/{profile_id}?owner={owner}")
+            self._call("DELETE", f"/v1/leases/{profile_id}?owner={quote(owner, safe='')}")
         except HubError:
             pass
 
