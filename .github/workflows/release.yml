@@ -81,33 +81,32 @@ jobs:
       - name: 产物重命名
         shell: bash
         run: |
-          mkdir -p out
+          # 注意：所有 cd 都用绝对路径，别靠当前位置。
+          # 之前 macOS 分支在 `cd dist` 之后才 mkdir out，于是 out/ 建到了 dist/ 里，
+          # 最后 ls out/ 报 "No such file or directory" —— zip 都成功了却判失败。
+          OUT="${{ github.workspace }}/out"
+          mkdir -p "$OUT"
+          cd "${{ github.workspace }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "dist/知纹客户端.exe" "out/${{ matrix.artifact }}"
+            cp "dist/知纹客户端.exe" "$OUT/${{ matrix.artifact }}"
           elif [ "${{ runner.os }}" = "macOS" ]; then
-            # spec 用的是 EXE（单文件），macOS 上产物就是 dist/zhiwen-client，
-            # 不是 .app 包。之前写死 "知纹客户端.app" 会找不到文件。
-            # 这里按实际存在的东西打包，并给出明确报错而不是静默产出空 zip。
-            cd dist
+            cd "${{ github.workspace }}/dist"
             ls -la
             if [ -d "知纹客户端.app" ]; then
               TARGET="知纹客户端.app"
             elif [ -f "zhiwen-client" ]; then
               TARGET="zhiwen-client"
-            elif [ -f "知纹客户端" ]; then
-              TARGET="知纹客户端"
             else
               echo "dist 里找不到可打包的产物" >&2
               exit 1
             fi
             echo "打包 $TARGET"
-            chmod +x "$TARGET" 2>/dev/null || true
-            zip -r "../out/${{ matrix.artifact }}" "$TARGET"
+            zip -ry "$OUT/${{ matrix.artifact }}" "$TARGET"
           else
-            cp dist/zhiwen-client "out/${{ matrix.artifact }}"
-            chmod +x "out/${{ matrix.artifact }}"
+            cp "dist/zhiwen-client" "$OUT/${{ matrix.artifact }}"
+            chmod +x "$OUT/${{ matrix.artifact }}"
           fi
-          ls -la out/
+          ls -la "$OUT"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
