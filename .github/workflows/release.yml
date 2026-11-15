@@ -85,8 +85,24 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "dist/知纹客户端.exe" "out/${{ matrix.artifact }}"
           elif [ "${{ runner.os }}" = "macOS" ]; then
-            cd dist && zip -r "../out/${{ matrix.artifact }}" "知纹客户端.app" 2>/dev/null \
-              || zip -r "../out/${{ matrix.artifact }}" "zhiwen-client"
+            # spec 用的是 EXE（单文件），macOS 上产物就是 dist/zhiwen-client，
+            # 不是 .app 包。之前写死 "知纹客户端.app" 会找不到文件。
+            # 这里按实际存在的东西打包，并给出明确报错而不是静默产出空 zip。
+            cd dist
+            ls -la
+            if [ -d "知纹客户端.app" ]; then
+              TARGET="知纹客户端.app"
+            elif [ -f "zhiwen-client" ]; then
+              TARGET="zhiwen-client"
+            elif [ -f "知纹客户端" ]; then
+              TARGET="知纹客户端"
+            else
+              echo "dist 里找不到可打包的产物" >&2
+              exit 1
+            fi
+            echo "打包 $TARGET"
+            chmod +x "$TARGET" 2>/dev/null || true
+            zip -r "../out/${{ matrix.artifact }}" "$TARGET"
           else
             cp dist/zhiwen-client "out/${{ matrix.artifact }}"
             chmod +x "out/${{ matrix.artifact }}"

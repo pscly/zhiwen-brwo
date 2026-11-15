@@ -129,3 +129,21 @@ exe = EXE(  # noqa: F821
     entitlements_file=None,
     icon=None,
 )
+
+# macOS 额外打一个 .app 包（双击能开；未签名，首次要右键「打开」）。
+# 单文件 EXE 在上面已经产出了，这里只是多给一个更像安装包的形式。
+if sys.platform == "darwin":
+    app = BUNDLE(  # noqa: F821
+        exe,
+        name="知纹客户端.app",
+        icon=None,
+        bundle_identifier="cc.pscly.zhiwen.client",
+        info_plist={
+            "CFBundleName": "知纹客户端",
+            "CFBundleDisplayName": "知纹客户端",
+            "CFBundleShortVersionString": "0.3.0",
+            "NSHighResolutionCapable": True,
+            # 客户端要联网到自己填的服务器地址，不需要沙箱
+            "LSMinimumSystemVersion": "11.0",
+        },
+    )
