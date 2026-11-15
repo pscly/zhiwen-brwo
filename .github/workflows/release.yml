@@ -1,0 +1,155 @@
+name: 发布安装包
+
+# 触发方式：
+#   1. 推 tag（v0.3.0）→ 自动构建并发布 Release
+#   2. 手动 Actions 页面点「Run workflow」→ 只构建，产物在 Artifacts 里下载（不发布）
+#
+# 用户最终看到的是 Releases 页面上的三个文件，下载双击就能用：
+#   知纹客户端-Windows.exe       （Windows 10/11，双击即用，不弹黑框）
+#   zhiwen-client-Linux-x86_64    （Linux，chmod +x 后直接跑）
+#   zhiwen-client-macOS.zip       （macOS，解压后右键打开）
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            artifact: 知纹客户端-Windows.exe
+          - os: ubuntu-latest
+            label: Linux-x86_64
+            artifact: zhiwen-client-Linux-x86_64
+          - os: macos-latest
+            label: macOS
+            artifact: zhiwen-client-macOS.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./core
+          python -m pip install pyinstaller
+
+      - name: 跑一遍单元测试（打包前先确认代码是好的）
+        shell: bash
+        run: |
+          python -m pip install pytest pytest-asyncio
+          python -m pytest tests -q -x
+
+      - name: 构建可执行文件
+        shell: bash
+        run: python -m PyInstaller packaging/zhiwen-client.spec --noconfirm
+
+      - name: 冒烟测试（产物能跑起来，不是坏文件）
+        shell: bash
+        run: |
+          # 打包最常见的坑是"能构建、一跑就 ModuleNotFound"（比如 datas 里的
+          # 控制台页面没打进去、uvicorn 的后端模块没被静态分析到）。
+          # --selftest 把客户端真正用到的依赖逐项走一遍，且不需要图形界面。
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN="dist/知纹客户端.exe"
+          else
+            BIN="dist/zhiwen-client"
+          fi
+          ls -la "$BIN"
+          "$BIN" --selftest
+
+      - name: 产物重命名
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "dist/知纹客户端.exe" "out/${{ matrix.artifact }}"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cd dist && zip -r "../out/${{ matrix.artifact }}" "知纹客户端.app" 2>/dev/null \
+              || zip -r "../out/${{ matrix.artifact }}" "zhiwen-client"
+          else
+            cp dist/zhiwen-client "out/${{ matrix.artifact }}"
+            chmod +x "out/${{ matrix.artifact }}"
+          fi
+          ls -la out/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: out/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    name: 发布到 Releases
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || shasum -a 256 * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: 写发布说明
+        run: |
+          cat > NOTES.md <<'EOF'
+          ## 下载哪个
+
+          | 系统 | 文件 | 怎么用 |
+          |---|---|---|
+          | Windows 10/11 | `知纹客户端-Windows.exe` | 双击运行。首次可能被 SmartScreen 提示，点「更多信息 → 仍要运行」 |
+          | Linux x86_64 | `zhiwen-client-Linux-x86_64` | `chmod +x` 后直接运行 |
+          | macOS | `zhiwen-client-macOS.zip` | 解压后右键「打开」（未签名） |
+
+          ## 第一次用
+
+          1. 双击打开，只填一个**服务器地址**（例如 `192.168.3.5:8700`）
+          2. 点「连接并开始」
+          3. 会自动打开本机控制台 `http://127.0.0.1:8730`
+
+          服务器端不需要对接码（除非部署时设了 `ZW_HUB_TOKEN`，那就要填对接码）。
+
+          机器码在首次启动时自动生成，存在本机配置里。服务器端管理面板可以按机器码踢掉某台电脑。
+
+          ## 服务器端
+
+          管理面板：`http://<你的服务器>:8700/panel`（默认登录 `pscly` / `REDACTED_PANEL_PASSWORD`，可用环境变量覆盖）
+
+          详见仓库里的 `docs/11-客户端与服务器端.md`。
+          EOF
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 知纹 ${{ github.ref_name }}
+          body_path: NOTES.md
+          files: |
+            artifacts/*
+          draft: false
+          prerelease: false

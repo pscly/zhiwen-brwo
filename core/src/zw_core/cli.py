@@ -109,6 +109,13 @@ def cmd_serve(args: argparse.Namespace) -> None:
     run()
 
 
+def cmd_client(args: argparse.Namespace) -> None:
+    """启动桌面客户端（图形界面；没有 tkinter 时退回命令行）。"""
+    from .client import run_gui
+
+    raise SystemExit(run_gui())
+
+
 def cmd_mcp(args: argparse.Namespace) -> None:
     from .mcp_server import serve_stdio
 
@@ -542,6 +549,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("serve", help="启动 HTTP 服务（控制台 + API + 网关）")
     sp.set_defaults(func=cmd_serve)
+
+    sp = sub.add_parser("client", help="启动桌面客户端（只需填服务器地址）")
+    sp.set_defaults(func=cmd_client)
 
     sp = sub.add_parser("mcp", help="以 MCP 协议在 stdio 上服务（给 AI 客户端拉起）")
     sp.set_defaults(func=cmd_mcp)

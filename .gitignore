@@ -44,3 +44,8 @@ Thumbs.db
 .env.test
 remote-shot.png
 ui-console.png
+
+# 打包产物（不进仓库，用 Releases 分发）
+packaging/build/
+packaging/dist/
+*.spec.bak

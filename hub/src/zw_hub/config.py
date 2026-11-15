@@ -30,8 +30,13 @@ class Settings:
     # 数据根目录（容器内挂卷）
     data_dir: Path = field(default_factory=lambda: Path(_env("ZW_DATA_DIR", "/data")))
 
-    # 访问令牌：客户端必须带 Authorization: Bearer <token>
-    # 留空则只允许本机回环访问（方便开发）
+    # 访问令牌（可选加固）。
+    #
+    # 默认**留空**：个人自用的形态是"客户端只填服务器 IP 就能用"，
+    # 再要求一串对接码就违背了这个目标。留空时准入靠设备注册表
+    # （每台电脑都要注册成设备，服务器端可以按机器码踢掉）。
+    #
+    # 需要更严时设 ZW_HUB_TOKEN：此时客户端要填对接码，且所有 API 都要求它。
     token: str = field(default_factory=lambda: _env("ZW_HUB_TOKEN", ""))
 
     # 监听
@@ -56,11 +61,29 @@ class Settings:
         default_factory=lambda: [c.strip() for c in _env("ZW_ALLOWED_CIDRS", "").split(",") if c.strip()]
     )
 
+    # ── 管理面板 ────────────────────────────────────────
+    # 面板登录。默认值按"个人自用"给了固定的账号密码，但可用环境变量覆盖；
+    # 部署脚本会把 ZW_PANEL_PASSWORD 随机化后写进 .env，避免真的用仓库里的默认值。
+    panel_user: str = field(default_factory=lambda: _env("ZW_PANEL_USER", "pscly"))
+    panel_password: str = field(default_factory=lambda: _env("ZW_PANEL_PASSWORD", "REDACTED_PANEL_PASSWORD"))
+    # 面板会话密钥（签名 cookie 用）。留空则每次启动随机生成（重启后需重新登录）。
+    panel_secret: str = field(default_factory=lambda: _env("ZW_PANEL_SECRET", ""))
+    # 面板会话有效期（秒）
+    panel_session_ttl: int = field(default_factory=lambda: _env_int("ZW_PANEL_SESSION_TTL", 7 * 24 * 3600))
+    # 新设备是否自动放行。个人自用 = True（只填 IP 就能用）；
+    # 想审核就设 false，新设备会停在 pending，需要在面板里点放行。
+    auto_approve: bool = field(default_factory=lambda: _env_bool("ZW_DEVICE_AUTO_APPROVE", True))
+
     # 日志
     log_level: str = field(default_factory=lambda: _env("ZW_LOG_LEVEL", "INFO").upper())
     log_dir: Path = field(default_factory=lambda: Path(_env("ZW_LOG_DIR", "")))
 
     def resolve_paths(self) -> None:
+        if not self.panel_secret:
+            # 会话签名密钥：随机生成，重启后旧 cookie 失效（可接受，登录一次很快）
+            import secrets
+
+            self.panel_secret = secrets.token_urlsafe(32)
         self.data_dir = Path(self.data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "blobs").mkdir(parents=True, exist_ok=True)

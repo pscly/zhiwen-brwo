@@ -18,13 +18,20 @@ services:
     environment:
       ZW_DATA_DIR: /data
       ZW_HUB_PORT: "8700"
-      # 必改：客户端用它作为 Bearer token
-      ZW_HUB_TOKEN: ${ZW_HUB_TOKEN:?请先在 .env 里设置 ZW_HUB_TOKEN}
+      # 可选：留空 = 不要对接码（默认）。
+      # 留空时准入靠设备注册表：每台电脑都要注册，服务器端可按机器码踢下线。
+      # 想更严就取消 .env 里的注释并填一串随机值，客户端会出现"对接码"输入框。
+      ZW_HUB_TOKEN: ${ZW_HUB_TOKEN:-}
       ZW_KEEP_REVISIONS: "10"
       ZW_LEASE_TTL: "90"
       ZW_MAX_BLOB_BYTES: "268435456"
       ZW_LOG_LEVEL: "INFO"
       # 局域网内简单完整性校验：默认关闭，需要时设 true 并配 secret
+      # 管理面板登录（可用 .env 覆盖）
+      ZW_PANEL_USER: ${ZW_PANEL_USER:-pscly}
+      ZW_PANEL_PASSWORD: ${ZW_PANEL_PASSWORD:-REDACTED_PANEL_PASSWORD}
+      # 新设备自动放行：客户端只填 IP 就能用
+      ZW_DEVICE_AUTO_APPROVE: ${ZW_DEVICE_AUTO_APPROVE:-true}
       ZW_REQUIRE_SIGNATURE: "false"
       ZW_SIGNATURE_SECRET: ${ZW_SIGNATURE_SECRET:-}
       TZ: Asia/Hong_Kong

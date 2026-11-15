@@ -1,5 +1,72 @@
 # CHANGELOG
 
+## 0.3.0 — 2026-11-16
+
+把架构从「每台机器各跑一套」扩成「客户端 + 服务器端」，并加了发行包。
+
+### 新增：客户端（桌面程序）
+
+- **首启只要一个输入框：服务器地址。** `192.168.3.5`、`192.168.3.5:8700`、
+  `HTTPS://example.com` 都认，自动补协议与默认端口。
+- **默认不要对接码。** 连上先问服务器 `GET /v1/enroll-info`，服务器说要不要就怎么来。
+- **自动生成机器码**（`zwd_` + 32 字符），存本地 `client.json`（0600），之后一直用。
+- 点一次「连接并开始」= 注册设备 → 起本机 core（进程内线程，不用子进程找 python）→ 打开控制台。
+- **被踢下线时说人话**：弹窗「这台电脑已被服务器端移除」，而不是抛 403。
+- 心跳线程 60 秒一次，被踢时立刻反映到界面。
+- `--selftest`：逐项检查打包是否完整（依赖/控制台页面/AEAD 往返/Argon2/配置目录/机器码），
+  用在 CI 与「下载后跑不起来」的排查。
+- 没有 tkinter 的环境自动退回问答式 CLI，不崩。
+- 字体自动探测（含大小写不敏感匹配与关键字兜底）：Windows 雅黑 / macOS 苹方 /
+  Linux 文泉驿·思源都能正确显示中文。
+
+### 新增：服务器端设备管理
+
+- **设备注册表**（`hub/src/zw_hub/devices.py`，SQLite）：记录机器码、主机名、平台、
+  首次/最近在线、IP、状态。
+- **踢下线**：置 `status=revoked`，之后该设备的心跳、注册、同步全部 `403 DEVICE_REVOKED`。
+  **重连不能自愈**（否则踢下线没意义）—— 这是刻意的设计，有专门的回归测试。
+- 踢下线只影响那一台；随时可恢复，下一次心跳（≤60 秒）生效。
+- 改名、删除、事件留痕（谁注册/谁被踢/谁恢复）。
+
+### 新增：Web 管理面板（`/panel`）
+
+登录 `pscly` / `REDACTED_PANEL_PASSWORD`（可用 `ZW_PANEL_USER` / `ZW_PANEL_PASSWORD` 覆盖）。
+设备列表（在线/离线/已踢三态）、KPI、事件流、踢下线/恢复/改名/删除。
+会话 cookie 是带密钥的 HMAC（`httponly`、`samesite=lax`），不是用户名，伪造不了。
+
+### 新增：发行包
+
+- `packaging/zhiwen-client.spec`：PyInstaller onefile，Windows 上 `console=False`（双击不弹黑框）。
+- `.github/workflows/release.yml`：推 tag 自动在 Windows/Linux/macOS 三平台构建并发布 Release，
+  构建前先跑单元测试，构建后用 `--selftest` 验证产物不是坏文件。
+- 踩过的两个打包坑（都已修，写进注释）：
+  1. 入口用相对导入 → 打包后 `attempted relative import with no known parent package`；
+  2. Tcl/Tk 运行库没收进去 → 换台机器就 `libtcl9.0.so not found`（uv/pyenv 的 Python
+     把 tcl 放在自己的 lib 目录，只扫 `/usr/lib` 会漏）。
+
+### 设计上的一个判断
+
+「默认不要对接码」和「端口对局域网开放」看似矛盾。做法是：
+**准入交给设备注册表** —— 每台电脑都要注册成设备，服务器上看得见、能踢；
+令牌（`ZW_HUB_TOKEN`）降级为可选加固项，默认关闭。
+想更严就设 `ZW_DEVICE_AUTO_APPROVE=false`（新设备要手动放行）或开令牌。
+
+### 测试
+
+142 → **192 项**。新增 `test_devices.py`（13）、`test_panel_api.py`（13）、`test_client.py`（24）。
+文档一致性测试加入了 `DeviceError` 的扫描 —— 它立刻发现两个新错误码没进文档。
+
+### 顺手修掉的
+
+- `hub/docker-compose.yml` 里 `ZW_HUB_TOKEN` 用了 `${VAR:?}` 强制必填，
+  导致「注释掉 .env 里的令牌」根本不生效（容器还带着旧值）。
+- 面板首次加载用 `stats` 探活，会在 console 里留一条 401（看着像坏了），改用 `whoami`。
+- hub 补 `/favicon.ico`，避免 404 污染 console。
+- `normalize_server` 的边界：`http://`（只有协议）会被拼成 `http://http:8700` 这种假地址；
+  大写 `HTTPS://` 不被识别。
+
+---
+
 ## 0.2.0 — 2026-11-16
 
 这一版的目标是「明天直接能用的成品」，所以重点不在加功能，而在**把 0.1.0 里会说谎、

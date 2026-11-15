@@ -1,6 +1,6 @@
 [project]
 name = "zw-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "知纹核心（zhiwen core）—— 指纹浏览器机群的编排层、CDP 网关与同步客户端"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 
 [project.scripts]
 zw = "zw_core.cli:main"
+zw-client = "zw_core.client:main"
 
 [build-system]
 requires = ["hatchling"]

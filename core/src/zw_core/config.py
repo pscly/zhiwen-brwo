@@ -116,6 +116,9 @@ class Settings:
     sync_enabled: bool = field(default_factory=lambda: _env_bool("ZW_SYNC_ENABLED", True))
     # 跨机推送时单个环境的体积上限（超过就拒绝，避免把 hub 撑爆）
     sync_max_bundle_bytes: int = field(default_factory=lambda: _env_int("ZW_SYNC_MAX_BUNDLE_BYTES", 128 * 1024 * 1024))
+    # 本机在服务器端的机器码。客户端会把它写进 client.json 并通过这里注入；
+    # 空字符串表示"不参与设备管理"（老用法/纯局域网自用仍可工作）。
+    device_id: str = field(default_factory=lambda: _env("ZW_DEVICE_ID", ""))
 
     # ── 日志 ────────────────────────────────────────────
     log_level: str = field(default_factory=lambda: _env("ZW_LOG_LEVEL", "INFO").upper())

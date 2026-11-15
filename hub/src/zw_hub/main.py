@@ -31,14 +31,16 @@ import json
 import logging
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi import Body, Depends, FastAPI, Header, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import get_settings
+from .devices import DeviceError, DeviceStore
 from .store import HubError, Store
 
 logger = logging.getLogger("zw.hub")
@@ -50,6 +52,7 @@ app = FastAPI(
 )
 
 _store: Store | None = None
+_devices: DeviceStore | None = None
 
 
 def store() -> Store:
@@ -60,6 +63,14 @@ def store() -> Store:
     return _store
 
 
+def devices() -> DeviceStore:
+    global _devices
+    if _devices is None:
+        s = get_settings()
+        _devices = DeviceStore(s.data_dir / "devices.db")
+    return _devices
+
+
 # ── 响应包装 ──────────────────────────────────────────────
 def ok(data: Any = None) -> dict[str, Any]:
     return {"ok": True, "data": data}
@@ -67,6 +78,11 @@ def ok(data: Any = None) -> dict[str, Any]:
 
 @app.exception_handler(HubError)
 async def _hub_error_handler(_: Request, exc: HubError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"ok": False, "code": exc.code, "message": exc.message})
+
+
+@app.exception_handler(DeviceError)
+async def _device_error_handler(_: Request, exc: DeviceError) -> JSONResponse:
     return JSONResponse(status_code=exc.status, content={"ok": False, "code": exc.code, "message": exc.message})
 
 
@@ -133,6 +149,11 @@ async def auth(request: Request, authorization: str = Header(default="")) -> Non
             raise HubError(401, "UNAUTHENTICATED", "访问令牌不正确（请求头需为 Authorization: Bearer <token>）")
     raw = await request.body()
     _verify_signature(request, raw, {k.lower(): v for k, v in request.headers.items()})
+    # 设备校验：客户端会带 X-ZW-Device。带了就校验它是否被踢；
+    # 不带也放行（curl/脚本/面板之外的老用法保持兼容，且它们本来就要过令牌）。
+    dev = request.headers.get("x-zw-device", "").strip()
+    if dev:
+        devices().require_active(dev)
 
 
 Auth = Depends(auth)
@@ -365,6 +386,223 @@ def release(pid: str, owner: str = "") -> dict[str, Any]:
 @app.get("/v1/leases/{pid}", dependencies=[Auth], summary="查询租约")
 def lease(pid: str) -> dict[str, Any]:
     return ok(store().get_lease(pid))
+
+
+# ══════════════════════════════════════════════════════════
+#  设备注册表（客户端只填 IP 就能用，服务器仍能踢下线）
+# ══════════════════════════════════════════════════════════
+class EnrollBody(BaseModel):
+    device_id: str = Field(min_length=8, max_length=128, description="客户端首次启动生成的随机 ID")
+    hostname: str = ""
+    platform: str = ""
+    arch: str = ""
+    app_version: str = ""
+    label: str = ""
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+@app.get("/v1/enroll-info", summary="客户端首次连接前探测：这台服务器要不要对接码")
+def enroll_info() -> dict[str, Any]:
+    """客户端在"只填 IP"之后先打这个，就知道后续该怎么做。
+
+    这是"默认不要对接码"的落地：客户端不需要预先知道任何令牌，
+    连上就问服务器"我需要什么"，服务器说了算。想收紧就设
+    ZW_HUB_TOKEN 并把 ZW_DEVICE_AUTO_APPROVE=false。
+    """
+    s = get_settings()
+    return ok(
+        {
+            "service": "zhiwen-hub",
+            "version": __version__,
+            "enroll_endpoint": "/v1/devices/enroll",
+            "token_required": bool(s.token),
+            "auto_approve": s.auto_approve,
+            "heartbeat_seconds": 60,
+            "hint": "先 POST /v1/devices/enroll 带上 device_id；之后所有请求带 X-ZW-Device 头",
+        }
+    )
+
+
+@app.post("/v1/devices/enroll", summary="注册设备（或刷新已在册设备）")
+def enroll(body: EnrollBody, request: Request) -> dict[str, Any]:
+    """设备注册。
+
+    注意这条**故意不做 Bearer 校验**：客户端第一次连上来时手里什么都没有
+    （用户只填了 IP）。设备身份靠 device_id 本身，而能不能用由
+    `status` 决定 —— 也就是服务器侧的踢下线开关。
+    如果部署者设了 ZW_HUB_TOKEN，则注册仍需令牌（客户端里可以填对接码）。
+    """
+    s = get_settings()
+    if s.token:
+        auth = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(auth, s.token):
+            raise HubError(401, "UNAUTHENTICATED", "这台服务器要求对接码（群里给你的那串），请填到客户端里")
+    rec = devices().enroll(
+        body.device_id,
+        hostname=body.hostname,
+        platform=body.platform,
+        arch=body.arch,
+        app_version=body.app_version,
+        label=body.label,
+        ip=_client_ip(request),
+    )
+    if rec["status"] == "revoked":
+        raise DeviceError(403, "DEVICE_REVOKED", "这台设备已被服务器端踢下线，请联系管理员恢复")
+    return ok(
+        {
+            "device": rec,
+            "auto_approve": s.auto_approve,
+            "token_required": bool(s.token),
+            "heartbeat_seconds": 60,
+        }
+    )
+
+
+@app.post("/v1/devices/heartbeat", summary="心跳（顺带校验设备是否被踢）")
+def device_heartbeat(request: Request, x_zw_device: str = Header(default="")) -> dict[str, Any]:
+    dev_id = x_zw_device or request.headers.get("x-zw-device", "")
+    devices().require_active(dev_id)
+    rec = devices().touch(dev_id, ip=_client_ip(request))
+    return ok({"device": rec, "server_time": time.time()})
+
+
+# ══════════════════════════════════════════════════════════
+#  管理面板（浏览器登录用，与 API 令牌是两套东西）
+# ══════════════════════════════════════════════════════════
+PANEL_COOKIE = "zw_panel"
+
+
+def _panel_token() -> str:
+    """会话 cookie 的值：对 panel_user 做一次带密钥的 HMAC，不需要额外存储。"""
+    s = get_settings()
+    return hmac.new(s.panel_secret.encode(), f"panel:{s.panel_user}".encode(), hashlib.sha256).hexdigest()
+
+
+def panel_auth(request: Request) -> str:
+    """校验面板会话。返回登录名。"""
+    s = get_settings()
+    got = request.cookies.get(PANEL_COOKIE, "")
+    if not got or not hmac.compare_digest(got, _panel_token()):
+        raise HubError(401, "PANEL_UNAUTHENTICATED", "面板未登录或会话已过期")
+    return s.panel_user
+
+
+PanelAuth = Depends(panel_auth)
+
+
+class LoginBody(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    """内联图标，避免浏览器因为 404 在 console 里刷错误（看着像 bug）。"""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+        '<rect width="32" height="32" rx="7" fill="#5b9dff"/>'
+        '<path d="M9 10h14l-8 6 8 6H9" fill="none" stroke="#fff" stroke-width="2.4" '
+        'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    )
+    return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/panel", include_in_schema=False)
+def panel_page() -> Response:
+    html = Path(__file__).parent / "web" / "panel.html"
+    if not html.exists():
+        return HTMLResponse("<h1>知纹管理面板</h1><p>面板文件缺失（web/panel.html）。</p>", status_code=500)
+    return HTMLResponse(html.read_text(encoding="utf-8"))
+
+
+@app.post("/panel/api/login", include_in_schema=False)
+def panel_login(body: LoginBody, response: Response) -> dict[str, Any]:
+    s = get_settings()
+    ok_user = hmac.compare_digest(body.username.strip(), s.panel_user)
+    ok_pass = hmac.compare_digest(body.password, s.panel_password)
+    if not (ok_user and ok_pass):
+        # 统一错误信息，不告诉对方是用户名错还是密码错
+        raise HubError(401, "PANEL_BAD_CREDENTIALS", "登录名或密码不正确")
+    response.set_cookie(
+        PANEL_COOKIE,
+        _panel_token(),
+        max_age=s.panel_session_ttl,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    logger.info("面板登录成功 user=%s ip=%s", body.username, "-")
+    return ok({"user": s.panel_user, "ttl": s.panel_session_ttl})
+
+
+@app.post("/panel/api/logout", include_in_schema=False)
+def panel_logout(response: Response) -> dict[str, Any]:
+    response.delete_cookie(PANEL_COOKIE, path="/")
+    return ok({"logged_out": True})
+
+
+@app.get("/panel/api/meta", dependencies=[PanelAuth], include_in_schema=False)
+def panel_meta() -> dict[str, Any]:
+    s = get_settings()
+    return ok({"version": __version__, "data_dir": str(s.data_dir), "auto_approve": s.auto_approve,
+               "token_required": bool(s.token), "user": s.panel_user})
+
+
+@app.get("/panel/api/whoami", include_in_schema=False)
+def panel_whoami(request: Request) -> dict[str, Any]:
+    """未登录也返回 200（logged_in=false）。
+
+    为什么不用 stats 探活：那会在浏览器 console 里留下一条 401，
+    看着像页面出错了。这里明确区分"没登录"（正常状态）和"接口挂了"。
+    """
+    got = request.cookies.get(PANEL_COOKIE, "")
+    logged = bool(got) and hmac.compare_digest(got, _panel_token())
+    return ok({"logged_in": logged})
+
+
+@app.get("/panel/api/stats", dependencies=[PanelAuth], include_in_schema=False)
+def panel_stats() -> dict[str, Any]:
+    return ok(devices().stats())
+
+
+@app.get("/panel/api/devices", dependencies=[PanelAuth], include_in_schema=False)
+def panel_devices() -> dict[str, Any]:
+    return ok({"devices": devices().listing()})
+
+
+@app.post("/panel/api/devices/{device_id}/revoke", dependencies=[PanelAuth], include_in_schema=False)
+def panel_revoke(device_id: str, request: Request, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    actor = panel_auth(request)
+    note = (body or {}).get("note", "")
+    rec = devices().revoke(device_id, actor=actor, note=note)
+    logger.warning("面板踢下线 device=%s by=%s", device_id, actor)
+    return ok(rec)
+
+
+@app.post("/panel/api/devices/{device_id}/restore", dependencies=[PanelAuth], include_in_schema=False)
+def panel_restore(device_id: str, request: Request) -> dict[str, Any]:
+    rec = devices().restore(device_id, actor=panel_auth(request))
+    logger.info("面板恢复设备 device=%s", device_id)
+    return ok(rec)
+
+
+@app.patch("/panel/api/devices/{device_id}", dependencies=[PanelAuth], include_in_schema=False)
+def panel_rename(device_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    return ok(devices().set_label(device_id, str(body.get("label") or "")[:64]))
+
+
+@app.delete("/panel/api/devices/{device_id}", dependencies=[PanelAuth], include_in_schema=False)
+def panel_delete(device_id: str, request: Request) -> dict[str, Any]:
+    deleted = devices().delete(device_id, actor=panel_auth(request))
+    return ok({"deleted": deleted, "device_id": device_id})
+
+
+@app.get("/panel/api/events", dependencies=[PanelAuth], include_in_schema=False)
+def panel_events(limit: int = 100) -> dict[str, Any]:
+    return ok({"events": devices().events(limit=max(1, min(limit, 500)))})
 
 
 # ── 启动 ──────────────────────────────────────────────────

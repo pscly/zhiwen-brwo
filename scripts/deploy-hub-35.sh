@@ -16,10 +16,21 @@ rsync -az --delete --exclude='__pycache__' --exclude='.venv' --exclude='.env' \
 echo "==> 3/5 生成/保留令牌"
 if ssh "$HOST" "test -f $REMOTE_DIR/.env"; then
   echo "    .env 已存在，沿用原令牌"
+  # 老 .env 没有面板相关配置时补上（不改已有值）
+  ssh "$HOST" "grep -q '^ZW_PANEL_PASSWORD=' $REMOTE_DIR/.env || echo 'ZW_PANEL_PASSWORD=REDACTED_PANEL_PASSWORD' >> $REMOTE_DIR/.env"
+  ssh "$HOST" "grep -q '^ZW_DEVICE_AUTO_APPROVE=' $REMOTE_DIR/.env || echo 'ZW_DEVICE_AUTO_APPROVE=true' >> $REMOTE_DIR/.env"
+  ssh "$HOST" "grep -q '^ZW_PANEL_USER=' $REMOTE_DIR/.env || echo 'ZW_PANEL_USER=pscly' >> $REMOTE_DIR/.env"
 else
   TOKEN=$(python3 -c "import secrets;print('zw_' + secrets.token_urlsafe(36))")
+  PANEL_PW=$(python3 -c "import secrets;print(secrets.token_urlsafe(12))")
   ssh "$HOST" "cat > $REMOTE_DIR/.env <<ENVFILE
 ZW_HUB_TOKEN=$TOKEN
+# 管理面板（浏览器登录）。默认给的是仓库里的 pscly/REDACTED_PANEL_PASSWORD，
+# 这里生成一个随机密码更安全；想用固定密码就把这行改成 ZW_PANEL_PASSWORD=你的密码
+ZW_PANEL_USER=pscly
+ZW_PANEL_PASSWORD=$PANEL_PW
+# 新设备是否自动放行：个人自用=true（客户端只填 IP 就能用）
+ZW_DEVICE_AUTO_APPROVE=true
 ENVFILE
 chmod 600 $REMOTE_DIR/.env"
   echo "    已生成新令牌（存在 $REMOTE_DIR/.env）"

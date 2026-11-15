@@ -50,9 +50,16 @@ class HubClient:
 
     # ── 内部 ──────────────────────────────────────────────
     def _headers(self, method: str, path: str, body: bytes = b"") -> dict[str, str]:
-        h: dict[str, str] = {"User-Agent": "zhiwen-core/0.2"}
+        h: dict[str, str] = {"User-Agent": "zhiwen-core/0.3"}
         if self.token:
             h["Authorization"] = f"Bearer {self.token}"
+        # 带上机器码：服务器据此判断这台电脑是否被踢下线。
+        # 没配（纯局域网自用）时不带，服务器也放行。
+        from ..config import get_settings
+
+        dev = get_settings().device_id
+        if dev:
+            h["X-ZW-Device"] = dev
         if self.sign_secret:
             ts = str(int(time.time()))
             body_hash = hashlib.sha256(body).hexdigest()
