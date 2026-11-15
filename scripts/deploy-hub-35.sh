@@ -29,6 +29,18 @@ echo "==> 4/5 构建并启动"
 ssh "$HOST" "cd $REMOTE_DIR && sudo docker compose up -d --build"
 
 echo "==> 5/5 验证"
-sleep 4
-ssh "$HOST" "curl -fsS http://127.0.0.1:8700/healthz" && echo
-echo "完成。令牌查看：ssh $HOST 'cat $REMOTE_DIR/.env'"
+# 容器刚 recreate 时还在启动，固定 sleep 容易在慢机器上误报失败。
+# 改成轮询到就绪（最多 60 秒），失败时把容器日志尾巴打出来便于定位。
+for i in $(seq 1 30); do
+  if ssh "$HOST" "curl -fsS -m 3 http://127.0.0.1:8700/healthz" 2>/dev/null; then
+    echo
+    ssh "$HOST" 'sudo docker ps --filter name=zw-hub --format "    {{.Names}} {{.Status}} {{.Image}}"' || true
+    echo "完成。令牌查看：ssh $HOST 'cat $REMOTE_DIR/.env'"
+    exit 0
+  fi
+  sleep 2
+done
+echo "    [失败] hub 60 秒内没就绪，最近日志："
+ssh "$HOST" 'sudo docker logs --tail 30 zw-hub 2>&1' || true
+exit 1
+
