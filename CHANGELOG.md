@@ -1,5 +1,60 @@
 # CHANGELOG
 
+## 0.3.2 — 2026-11-16
+
+修一个**会让 Windows 用户第一次打开就失败**的缺陷，并把服务器面板做成可点入口。
+
+### 修：`ValueError: Unable to configure formatter 'default'`
+
+云电脑上真机复现的报错：
+
+```
+本机服务启动失败：
+ValueError: Unable to configure formatter 'default'
+```
+
+根因不是配置问题，是**打包形态**问题：Windows 用 `console=False` 打包后
+`sys.stdout` / `sys.stderr` 都是 `None`。而 uvicorn 默认会用 `dictConfig`
+配日志，它的 `default` formatter 构造时要调 `sys.stdout.isatty()`
+→ `AttributeError`，`dictConfig` 把它包成那句 `ValueError`。
+
+两处修复：
+- `uvicorn.Config(..., log_config=None)`：不让 uvicorn 重配日志
+  （我们自己的 `setup_logging()` 已经管好了）。`main.py` 的 `uvicorn.run` 同样处理。
+- `setup_logging()` 拿不到可用的流时**不装 StreamHandler**，只留文件日志
+  —— 否则第一次写日志就会在 `Handler.emit` 里炸。
+
+本地复现方式（已写成测试）：把 `sys.stdout`/`sys.stderr` 都置 `None` 再启动
+`LocalCore`。修复前必抛那句 ValueError，修复后正常启动并响应 `/healthz`。
+
+### 自检新增一项：真的启动一次本机服务
+
+`--selftest` 原来只检查 `create_app()` 能构造，**不启动 uvicorn** ——
+所以这个 bug 在自检里完全看不出来（它只在真启动时才炸）。
+
+现在新增 `本机服务可启动（无控制台）`：刻意把标准流置 `None`（模拟 Windows
+GUI 子程序），真起一次 uvicorn，访问 `/healthz`，再关掉。自检从 11 项变 12 项。
+
+> 这是这次最值钱的一条：自检和真实启动路径不一致时，自检就是安慰剂。
+
+### 客户端：服务器面板做成可点入口
+
+用户反馈"不知道怎么打开 3.5 的管理控制台"。现在：
+- 连接信息卡里有「服务器面板」按钮
+- 底部动作栏里有「服务器面板」按钮（未连接时禁用）
+- 连上时事件流直接打出 `服务器管理面板：http://<服务器>/panel`
+- 首次配置页也写明"管理面板在：服务器地址 + /panel"
+
+### 测试
+
+222 → **226 项**。新增 `tests/test_no_console.py`（4 项）：
+无流时 `setup_logging` 不崩且仍写文件、`LocalCore` 确实传了 `log_config=None`、
+无流时能真启动并响应 `/healthz`、无流时统计接口可用。
+
+顺带修了一处测试间污染：`LocalCore.start(device_id=...)` 会写全局
+`ZW_DEVICE_ID`，不清理会让后续同步测试带着"未注册设备"去请求 hub
+（报 `设备未注册：zwd_testabcdefgh`）。新测试的 fixture 现在会隔离它。
+
 ## 0.3.1 — 2026-11-16
 
 在 0.3.0 基础上把「日常真的能用」这层补齐。

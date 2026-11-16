@@ -273,6 +273,8 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     id_label.pack(anchor="w", pady=(5, 4))
     ttk.Label(id_card, text="服务器面板用它在设备列表里认出这台机器；删掉配置会变新号。",
               style="Faint.TLabel").pack(anchor="w")
+    ttk.Label(id_card, text="管理面板在：服务器地址 + /panel（连上之后底部也有「服务器面板」按钮）",
+              style="Faint.TLabel").pack(anchor="w", pady=(3, 0))
 
     def copy_from_setup() -> None:
         try:
@@ -300,6 +302,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     conn_server.pack(side="left", padx=(8, 0))
     ttk.Button(row1, text="断开", style="Ghost.TButton", command=lambda: disconnect()).pack(side="right")
     ttk.Button(row1, text="重连", style="Ghost.TButton", command=lambda: reconnect()).pack(side="right", padx=(0, 6))
+    # 服务器面板直连入口：用户不知道面板地址时，不该让他去翻文档
+    ttk.Button(row1, text="服务器面板", style="Ghost.TButton",
+               command=lambda: open_panel()).pack(side="right", padx=(0, 6))
 
     row2 = ttk.Frame(conn_card, style="Card.TFrame")
     row2.pack(fill="x", pady=(8, 0))
@@ -356,6 +361,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     open_btn.state(["disabled"])
     self_btn = ttk.Button(footer, text="自检", command=lambda: run_selftest())
     self_btn.pack(side="left", padx=(8, 0))
+    panel_btn = ttk.Button(footer, text="服务器面板", command=lambda: open_panel())
+    panel_btn.pack(side="left", padx=(8, 0))
+    panel_btn.state(["disabled"])
 
     # 开机自启开关：用户要求"需要，但必须能在界面里关掉"。
     # 勾选状态从真实系统状态读（不是从配置读），
@@ -400,6 +408,24 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     # ── 动作 ────────────────────────────────────────────
     def open_console() -> None:
         webbrowser.open(f"http://127.0.0.1:{core.port}")
+
+    def open_panel() -> None:
+        """打开服务器端管理面板（就是那个能踢设备的面板）。"""
+        base = state.get("base") or normalize_server(server_var.get().strip())
+        if not base:
+            messagebox.showinfo(APP_NAME, "还没连上服务器。先在下面填服务器地址并连接。")
+            return
+        url = base.rstrip("/") + "/panel"
+        try:
+            webbrowser.open(url)
+            log(f"已在浏览器打开服务器面板：{url}", "ok")
+        except Exception as exc:
+            log(f"打开面板失败：{exc}", "warn")
+            messagebox.showinfo(
+                "服务器面板",
+                f"自动打开失败，请手动在浏览器里访问：\n\n{url}\n\n"
+                f"登录名与密码在服务器上的 /opt/zhiwen-hub/.env 里（ZW_PANEL_USER / ZW_PANEL_PASSWORD）。",
+            )
 
     def copy_device() -> None:
         try:
@@ -577,7 +603,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         conn_server.configure(text=base)
         conn_dev.configure(text=state["device_id"][:32] + "…")
         open_btn.state(["!disabled"])
+        panel_btn.state(["!disabled"])
         log(f"已连接：{base}", "ok")
+        log(f"服务器管理面板：{base}/panel", "info")
         log(f"控制台 http://127.0.0.1:{core.port}", "ok")
         refresh_stats()
         try:
@@ -602,6 +630,7 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         set_phase("idle", "未连接")
         show_setup(True)
         open_btn.state(["disabled"])
+        panel_btn.state(["disabled"])
         connect_btn.state(["!disabled"])
         log("已断开，本机服务已停止。", "warn")
 

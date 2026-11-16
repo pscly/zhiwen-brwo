@@ -163,7 +163,10 @@ def run() -> None:
 
     s = get_settings()
     logger.info("监听 http://%s:%s  数据目录 %s", s.host, s.port, s.root)
-    uvicorn.run(app, host=s.host, port=s.port, log_level=s.log_level.lower(), access_log=False)
+    # log_config=None：不让 uvicorn 用 dictConfig 覆盖我们的日志配置
+    # （它的 formatter 会碰 sys.stdout，而无控制台环境下那是 None）。
+    uvicorn.run(app, host=s.host, port=s.port, log_level=s.log_level.lower(),
+                access_log=False, log_config=None)
 
 
 def main() -> None:

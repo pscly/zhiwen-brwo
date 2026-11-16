@@ -459,7 +459,20 @@ class LocalCore:
 
             from zw_core.main import app as core_app
 
-            config = uvicorn.Config(core_app, host="127.0.0.1", port=self.port, log_level="info", access_log=False)
+            # log_config=None 很关键：uvicorn 默认会用 dictConfig 重配日志，
+            # 而它的 "default" formatter 构造时会调 sys.stdout.isatty()。
+            # Windows GUI 子程序里 sys.stdout 是 None → AttributeError，
+            # dictConfig 把它包成 "ValueError: Unable to configure formatter 'default'"
+            # —— 用户看到的就是"本机服务启动失败"，云电脑上真踩到了。
+            # 我们自己的 setup_logging 已经管好日志，不需要 uvicorn 再配一遍。
+            config = uvicorn.Config(
+                core_app,
+                host="127.0.0.1",
+                port=self.port,
+                log_level="info",
+                access_log=False,
+                log_config=None,
+            )
             self.server = uvicorn.Server(config)
             self.thread = threading.Thread(target=self.server.run, name="zw-core", daemon=True)
             self.thread.start()
@@ -790,6 +803,40 @@ def selftest(show_dialog: bool = True) -> int:
         return f"{len(paths)} 条路由"
 
     chk("core 应用可构建", _core_app)
+    def _core_boot() -> str:
+        """真的把本机服务拉起来一次并访问 /healthz。
+
+        为什么值得在自检里做：`create_app()` 只证明"应用能构造"，
+        而真正启动 uvicorn 会走日志配置、事件循环、端口绑定这些路径。
+        云电脑上踩到的 `ValueError: Unable to configure formatter 'default'`
+        就是**只有真启动才会暴露**的那种 —— 当时的自检完全看不出来。
+        """
+        import socket
+        import sys as _sys
+
+        import httpx
+
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            port = sk.getsockname()[1]
+        # 刻意把标准流置 None，模拟 Windows GUI 子程序（console=False）
+        real_out, real_err = _sys.stdout, _sys.stderr
+        _sys.stdout = None
+        _sys.stderr = None
+        core = LocalCore(port=port)
+        try:
+            ok = core.start()
+            if not ok:
+                raise RuntimeError(core.error or "本机服务启动失败")
+            r = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=5)
+            if r.status_code != 200:
+                raise RuntimeError(f"/healthz 返回 {r.status_code}")
+        finally:
+            core.stop()
+            _sys.stdout, _sys.stderr = real_out, real_err
+        return f"无控制台环境下启动成功（端口 {port}）"
+
+    chk("本机服务可启动（无控制台）", _core_boot)
     chk("配置目录可写", lambda: (str(config_dir()), save_config({**load_config(), "selftest": 1}), "ok")[0])
     chk("机器码生成", lambda: ensure_device_id()[:12] + "…")
     chk("地址规范化", lambda: normalize_server("192.168.3.5") )

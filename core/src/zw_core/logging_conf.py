@@ -72,9 +72,15 @@ def setup_logging(log_level: str | None = None, force: bool = False) -> None:
     for h in list(root.handlers):
         root.removeHandler(h)
 
-    stream = logging.StreamHandler(sys.stdout)
-    stream.setFormatter(fmt)
-    root.addHandler(stream)
+    # Windows 的 GUI 子程序（console=False）里 sys.stdout / sys.stderr 都是 None。
+    # 直接 StreamHandler(None) 会在第一次写日志时抛异常，更糟的是有些库
+    # （uvicorn 的日志配置）会先拿它调 .isatty()，直接 AttributeError。
+    # 所以：拿不到流就不装控制台 handler，只留文件日志。
+    stream_target = sys.stdout or sys.stderr
+    if stream_target is not None:
+        stream = logging.StreamHandler(stream_target)
+        stream.setFormatter(fmt)
+        root.addHandler(stream)
 
     file_handler = logging.handlers.TimedRotatingFileHandler(
         Path(s.log_dir) / "zhiwen.log",
