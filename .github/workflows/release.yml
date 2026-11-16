@@ -4,10 +4,15 @@ name: 发布安装包
 #   1. 推 tag（v0.3.0）→ 自动构建并发布 Release
 #   2. 手动 Actions 页面点「Run workflow」→ 只构建，产物在 Artifacts 里下载（不发布）
 #
-# 用户最终看到的是 Releases 页面上的三个文件，下载双击就能用：
-#   知纹客户端-Windows.exe       （Windows 10/11，双击即用，不弹黑框）
-#   zhiwen-client-Linux-x86_64    （Linux，chmod +x 后直接跑）
-#   zhiwen-client-macOS.zip       （macOS，解压后右键打开）
+# 用户最终看到的是 Releases 页面上的四个文件：
+#   zhiwen-client-Windows-x64-setup.exe  （Windows 安装版：开始菜单 + 可选开机自启 + 可卸载）
+#   zhiwen-client-Windows-x64.exe        （Windows 免安装版：拷到哪都能跑）
+#   zhiwen-client-Linux-x86_64           （Linux，chmod +x 后直接跑）
+#   zhiwen-client-macOS.zip              （macOS，解压后右键打开）
+#
+# Windows 安装包用 Inno Setup 6 编译（packaging/windows/zhiwen-client.iss）。
+# 文件名全部纯 ASCII：含中文的 artifact 名在 upload/download/Release 链上会被截断
+# （实测被截成 "-Windows.exe"），这个坑踩过一次就够了。
 
 on:
   push:
@@ -111,6 +116,89 @@ jobs:
             fi
           fi
 
+      # ── Windows 安装包（Inno Setup 6）────────────────────────────────────
+      # 下面三步只在 Windows 上跑；Linux/macOS 不需要安装引导程序。
+      # 顺序：先准备好工具 → 静态检查 .iss → 编译。检查放在编译前，
+      # 是为了让"脚本写错"在 30 秒内失败，而不是等到编译输出的几百行里找。
+      - name: 准备 Inno Setup（runner 通常已预装）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # windows-latest 镜像一般自带 Inno Setup 6，路径固定在
+          #   C:\Program Files (x86)\Inno Setup 6\ISCC.exe
+          # 但不是所有镜像版本都有，所以找不到就用 chocolatey 装（runner 自带 choco）。
+          ISCC=""
+          for c in "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+                   "/c/Program Files/Inno Setup 6/ISCC.exe"; do
+            if [ -f "$c" ]; then ISCC="$c"; break; fi
+          done
+          if [ -z "$ISCC" ]; then
+            echo "没找到预装的 Inno Setup 6，改用 chocolatey 安装"
+            choco install innosetup -y --no-progress
+            for c in "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+                     "/c/Program Files/Inno Setup 6/ISCC.exe"; do
+              if [ -f "$c" ]; then ISCC="$c"; break; fi
+            done
+          fi
+          if [ -z "$ISCC" ]; then
+            echo "装了也找不到 ISCC.exe，安装包这一步没法继续" >&2
+            exit 1
+          fi
+          echo "ISCC=$ISCC" >> "$GITHUB_ENV"
+          echo "INNO_DIR=$(dirname "$ISCC")" >> "$GITHUB_ENV"
+          echo "用 $ISCC"
+          ls -la "$(dirname "$ISCC")" | head -20
+
+      - name: 静态检查安装脚本（不需要 Windows 语义，几秒出结果）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # 版本号：tag（v0.3.0）优先；手动触发时读 core 里的 __version__，
+          # 免得 release 页面上的版本号和包里的对不上。
+          VER=""
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then VER="${GITHUB_REF_NAME#v}"; fi
+          if [ -z "$VER" ]; then
+            VER="$(python -c "import re,pathlib;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('core/src/zw_core/__init__.py').read_text(encoding='utf-8')).group(1))")"
+          fi
+          # [Messages] 键名优先用 runner 上真实的 Default.isl 校验（最准）；
+          # 万一没装到那里，脚本会退回仓库里的名字快照。
+          if [ -f "$INNO_DIR/Default.isl" ]; then
+            python packaging/windows/check-iss.py --version "$VER" --default-isl "$INNO_DIR/Default.isl"
+          else
+            python packaging/windows/check-iss.py --version "$VER"
+          fi
+
+      - name: 编译 Windows 安装包
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          VER=""
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then VER="${GITHUB_REF_NAME#v}"; fi
+          if [ -z "$VER" ]; then
+            VER="$(python -c "import re,pathlib;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('core/src/zw_core/__init__.py').read_text(encoding='utf-8')).group(1))")"
+          fi
+          # Windows 文件属性里的版本必须是四段纯数字（x.y.z.w）
+          case "$VER" in
+            *.*.*.*) VER4="$VER" ;;
+            *.*.*)   VER4="$VER.0" ;;
+            *.*)     VER4="$VER.0.0" ;;
+            *)       VER4="$VER.0.0.0" ;;
+          esac
+          echo "安装包版本：$VER（文件属性 $VER4）"
+
+          # cd 到脚本目录再编译：OutputDir=..\..\dist 无论按"脚本目录"还是
+          # "当前目录"解释，都会落在仓库根的 dist\ 下，少一个不确定因素。
+          cd packaging/windows
+          # MSYS_NO_PATHCONV：git-bash 会把 /DMyAppVersion=... 这类参数当路径改写，
+          # 关掉它，否则 ISCC 收到的参数是坏的（这个坑在别的项目上踩过）。
+          MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' \
+            "$ISCC" /DMyAppVersion="$VER" /DMyAppVersion4="$VER4" zhiwen-client.iss
+
+          cd "${{ github.workspace }}"
+          echo "--- 找安装包产物 ---"
+          ls -la dist/ | grep -i setup || true
+          ls -la packaging/windows/ | grep -i setup || true
+
       - name: 产物重命名
         shell: bash
         run: |
@@ -122,6 +210,16 @@ jobs:
           cd "${{ github.workspace }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "dist/zhiwen-client.exe" "$OUT/${{ matrix.artifact }}"
+            # 安装包：ISCC 的 OutputDir 是相对脚本目录的 ..\..\dist，
+            # 但为防解释差异，两处都找一遍再拷贝。
+            SETUP="zhiwen-client-Windows-x64-setup.exe"
+            for cand in "dist/$SETUP" "packaging/windows/$SETUP"; do
+              if [ -f "$cand" ]; then cp "$cand" "$OUT/$SETUP"; break; fi
+            done
+            if [ ! -f "$OUT/$SETUP" ]; then
+              echo "没找到安装包产物 $SETUP（Inno Setup 那一步没成功？）" >&2
+              exit 1
+            fi
           elif [ "${{ runner.os }}" = "macOS" ]; then
             cd "${{ github.workspace }}/dist"
             ls -la
@@ -146,6 +244,16 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: out/${{ matrix.artifact }}
+          if-no-files-found: error
+
+      - name: 上传 Windows 安装包
+        # 单独一个 artifact：名字必须是纯 ASCII，且与上面那个分开，
+        # 免得"安装版"和"免安装版"在下游 merge-multiple 时互相覆盖。
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zhiwen-client-Windows-x64-setup.exe
+          path: out/zhiwen-client-Windows-x64-setup.exe
           if-no-files-found: error
 
   release:
@@ -176,19 +284,27 @@ jobs:
 
           | 系统 | 文件 | 怎么用 |
           |---|---|---|
-          | Windows 10/11 | `zhiwen-client-Windows-x64.exe` | 双击运行。首次可能被 SmartScreen 提示，点「更多信息 → 仍要运行」 |
+          | **Windows 10/11（推荐）** | `zhiwen-client-Windows-x64-setup.exe` | 双击安装。装完有开始菜单项，可选开机自启，以后从「设置 → 应用」就能卸载 |
+          | Windows 10/11（免安装） | `zhiwen-client-Windows-x64.exe` | 拷到哪都能跑，双击即用，不弹黑框。不想装东西就选这个 |
           | Linux x86_64 | `zhiwen-client-Linux-x86_64` | `chmod +x` 后直接运行 |
           | macOS | `zhiwen-client-macOS.zip` | 解压后右键「打开」（未签名） |
 
+          Windows 两个文件功能完全一样，只是"装"和"免装"的区别：
+          安装版会写进开始菜单、可勾「开机自动启动」（随时能在 Windows
+          「设置 → 应用 → 启动」里关掉），卸载时清理干净；免安装版删掉文件即卸载。
+
+          首次运行可能被 SmartScreen 提示（未签名）→「更多信息」→「仍要运行」。
+
           ## 第一次用
 
-          1. 双击打开，只填一个**服务器地址**（例如 `192.168.3.5:8700`）
+          1. 打开后只填一个**服务器地址**（例如 `192.168.3.5:8700`）
           2. 点「连接并开始」
           3. 会自动打开本机控制台 `http://127.0.0.1:8730`
 
           服务器端不需要对接码（除非部署时设了 `ZW_HUB_TOKEN`，那就要填对接码）。
 
-          机器码在首次启动时自动生成，存在本机配置里。服务器端管理面板可以按机器码踢掉某台电脑。
+          机器码在首次启动时自动生成，存在本机配置里（卸载不会删它，重装还是同一台机器）。
+          服务器端管理面板可以按机器码踢掉某台电脑。
 
           ## 服务器端
 

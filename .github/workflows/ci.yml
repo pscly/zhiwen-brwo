@@ -48,6 +48,10 @@ jobs:
         # 这些是"加东西忘了同步"的守门人，曾经真的漏过：
         # 错误码没进文档、AI 清单里的路径多了一对花括号、控制台重复 id。
         run: .venv/bin/python -m pytest tests/test_docs_consistency.py -q
+      - name: Windows 安装脚本静态检查（跨平台，PR 时就能发现 .iss 写错）
+        # 不需要 Windows：check-iss.py 做的是语法/编码/路径/消息名检查，
+        # 真正的编译在 release.yml 的 windows job 里。
+        run: python packaging/windows/check-iss.py
       - name: 检查文档里引用的脚本都存在
         run: |
           python - <<'PY'

@@ -174,6 +174,106 @@ def normalize_server(raw: str) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+# ── 开机自启 ──────────────────────────────────────────────
+# 用户明确要"需要开机自启，但必须能在界面里关掉"。
+# 三个平台各写一套，都是"用户级"自启（不需要管理员）：
+#   Windows  HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+#   Linux    ~/.config/autostart/*.desktop（XDG）
+#   macOS    ~/Library/LaunchAgents/*.plist
+_AUTOSTART_NAME = "zhiwen-client"
+_AUTOSTART_WIN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_WIN_NAME = "ZhiwenClient"
+
+
+def _launch_command() -> str:
+    """自启时要执行的命令。
+
+    打包成 exe 时 argv[0] 就是 exe 本身；源码运行时是 python 解释器，
+    需要把 `-m zw_core.client` 一起带上，否则自启会打开一个 python REPL。
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" -m zw_core.client'
+
+
+def autostart_enabled() -> bool:
+    """当前有没有设置开机自启。"""
+    try:
+        if sys.platform == "win32":
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_WIN_KEY) as k:
+                try:
+                    winreg.QueryValueEx(k, _AUTOSTART_WIN_NAME)
+                    return True
+                except FileNotFoundError:
+                    return False
+        if sys.platform == "darwin":
+            return (Path.home() / "Library" / "LaunchAgents" / f"cc.pscly.{_AUTOSTART_NAME}.plist").exists()
+        return (Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+                / "autostart" / f"{_AUTOSTART_NAME}.desktop").exists()
+    except Exception:
+        return False
+
+
+def set_autostart(enabled: bool) -> tuple[bool, str]:
+    """开启/关闭开机自启。返回 (是否成功, 说明)。"""
+    try:
+        if sys.platform == "win32":
+            import winreg
+
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_WIN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+                if enabled:
+                    winreg.SetValueEx(k, _AUTOSTART_WIN_NAME, 0, winreg.REG_SZ, _launch_command())
+                    return True, "已设置开机自启（注册表 HKCU\\...\\Run）"
+                try:
+                    winreg.DeleteValue(k, _AUTOSTART_WIN_NAME)
+                    return True, "已关闭开机自启"
+                except FileNotFoundError:
+                    return True, "本来就没开"
+
+        if sys.platform == "darwin":
+            plist = Path.home() / "Library" / "LaunchAgents" / f"cc.pscly.{_AUTOSTART_NAME}.plist"
+            if not enabled:
+                plist.unlink(missing_ok=True)
+                return True, "已关闭开机自启"
+            plist.parent.mkdir(parents=True, exist_ok=True)
+            exe = sys.executable
+            plist.write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+                '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+                '<plist version="1.0"><dict>\n'
+                f"  <key>Label</key><string>cc.pscly.{_AUTOSTART_NAME}</string>\n"
+                f"  <key>ProgramArguments</key><array><string>{exe}</string>"
+                + ("" if getattr(sys, "frozen", False) else "<string>-m</string><string>zw_core.client</string>")
+                + "</array>\n"
+                "  <key>RunAtLoad</key><true/>\n"
+                "</dict></plist>\n",
+                encoding="utf-8",
+            )
+            return True, "已设置开机自启（LaunchAgents）"
+
+        desktop = (Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+                   / "autostart" / f"{_AUTOSTART_NAME}.desktop")
+        if not enabled:
+            desktop.unlink(missing_ok=True)
+            return True, "已关闭开机自启"
+        desktop.parent.mkdir(parents=True, exist_ok=True)
+        desktop.write_text(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=知纹客户端\n"
+            f"Exec={_launch_command()}\n"
+            "Terminal=false\n"
+            "X-GNOME-Autostart-enabled=true\n",
+            encoding="utf-8",
+        )
+        return True, "已设置开机自启（~/.config/autostart）"
+    except Exception as exc:
+        return False, f"设置失败：{type(exc).__name__}: {exc}"
+
+
 def probe_server(base: str, timeout: float = 6.0) -> dict[str, Any]:
     """探测服务器：它是不是知纹 hub、要不要对接码。"""
     import httpx
@@ -212,7 +312,17 @@ def enroll(base: str, device_id: str, token: str = "", app_version: str = "") ->
         return {"ok": False, "code": "UNREACHABLE", "error": f"{type(exc).__name__}: {exc}"}
 
 
-def heartbeat(base: str, device_id: str, token: str = "") -> dict[str, Any]:
+def heartbeat(
+    base: str,
+    device_id: str,
+    token: str = "",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """心跳。`extra` 用来捎带本机概况（环境数、运行中），让服务器面板能显示。
+
+    为什么放在心跳里而不是单独开个接口：心跳本来每分钟一次，
+    捎带几个整数几乎不增加负担；单独开接口还要再管一套重试与鉴权。
+    """
     import httpx
 
     headers = {"X-ZW-Device": device_id}
@@ -220,7 +330,7 @@ def heartbeat(base: str, device_id: str, token: str = "") -> dict[str, Any]:
         headers["Authorization"] = f"Bearer {token}"
     try:
         with httpx.Client(timeout=10) as c:
-            r = c.post(f"{base}/v1/devices/heartbeat", headers=headers)
+            r = c.post(f"{base}/v1/devices/heartbeat", headers=headers, json=extra or None)
             body = r.json() if r.content else {}
             if r.status_code == 200 and body.get("ok"):
                 return {"ok": True, **(body.get("data") or {})}
@@ -238,11 +348,14 @@ class Heartbeat:
     没有长连接也没必要）。60 秒一次足够快，又不会给服务器压力。
     """
 
-    def __init__(self, base: str, device_id: str, token: str = "", interval: int = 60) -> None:
+    def __init__(self, base: str, device_id: str, token: str = "", interval: int = 60,
+                 stats_provider: Any = None) -> None:
         self.base = base
         self.device_id = device_id
         self.token = token
         self.interval = max(15, int(interval or 60))
+        # 每次心跳前调它拿本机概况（环境数/运行中）。取不到就不带，不影响心跳本身。
+        self.stats_provider = stats_provider
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.revoked = False
@@ -259,7 +372,13 @@ class Heartbeat:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval if self.last_ok else 10):
-            res = heartbeat(self.base, self.device_id, self.token)
+            extra: dict[str, Any] = {}
+            if callable(self.stats_provider):
+                try:
+                    extra = self.stats_provider() or {}
+                except Exception:
+                    extra = {}
+            res = heartbeat(self.base, self.device_id, self.token, extra=extra or None)
             if res.get("ok"):
                 self.last_ok = time.time()
                 self.last_error = ""
@@ -335,6 +454,18 @@ class LocalCore:
         self.error = self.error or "本地服务 20 秒内没起来"
         return False
 
+    def stats(self) -> dict[str, Any] | None:
+        """读本机 core 的状态（环境数、运行中、端口、磁盘）。失败返回 None。"""
+        try:
+            import httpx
+
+            r = httpx.get(f"http://127.0.0.1:{self.port}/api/v1/stats", timeout=3)
+            if r.status_code == 200:
+                return (r.json() or {}).get("data")
+        except Exception:
+            pass
+        return None
+
     def stop(self) -> None:
         if self.server is not None:
             self.server.should_exit = True
@@ -359,6 +490,15 @@ _MONO_CANDIDATES = ("Consolas", "Cascadia Mono", "SF Mono", "Menlo", "DejaVu San
                     "Liberation Mono", "Noto Sans Mono", "Courier New")
 MONO_FAMILY = "TkFixedFont"
 
+# 探测结果：True 表示这台机器上一个能显示中文的字体都没有。
+# 界面会据此在状态栏给出明确提示，而不是让用户对着空白窗口猜。
+_CJK_FONT_MISSING = False
+
+
+def cjk_font_missing() -> bool:
+    """这台机器是不是没有可用的中文字体（界面会全空白）。"""
+    return _CJK_FONT_MISSING
+
 
 def pick_mono_font(root: Any) -> str:
     global MONO_FAMILY
@@ -382,259 +522,109 @@ def pick_mono_font(root: Any) -> str:
     return MONO_FAMILY
 
 
+def _can_measure_cjk(root: Any, family: str, size: int) -> bool | None:
+    """量一下这个字体能不能排出中文。
+
+    返回 True/False 表示测出了结论，None 表示"这次测量不可信"。
+
+    为什么要允许 None：Tk 在部分 X11 环境里 `Font.measure()` 会返回 0
+    （新建的 Font 对象没被真正加载过时就是这样，实测同一 display 上
+    第一次调用有值、后面全是 0）。把 0 一律当成"不支持中文"会误判
+    一个本来能用的字体，进而给用户弹一个假的"缺少中文字体"警告。
+    所以量到 0 时再做一次确认（换用一个已存在的字体对象重测），
+    仍然为 0 才认为不可信 —— 交给调用方按"名字匹配"的结论走。
+    """
+    try:
+        import tkinter.font as tkfont
+
+        probe = tkfont.Font(root=root, family=family, size=size)
+        w = probe.measure("服务器地址")
+        if w > 20:
+            return True
+        # 0 / 极小值：可能字体真的没有这些字，也可能是上面那个 Tk 怪癖。
+        # 用一个"必然有宽度"的字符串复测，判断这次测量本身有没有意义。
+        baseline = probe.measure("AAAAAAAA")
+        if baseline <= 0:
+            return None
+        # 测量是可信的：西文有宽度但中文没有 → 这个字体确实不含中文字形
+        return False
+    except Exception:
+        return None
+
+
 def pick_ui_font(root: Any, size: int = 10, bold: bool = False) -> tuple[str, int, str]:
     """返回一个能显示中文的 (family, size, weight)。
 
-    判据不是"字体名在不在列表里"，而是**量一下中文的实际宽度** ——
-    字体名存在但缺字形的字体（Linux 上很常见）量出来是 0 或退化值，不能用。
+    ## 判定顺序（可靠性从高到低）
+
+    1. **按名字匹配已知中文字体**。这是最可靠的一层：Windows 一定有
+       微软雅黑/宋体，macOS 一定有苹方/冬青黑，Linux 装了中文支持就有
+       文泉驿/思源。名字对了基本就对了。
+    2. 名字没命中时，**按关键字模糊找**（发行版的族名写法差异很大）。
+    3. 再不行，把**所有**族名逐个量一遍（测量只在这一层当判据）。
+    4. 都不行 → 退回 Tk 默认，并在支持时给出"缺少中文字体"的提示。
+
+    ## 为什么第一层不看测量结果
+
+    Tk 在部分 X11 环境里 `measure()` 会返回 0（同一 display 上只有第一次
+    有值）。如果第一层就看测量，会把这台机器上本来能用的字体判成不可用，
+    给用户弹假的"缺少中文字体"。名字匹配不受这个怪癖影响。
     """
+    global _CJK_FONT_MISSING
     try:
         import tkinter.font as tkfont
 
         families = list(tkfont.families(root))
     except Exception:
         return ("TkDefaultFont", size, "bold" if bold else "normal")
+
+    def pick(family: str) -> tuple[str, int, str]:
+        return (family, size, "bold" if bold else "normal")
+
     # 大小写不敏感匹配：X11 后端返回的族名是**小写**的
     # （"wenquanyi zen hei"），而正确写法是 "WenQuanYi Zen Hei"。
-    # 之前用精确集合匹配，于是在 Linux 上一个都命中不了，整屏中文空白。
     lower_map = {f.lower(): f for f in families}
+
+    # ── 第 1 层：名字匹配 ──
     for fam in _FONT_CANDIDATES:
         actual = lower_map.get(fam.lower())
-        if actual is None:
-            continue
-        try:
-            probe = tkfont.Font(root=root, family=actual, size=size)
-            if probe.measure("服务器地址") > 20:
-                return (actual, size, "bold" if bold else "normal")
-        except Exception:
-            continue
-    # 再做一轮"按关键字模糊找"：不同发行版的族名差异很大
+        if actual:
+            return pick(actual)
+
+    # ── 第 2 层：关键字模糊 ──
     for key in ("wenquanyi", "noto sans cjk", "noto sans sc", "source han", "yahei",
-                "pingfang", "hiragino", "simhei", "simsun", "droid sans fallback"):
+                "pingfang", "hiragino", "simhei", "simsun", "droid sans fallback",
+                "noto serif cjk", "uming", "ukai", "microsoft jhenghei", "heiti",
+                "stheiti", "sarasa", "fandol"):
         for low, actual in lower_map.items():
             if key in low:
-                try:
-                    probe = tkfont.Font(root=root, family=actual, size=size)
-                    if probe.measure("服务器地址") > 20:
-                        return (actual, size, "bold" if bold else "normal")
-                except Exception:
-                    continue
-    # 一个都不合适：退回 Tk 默认（至少西文正常，中文靠系统 fallback）
+                return pick(actual)
+
+    # ── 第 3 层：全量测量（只在这一层信测量）──
+    for actual in families:
+        if _can_measure_cjk(root, actual, size) is True:
+            return pick(actual)
+
+    # ── 第 4 层：放弃，并标记缺字体 ──
+    # 只在"确实不该缺"的平台上不做提醒：Windows/macOS 自带中文字体，
+    # 走到这里通常说明是极度精简的环境（例如 Windows Nano Server），
+    # 提示一下也无害。
+    _CJK_FONT_MISSING = True
     return ("TkDefaultFont", size, "bold" if bold else "normal")
 
 
 def run_gui() -> int:
-    """启动 GUI。没有 tkinter 时退回到命令行引导，而不是直接崩。"""
+    """启动图形界面。
+
+    实现在 `zw_core/gui.py`（界面代码量已经超过业务逻辑，混在一起不好维护）。
+    没有 tkinter 的环境由 gui 模块内部降级到命令行。
+    """
     try:
-        import tkinter as tk
-        from tkinter import messagebox, ttk
+        from zw_core.gui import run_gui as _run
     except Exception as exc:  # noqa: BLE001
-        print(f"这台机器上的 Python 没有 tkinter（{exc}），改用命令行模式。")
+        print(f"图形界面不可用（{type(exc).__name__}: {exc}），改用命令行模式。")
         return run_cli()
-
-    from zw_core import __version__
-
-    cfg = load_config()
-    core = LocalCore(port=int(cfg.get("core_port") or 8730))
-
-    root = tk.Tk()
-    root.title(f"{APP_NAME} · 客户端")
-    root.geometry("620x520")
-    root.minsize(560, 470)
-    # 不要手动改 tk scaling：它会放大字体但不放大控件高度，
-    # 结果中文字被纵向裁掉一半（实测过）。让 tk 用系统 DPI，另外把
-    # 行高/内边距调够即可。
-
-    BG = "#111418"
-    CARD = "#191d24"
-    INK = "#e8ebf2"
-    DIM = "#8b93a7"
-    ACC = "#5b9dff"
-    root.configure(bg=BG)
-    pick_mono_font(root)
-    style = ttk.Style(root)
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
-    # 字体必须探测：硬编码 "Microsoft YaHei UI" 在 Linux/mac 上不存在，
-    # 结果就是整屏中文变方块或空白（实测过）。
-    body = pick_ui_font(root, 10)
-    small = pick_ui_font(root, 9)
-    title = pick_ui_font(root, 15, bold=True)
-    body_b = pick_ui_font(root, 10, bold=True)
-
-    style.configure("TFrame", background=BG)
-    style.configure("Card.TFrame", background=CARD)
-    style.configure("TLabel", background=BG, foreground=INK, font=body, padding=(0, 3))
-    style.configure("Dim.TLabel", background=BG, foreground=DIM, font=small, padding=(0, 2))
-    style.configure("H.TLabel", background=BG, foreground=INK, font=title, padding=(0, 4))
-    style.configure("TEntry", fieldbackground="#0d1014", foreground=INK, insertcolor=INK,
-                    borderwidth=0, font=body)
-    style.configure("Accent.TButton", background=ACC, foreground="#ffffff", borderwidth=0,
-                    font=body_b, padding=(16, 9))
-    style.map("Accent.TButton",
-              background=[("active", "#6fabff"), ("disabled", "#2c3340")],
-              foreground=[("disabled", "#7b8494")])
-    style.configure("TButton", background=CARD, foreground=INK, borderwidth=0,
-                    font=body, padding=(12, 8))
-    style.map("TButton", background=[("active", "#232935")])
-
-    status_var = tk.StringVar(value="填好服务器地址，点「连接并开始」。")
-    server_var = tk.StringVar(value=cfg.get("server") or "")
-    token_var = tk.StringVar(value=cfg.get("token") or "")
-    need_token = tk.BooleanVar(value=bool(cfg.get("token_required")))
-
-    wrap = ttk.Frame(root, padding=(24, 20))
-    wrap.pack(fill="both", expand=True)
-
-    ttk.Label(wrap, text=f"{APP_NAME} 客户端", style="H.TLabel").pack(anchor="w")
-    ttk.Label(wrap, text=f"v{__version__} · 机器码 {ensure_device_id()[:16]}…",
-              style="Dim.TLabel").pack(anchor="w", pady=(3, 18))
-
-    # 服务器地址
-    addr_card = ttk.Frame(wrap, style="Card.TFrame", padding=14)
-    addr_card.pack(fill="x")
-    ttk.Label(addr_card, text="服务器地址", style="Dim.TLabel").pack(anchor="w")
-    addr_entry = ttk.Entry(addr_card, textvariable=server_var, font=(MONO_FAMILY, 11))
-    addr_entry.pack(fill="x", pady=(6, 4), ipady=6)
-    ttk.Label(addr_card, text="例如 192.168.3.5:8700", style="Dim.TLabel").pack(anchor="w")
-    ttk.Label(addr_card, text="不带端口时默认 8700", style="Dim.TLabel").pack(anchor="w")
-
-    # 对接码（默认隐藏）
-    token_card = ttk.Frame(wrap, style="Card.TFrame", padding=14)
-    tok_entry = ttk.Entry(token_card, textvariable=token_var, show="•", font=(MONO_FAMILY, 11))
-    ttk.Label(token_card, text="对接码（服务器要求时填写）", style="Dim.TLabel").pack(anchor="w")
-    tok_entry.pack(fill="x", pady=(6, 0), ipady=6)
-
-    # 状态
-    status_lbl = ttk.Label(wrap, textvariable=status_var, style="Dim.TLabel", wraplength=490, justify="left")
-    status_lbl.pack(anchor="w", pady=(14, 6))
-
-    btns = ttk.Frame(wrap)
-    btns.pack(fill="x", side="bottom")
-
-    def set_status(text: str) -> None:
-        status_var.set(text)
-        root.update_idletasks()
-
-    def connect() -> None:
-        raw = server_var.get().strip()
-        base = normalize_server(raw)
-        if not base:
-            messagebox.showwarning(APP_NAME, "请先填服务器地址，例如 192.168.3.5:8700")
-            return
-        set_status(f"正在连接 {base} …")
-        info = probe_server(base)
-        if not info.get("ok"):
-            set_status(f"连接失败：{info.get('error')}")
-            messagebox.showerror(APP_NAME, f"连不上服务器。\n\n{info.get('error')}\n\n"
-                                           "检查：服务器地址对不对、那台机器上 hub 有没有跑起来、防火墙有没有放行端口。")
-            return
-        if info.get("token_required") and not token_var.get().strip():
-            need_token.set(True)
-            token_card.pack(fill="x", pady=(10, 0), after=addr_card)
-            tok_entry.focus_set()
-            set_status("这台服务器要求对接码，请填写后再次点「连接并开始」。")
-            return
-        need_token.set(False)
-        token_card.pack_forget()
-
-        set_status("正在注册这台电脑 …")
-        res = enroll(base, ensure_device_id(), token_var.get().strip(), app_version=__version__)
-        if not res.get("ok"):
-            code = res.get("code", "")
-            if code == "DEVICE_REVOKED":
-                set_status("这台电脑已被服务器端移除。")
-                messagebox.showerror(
-                    APP_NAME,
-                    "这台电脑已被服务器端「踢下线」。\n\n"
-                    "请联系管理员在服务器管理面板里恢复这台设备，恢复后重新点「连接并开始」。",
-                )
-            elif code == "UNAUTHENTICATED":
-                need_token.set(True)
-                token_card.pack(fill="x", pady=(10, 0), after=addr_card)
-                set_status("对接码不正确，请检查。")
-            else:
-                set_status(f"注册失败：{res.get('error')}")
-                messagebox.showerror(APP_NAME, f"注册失败：\n\n{res.get('error')}")
-            return
-
-        cfg.update({"server": base, "device_id": ensure_device_id(),
-                    "token": token_var.get().strip(), "token_required": bool(info.get("token_required"))})
-        save_config(cfg)
-
-        set_status("正在启动本机浏览器服务 …")
-        if not core.start(device_id=ensure_device_id(), hub_url=base):
-            set_status(f"本机服务启动失败：{core.error}")
-            messagebox.showerror(APP_NAME, f"本机服务启动失败：\n\n{core.error}")
-            return
-
-        # 启动心跳：60 秒一次，被踢时立刻反映到界面上
-        if not hasattr(root, "_hb") or root._hb is None:  # type: ignore[attr-defined]
-            hb = Heartbeat(base, ensure_device_id(), token_var.get().strip(),
-                           interval=int(res.get("heartbeat_seconds") or 60))
-
-            def _on_revoked() -> None:
-                def apply() -> None:
-                    set_status("这台电脑已被服务器端移除，本机服务仍在运行但已无法同步。")
-                    try:
-                        messagebox.showwarning(
-                            APP_NAME,
-                            "这台电脑已被服务器端「踢下线」。\n\n"
-                            "本机已开着的浏览器还能继续用，但同步/注册会全部失败。\n"
-                            "请联系管理员在服务器面板里恢复。",
-                        )
-                    except Exception:
-                        pass
-                try:
-                    root.after(0, apply)
-                except Exception:
-                    pass
-
-            hb.on_revoked = _on_revoked
-            hb.start()
-            root._hb = hb  # type: ignore[attr-defined]
-            hb_run = hb
-        else:
-            hb_run = root._hb  # type: ignore[attr-defined]
-
-        set_status(f"已连接 · 控制台 http://127.0.0.1:{core.port}")
-        try:
-            webbrowser.open(f"http://127.0.0.1:{core.port}")
-        except Exception:
-            pass
-        open_btn.state(["!disabled"])
-        start_btn.state(["disabled"])
-
-    def open_console() -> None:
-        webbrowser.open(f"http://127.0.0.1:{core.port}")
-
-    start_btn = ttk.Button(btns, text="连接并开始", style="Accent.TButton", command=connect)
-    start_btn.pack(side="right")
-    open_btn = ttk.Button(btns, text="打开控制台", command=open_console)
-    open_btn.pack(side="right", padx=(0, 8))
-    open_btn.state(["disabled"])
-
-    addr_entry.focus_set()
-    root.bind("<Return>", lambda _e: connect())
-
-    # 已经配过就直接尝试自动连（用户双击图标就该看到浏览器打开）
-    if cfg.get("server"):
-        root.after(300, connect)
-    if need_token.get():
-        token_card.pack(fill="x", pady=(10, 0), after=addr_card)
-
-    def on_close() -> None:
-        hb = getattr(root, "_hb", None)
-        if hb is not None:
-            hb.stop()
-        core.stop()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    root.mainloop()
-    return 0
+    return _run()
 
 
 def run_cli() -> int:

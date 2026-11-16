@@ -151,10 +151,10 @@
       <div style="overflow:auto">
         <table>
           <thead><tr>
-            <th style="min-width:180px">设备</th><th>状态</th><th>平台</th>
+            <th style="min-width:170px">设备</th><th>状态</th><th>本机环境</th><th>平台</th>
             <th>最近在线</th><th>IP</th><th class="mono">机器码</th><th style="text-align:right">操作</th>
           </tr></thead>
-          <tbody id="rows"><tr><td colspan="7" class="empty">读取中…</td></tr></tbody>
+          <tbody id="rows"><tr><td colspan="8" class="empty">读取中…</td></tr></tbody>
         </table>
       </div>
     </div>
@@ -261,7 +261,8 @@ function kvState(d){
 function renderKpis(st){
   const items = [
     ['在线', st.online, '最近 ' + Math.round((st.online_window_seconds || 180) / 60) + ' 分钟内有心跳'],
-    ['可用设备', st.active, '未被踢下线'],
+    ['环境总数', st.total_profiles ?? 0, '所有在线设备上报之和'],
+    ['正在运行', st.total_running ?? 0, '所有在线设备上报之和'],
     ['已踢下线', st.revoked, '这些设备现在连不上'],
     ['累计设备', st.total, '含已删除前见过的'],
   ];
@@ -270,10 +271,20 @@ function renderKpis(st){
       <div class="hint" style="margin-top:2px">${esc(hint)}</div></div>`).join('');
 }
 
+/** 本机环境概况。客户端心跳会带 profiles/running；老客户端没有就显示 —。 */
+function envCell(d){
+  const n = Number(d.profiles || 0);
+  const r = Number(d.running || 0);
+  if (!n && !r) return '<span class="muted">—</span>';
+  const cls = r > 0 ? 'ok' : '';
+  const disk = d.disk_human ? `<div class="dim" style="font-size:10.5px">${esc(d.disk_human)}</div>` : '';
+  return `<span class="badge ${cls}">${esc(n)} 个 · ${esc(r)} 运行</span>${disk}`;
+}
+
 function renderRows(){
   const tb = document.getElementById('rows');
   if (!devices.length){
-    tb.innerHTML = `<tr><td colspan="7" class="empty">还没有任何电脑连过这台服务器。<br>
+    tb.innerHTML = `<tr><td colspan="8" class="empty">还没有任何电脑连过这台服务器。<br>
       <span style="font-size:12px">装好客户端，填上本机地址就能用了。</span></td></tr>`;
     return;
   }
@@ -286,6 +297,7 @@ function renderRows(){
         <div class="dim" style="font-size:11px">${esc(d.hostname || '')}${d.app_version ? ' · v' + esc(d.app_version) : ''}</div>
       </td>
       <td>${kvState(d)}</td>
+      <td class="mono">${envCell(d)}</td>
       <td class="mono dim">${esc(d.platform || '—')}${d.arch ? ' / ' + esc(d.arch) : ''}</td>
       <td class="dim">${esc(fmtAgo(d.last_seen_ago))}</td>
       <td class="mono dim">${esc(d.last_ip || '—')}</td>

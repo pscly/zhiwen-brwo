@@ -462,10 +462,17 @@ def enroll(body: EnrollBody, request: Request) -> dict[str, Any]:
 
 
 @app.post("/v1/devices/heartbeat", summary="心跳（顺带校验设备是否被踢）")
-def device_heartbeat(request: Request, x_zw_device: str = Header(default="")) -> dict[str, Any]:
+def device_heartbeat(
+    request: Request,
+    x_zw_device: str = Header(default=""),
+    body: dict[str, Any] | None = Body(default=None),
+) -> dict[str, Any]:
+    """心跳。可捎带本机概况（profiles / running / disk_human / engine），
+    让服务器面板能显示"这台机器上有几个环境在跑"，而不只是"在线"。"""
     dev_id = x_zw_device or request.headers.get("x-zw-device", "")
     devices().require_active(dev_id)
-    rec = devices().touch(dev_id, ip=_client_ip(request))
+    stats = body if isinstance(body, dict) else None
+    rec = devices().touch(dev_id, ip=_client_ip(request), stats=stats)
     return ok({"device": rec, "server_time": time.time()})
 
 

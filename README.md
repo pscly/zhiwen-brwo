@@ -15,11 +15,15 @@
 
 从 [Releases](https://github.com/pscly/zhiwen-brwo/releases) 下载对应系统的安装包：
 
-| 系统 | 文件 |
-|---|---|
-| Windows 10/11 | `zhiwen-client-Windows-x64.exe`（双击即用，不弹黑框） |
-| Linux x86_64 | `zhiwen-client-Linux-x86_64`（`chmod +x` 后跑） |
-| macOS | `zhiwen-client-macOS.zip`（解压后右键打开） |
+| 系统 | 文件 | 说明 |
+|---|---|---|
+| Windows 10/11 | `zhiwen-client-Windows-x64-setup.exe` | **安装版（推荐）**：装进开始菜单、可选开机自启、可从「设置 → 应用」卸载 |
+| Windows 10/11 | `zhiwen-client-Windows-x64.exe` | 免安装版：拷到哪都能跑，双击即用，不弹黑框 |
+| Linux x86_64 | `zhiwen-client-Linux-x86_64` | `chmod +x` 后跑 |
+| macOS | `zhiwen-client-macOS.zip` | 解压后右键打开（未签名） |
+
+Windows 两个文件功能一样，只是"装"和"免装"的区别：安装版会写开始菜单与卸载项，
+开机自启默认**不勾**（勾了也能在 Windows「设置 → 应用 → 启动」里关掉）；免安装版删文件即卸载。
 
 打开后**只填一个服务器地址**（例如 `192.168.3.5:8700`），点「连接并开始」——
 它会自动注册这台电脑、起本机浏览器服务、打开控制台。
@@ -157,6 +161,7 @@ Chromium 的 `--proxy-server` **不支持用户名密码**：写成 `http://user
 | 设备注册表（幂等/踢下线不可自愈/只影响单台） | ✅ 13 项单测 |
 | **Windows 实机整体跑通** | ⬜ **未验证**。代码路径已按 Windows 分支单测（`test_windows_parity.py`），但没在真 Windows 上跑过 |
 | **Windows exe 实机运行** | ⬜ **未验证**。CI 会在 `windows-latest` 上构建并做 PE 头/体积检查，但没在真 Windows 上双击过 |
+| **Windows 安装包（Inno Setup）** | ⚠️ 半验证。`.iss` 的静态检查（`packaging/windows/check-iss.py`，34 项）在本地与 CI 都跑；ISCC 编译在 `windows-latest` 上跑；但**没在真 Windows 上装过、卸过** |
 | 指纹能否过 browserscan | ⬜ 未验证。无 GPU 的 Linux 上 WebGL 拿不到真实显卡，必须到有显卡的 Windows 上测 |
 | 指纹种子的一致性（同种子两次启动是否同指纹） | ⬜ 未验证。当前测试机上的 Chromium 不是 fingerprint-chromium，`--fingerprint` 被忽略 |
 

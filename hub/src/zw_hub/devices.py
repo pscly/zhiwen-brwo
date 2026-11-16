@@ -47,6 +47,16 @@ STATUS_REVOKED = "revoked"     # 已踢下线
 ONLINE_WINDOW = 180
 
 
+def _as_int(v: Any) -> int | None:
+    """转 int；转不了返回 None（SQL 里 COALESCE(NULL, col) = 保持原值）。"""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
 class DeviceError(Exception):
     def __init__(self, status: int, code: str, message: str) -> None:
         super().__init__(message)
@@ -69,7 +79,11 @@ CREATE TABLE IF NOT EXISTS devices (
   last_seen    REAL NOT NULL,
   last_ip      TEXT NOT NULL DEFAULT '',
   revoked_at   REAL,
-  revoked_by   TEXT NOT NULL DEFAULT ''
+  revoked_by   TEXT NOT NULL DEFAULT '',
+  profiles     INTEGER NOT NULL DEFAULT 0,
+  running      INTEGER NOT NULL DEFAULT 0,
+  disk_human   TEXT NOT NULL DEFAULT '',
+  engine       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
 
@@ -99,6 +113,17 @@ class DeviceStore:
         c = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
+        # 老库补列（升级不能要求用户删库）
+        for col, ddl in (
+            ("profiles", "INTEGER NOT NULL DEFAULT 0"),
+            ("running", "INTEGER NOT NULL DEFAULT 0"),
+            ("disk_human", "TEXT NOT NULL DEFAULT ''"),
+            ("engine", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                c.execute(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass  # 已经有了
         return c
 
     # ── 注册 / 心跳 ───────────────────────────────────────
@@ -152,14 +177,23 @@ class DeviceStore:
             finally:
                 c.close()
 
-    def touch(self, device_id: str, ip: str = "") -> dict[str, Any]:
-        """纯心跳（不带元信息）。"""
+    def touch(self, device_id: str, ip: str = "", stats: dict[str, Any] | None = None) -> dict[str, Any]:
+        """心跳。`stats` 是本机概况（环境数/运行中/磁盘），有就更新。"""
         now = time.time()
+        st = stats or {}
         with self._lock:
             c = self._conn()
             try:
-                cur = c.execute("UPDATE devices SET last_seen=?, last_ip=COALESCE(NULLIF(?,''),last_ip) WHERE device_id=?",
-                                (now, ip, device_id))
+                cur = c.execute(
+                    "UPDATE devices SET last_seen=?, last_ip=COALESCE(NULLIF(?,''),last_ip),"
+                    " profiles=COALESCE(?,profiles), running=COALESCE(?,running),"
+                    " disk_human=COALESCE(NULLIF(?,''),disk_human),"
+                    " engine=COALESCE(NULLIF(?,''),engine) WHERE device_id=?",
+                    (now, ip,
+                     _as_int(st.get("profiles")), _as_int(st.get("running")),
+                     str(st.get("disk_human") or ""), str(st.get("engine") or ""),
+                     device_id),
+                )
                 c.commit()
                 if cur.rowcount == 0:
                     raise DeviceError(404, "DEVICE_UNKNOWN", f"设备未注册：{device_id}")
@@ -296,7 +330,13 @@ class DeviceStore:
                 online = c.execute(
                     "SELECT COUNT(*) AS n FROM devices WHERE status='active' AND last_seen > ?", (now - ONLINE_WINDOW,)
                 ).fetchone()["n"]
+                # 只聚合"在线且可用"的设备：离线设备上报的旧数字没意义
+                agg = c.execute(
+                    "SELECT COALESCE(SUM(profiles),0) AS p, COALESCE(SUM(running),0) AS r FROM devices "
+                    "WHERE status='active' AND last_seen > ?", (now - ONLINE_WINDOW,)
+                ).fetchone()
                 return {"total": total, "active": active, "revoked": revoked, "online": online,
+                        "total_profiles": agg["p"], "total_running": agg["r"],
                         "online_window_seconds": ONLINE_WINDOW}
             finally:
                 c.close()

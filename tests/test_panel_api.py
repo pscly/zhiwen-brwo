@@ -158,3 +158,57 @@ def test_enroll_requires_token_when_configured(hub, monkeypatch):
 def test_old_api_still_works_without_device_header(hub):
     """兼容：不带设备头的老用法（curl/脚本）仍能访问，因为它们本来就要过令牌。"""
     assert hub.get("/v1/index").status_code == 200
+
+
+def test_heartbeat_carries_profile_stats(hub):
+    """心跳能捎带本机概况，面板据此显示"这台机器上有几个环境在跑"。
+
+    没有这个，面板只能显示"在线/离线"，看不出那台机器到底在干什么。
+    """
+    login(hub)
+    did = "zwd_abcdefgh12345678"
+    hub.post("/v1/devices/enroll", json={"device_id": did, "hostname": "PC-A"})
+
+    r = hub.post(
+        "/v1/devices/heartbeat",
+        headers={"X-ZW-Device": did},
+        json={"profiles": 5, "running": 2, "disk_human": "1.2GB", "engine": "Chromium 150"},
+    )
+    assert r.status_code == 200, r.text
+    dev = r.json()["data"]["device"]
+    assert dev["profiles"] == 5
+    assert dev["running"] == 2
+    assert dev["disk_human"] == "1.2GB"
+    assert dev["engine"] == "Chromium 150"
+
+    # 面板列表里也带这些字段
+    row = next(d for d in hub.get("/panel/api/devices").json()["data"]["devices"] if d["device_id"] == did)
+    assert row["profiles"] == 5 and row["running"] == 2
+
+    # 聚合统计只算在线设备
+    st = hub.get("/panel/api/stats").json()["data"]
+    assert st["total_profiles"] >= 5
+    assert st["total_running"] >= 2
+
+
+def test_heartbeat_without_body_keeps_previous_stats(hub):
+    """不带 body 的心跳不能把已上报的数字清成 0。"""
+    login(hub)
+    did = "zwd_abcdefgh99999999"
+    hub.post("/v1/devices/enroll", json={"device_id": did})
+    hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": did}, json={"profiles": 7, "running": 3})
+    r = hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": did})
+    dev = r.json()["data"]["device"]
+    assert dev["profiles"] == 7, "空心跳不该把统计清零"
+    assert dev["running"] == 3
+
+
+def test_revoked_device_heartbeat_rejected_even_with_stats(hub):
+    login(hub)
+    did = "zwd_abcdefgh55555555"
+    hub.post("/v1/devices/enroll", json={"device_id": did})
+    hub.post(f"/panel/api/devices/{did}/revoke", json={})
+    r = hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": did},
+                 json={"profiles": 1, "running": 1})
+    assert r.status_code == 403
+    assert r.json()["code"] == "DEVICE_REVOKED"
