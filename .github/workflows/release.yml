@@ -54,11 +54,14 @@ jobs:
       - name: 跑单元测试（打包前先确认代码是好的）
         shell: bash
         run: |
-          python -m pip install pytest pytest-asyncio
+          python -m pip install pytest pytest-asyncio pytest-timeout
           # 跑全套：core + hub 的测试都在这里，出问题早发现。
           # 注意上面必须同时装 ./core 与 ./hub，否则 hub 的测试 import 失败
           # （本地"能过"常常是因为之前已经装过 hub，CI 是干净的，会直接暴露）。
-          python -m pytest tests -q
+          # --timeout：任何用例超过 90 秒直接失败并报出名字。
+          # 没有这个的话，"某个用例在 Windows 上卡住"会表现成整个 job
+          # 静默挂几十分钟，极难定位（真的这样浪费过两轮 CI）。
+          python -m pytest tests -q --timeout=90 --timeout-method=thread
 
       - name: 构建可执行文件
         shell: bash
