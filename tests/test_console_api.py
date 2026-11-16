@@ -174,3 +174,44 @@ def test_panel_redirects_to_root(hub):
     r = hub.get("/panel", follow_redirects=False)
     assert r.status_code == 302
     assert r.headers["location"] == "/"
+
+
+def test_compose_passes_allowlist_into_container():
+    """compose 必须把 ZW_ALLOWED_CIDRS 透传进容器。
+
+    这个坑真踩过：`.env` 里写了 `ZW_ALLOWED_CIDRS=192.168.3.0/24`，
+    但 `docker-compose.yml` 的 `environment:` 是一份**显式清单**，
+    没列出来的变量根本不会进容器 —— 白名单等于没开，而界面/接口上
+    看不出任何异常（`allowed_cidrs` 显示为空数组）。
+
+    这类"配置存在但从不生效"的问题最难发现，所以用测试钉住。
+    """
+    from pathlib import Path
+
+    compose = (Path(__file__).resolve().parent.parent / "hub" / "docker-compose.yml").read_text(encoding="utf-8")
+    for key in ("ZW_ALLOWED_CIDRS", "ZW_PANEL_USER", "ZW_PANEL_PASSWORD",
+                "ZW_HUB_TOKEN", "ZW_DEVICE_AUTO_APPROVE", "ZW_SHELL_ENABLED"):
+        assert key in compose, f"compose 没有透传 {key}，设了也不会生效"
+
+
+def test_panel_secret_persists_across_restarts(tmp_path):
+    """面板会话密钥必须落盘，重启后旧 cookie 仍然有效。
+
+    之前是"每次启动随机生成"：部署脚本一 `docker compose up -d`，
+    所有人的登录就失效，表现为"刚登录过又让我登"，而且很难联想到是重启。
+    """
+    from zw_hub.config import Settings
+
+    data = tmp_path / "data"
+    data.mkdir()
+    a = Settings()
+    a.data_dir = data
+    a.resolve_paths()
+    assert a.panel_secret, "应该生成密钥"
+    keyfile = data / "panel-secret"
+    assert keyfile.exists(), "密钥必须落盘"
+
+    b = Settings()
+    b.data_dir = data
+    b.resolve_paths()
+    assert b.panel_secret == a.panel_secret, "重启后必须沿用同一个密钥"

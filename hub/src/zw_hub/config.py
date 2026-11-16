@@ -89,10 +89,28 @@ class Settings:
 
     def resolve_paths(self) -> None:
         if not self.panel_secret:
-            # 会话签名密钥：随机生成，重启后旧 cookie 失效（可接受，登录一次很快）
+            # 会话签名密钥。优先从数据目录里的文件读，读不到就生成并落盘。
+            #
+            # 为什么不能"每次启动随机生成"：那样每 `docker compose up -d`
+            # 一次、每重启一次容器，所有人的面板登录就全部失效 ——
+            # 表现为"刚登录过又让我登"，查起来还很费劲（看起来像 cookie 坏了）。
+            # 用户的偏好也是"令牌要固定，不要每次重启就重新配对"。
             import secrets
 
-            self.panel_secret = secrets.token_urlsafe(32)
+            keyfile = Path(self.data_dir).expanduser() / "panel-secret"
+            try:
+                if keyfile.exists():
+                    self.panel_secret = keyfile.read_text(encoding="utf-8").strip()
+            except OSError:
+                self.panel_secret = ""
+            if not self.panel_secret:
+                self.panel_secret = secrets.token_urlsafe(32)
+                try:
+                    keyfile.parent.mkdir(parents=True, exist_ok=True)
+                    keyfile.write_text(self.panel_secret, encoding="utf-8")
+                    keyfile.chmod(0o600)
+                except OSError:
+                    pass
         self.data_dir = Path(self.data_dir).expanduser().resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "blobs").mkdir(parents=True, exist_ok=True)

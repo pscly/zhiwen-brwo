@@ -38,6 +38,15 @@ services:
       ZW_PANEL_PASSWORD: ${ZW_PANEL_PASSWORD:-1234}
       # 新设备自动放行：客户端只填 IP 就能用
       ZW_DEVICE_AUTO_APPROVE: ${ZW_DEVICE_AUTO_APPROVE:-true}
+      # 来源网段白名单。**必须在这里透传**：只写进 .env 没用 ——
+      # compose 的 environment 是一份显式清单，没列出来的变量不会进容器。
+      # 这个坑真踩过：.env 里设了 192.168.3.0/24，容器里却读不到，
+      # 白名单等于没开，而界面上看不出异常。
+      ZW_ALLOWED_CIDRS: ${ZW_ALLOWED_CIDRS:-}
+      # 远程命令行（设备拉取队列）的总开关与上限
+      ZW_SHELL_ENABLED: ${ZW_SHELL_ENABLED:-true}
+      ZW_SHELL_MAX_OUTPUT: ${ZW_SHELL_MAX_OUTPUT:-65536}
+      ZW_SHELL_QUEUE_LIMIT: ${ZW_SHELL_QUEUE_LIMIT:-200}
       ZW_REQUIRE_SIGNATURE: "false"
       ZW_SIGNATURE_SECRET: ${ZW_SIGNATURE_SECRET:-}
       TZ: Asia/Hong_Kong
