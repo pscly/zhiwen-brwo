@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import time
 import sys
 
 import pytest
@@ -35,7 +36,11 @@ def test_autostart_roundtrip(home, monkeypatch, tmp_path):
     assert desktop.exists()
     body = desktop.read_text(encoding="utf-8")
     assert "[Desktop Entry]" in body
-    assert "zhiwen" in body.lower()
+    # 断言的必须是**产品标记**，不能是"某个路径里恰好含 zhiwen"。
+    # 之前这里写 `"zhiwen" in body.lower()`，本地能过纯粹因为仓库目录叫
+    # zhiwen_brwo（sys.executable 里带了这个词），CI 上路径不同就失败。
+    assert "zw_core.client" in body or "zhiwen-client" in body.lower()
+    assert "Name=知纹客户端" in body
     ok, msg = C.set_autostart(False)
     assert ok, msg
     assert C.autostart_enabled() is False
@@ -185,3 +190,31 @@ def test_heartbeat_without_stats_still_works(monkeypatch, home):
     res = C.heartbeat("http://x:8700", "zwd_abcdefgh12345678")
     assert res["ok"] is True
     assert seen["json"] is None   # 不传就是空 body，别塞个 {}
+
+
+# ── 心跳健康度（界面据此显示"和服务器还连着吗"）────────────
+def test_heartbeat_status_before_first_success(home):
+    hb = C.Heartbeat("http://x:8700", "zwd_abcdefgh12345678", interval=60)
+    st = hb.status()
+    assert st["healthy"] is False
+    assert st["last_ok"] == 0
+    assert st["age"] is None
+    assert st["error"] == ""
+
+
+def test_heartbeat_status_tolerates_short_gap(home):
+    """网络抖一下不该报红 —— 但真断线必须能看出来。"""
+    hb = C.Heartbeat("http://x:8700", "zwd_abcdefgh12345678", interval=60)
+    hb.last_ok = time.time() - 30
+    assert hb.status()["healthy"] is True
+    hb.last_ok = time.time() - 200      # 超过 3 个周期
+    assert hb.status()["healthy"] is False
+
+
+def test_heartbeat_status_reports_revoked(home):
+    hb = C.Heartbeat("http://x:8700", "zwd_abcdefgh12345678", interval=60)
+    hb.last_ok = time.time()
+    hb.revoked = True
+    st = hb.status()
+    assert st["revoked"] is True
+    assert st["healthy"] is False, "被踢了不能再算健康"

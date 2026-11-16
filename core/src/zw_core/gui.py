@@ -230,6 +230,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     header.pack(fill="x")
     ttk.Label(header, text=f"{APP_NAME} 客户端", style="H.TLabel").pack(side="left")
     ttk.Label(header, text=f"v{__version__}", style="Faint.TLabel").pack(side="left", padx=(8, 0))
+    hb_text = tk.StringVar(value="")
+    hb_label = tk.Label(header, textvariable=hb_text, bg=BG, fg=FAINT, font=fonts["tiny"])
+    hb_label.pack(side="right", padx=(0, 10))
     badge = tk.Label(header, textvariable=status_text, bg=BG, fg=FAINT, font=fonts["small"])
     badge.pack(side="right")
 
@@ -428,7 +431,26 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             messagebox.showerror("自检异常", f"{type(exc).__name__}: {exc}")
 
     def refresh_stats() -> None:
-        """定时刷本机环境统计。连不上就显示 —。"""
+        """定时刷本机统计与心跳健康度。取不到就显示 —。"""
+        # 心跳指标：让用户一眼看出"和服务器还连着吗"，而不是等出问题才发现
+        hb = state.get("heartbeat")
+        if hb is None:
+            hb_text.set("")
+        else:
+            st_hb = hb.status()
+            if st_hb["revoked"]:
+                hb_text.set("心跳 · 已被移除")
+                hb_label.configure(fg=BAD)
+            elif st_hb["healthy"]:
+                age = st_hb["age"] or 0
+                hb_text.set(f"心跳 · {age}s 前")
+                hb_label.configure(fg=OK)
+            elif st_hb["last_ok"]:
+                hb_text.set(f"心跳 · {st_hb['age']}s 未成功" if st_hb["age"] else "心跳 · 失败")
+                hb_label.configure(fg=WARN)
+            else:
+                hb_text.set("心跳 · 等待首次" if not st_hb["error"] else "心跳 · 失败")
+                hb_label.configure(fg=WARN)
         try:
             st = core.stats() if state["core_on"] else None
             if not st:

@@ -367,6 +367,26 @@ class Heartbeat:
         self._thread = threading.Thread(target=self._loop, name="zw-heartbeat", daemon=True)
         self._thread.start()
 
+    def status(self) -> dict[str, Any]:
+        """给界面用的心跳状态。
+
+        `healthy` 的判据：最近一次成功在 3 个周期内。
+        为什么容忍 3 个周期：网络抖动一次就报红会让用户误以为掉线，
+        但真掉线又必须能看出来 —— 3 个周期（默认 180 秒）是个折中。
+        """
+        now = time.time()
+        interval = self.interval
+        age = (now - self.last_ok) if self.last_ok else None
+        healthy = bool(self.last_ok) and age is not None and age < interval * 3 and not self.revoked
+        return {
+            "revoked": self.revoked,
+            "healthy": healthy,
+            "last_ok": self.last_ok,
+            "age": int(age) if age is not None else None,
+            "interval": interval,
+            "error": self.last_error,
+        }
+
     def stop(self) -> None:
         self._stop.set()
 
