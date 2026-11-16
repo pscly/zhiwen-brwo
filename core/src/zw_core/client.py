@@ -675,6 +675,38 @@ def run_cli() -> int:
     return 0
 
 
+def _report_selftest(lines: list[str], code: int) -> None:
+    """把自检结果送到用户能看到的地方。
+
+    打包成 Windows GUI 程序（console=False）后**没有控制台**：
+    `sys.stdout` 可能是 None，print 出去的东西直接消失 —— 用户双击
+    `--selftest` 会以为"没反应"。所以这里两条腿走路：
+    写一份报告到配置目录（可事后查看），Windows 上再弹一个原生消息框。
+    """
+    text = "\n".join(lines)
+    try:
+        report = config_dir() / "selftest.txt"
+        report.write_text(text, encoding="utf-8")
+        text += f"\n\n报告已保存：{report}"
+    except OSError:
+        pass
+    # 有 stdout 就打印（Linux/macOS、或者从终端运行）
+    try:
+        if sys.stdout is not None:
+            print(text, flush=True)
+    except (AttributeError, ValueError, OSError):
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            # MB_ICONINFORMATION=0x40 / MB_ICONERROR=0x10，MB_SETFOREGROUND=0x10000
+            icon = 0x40 if code == 0 else 0x10
+            ctypes.windll.user32.MessageBoxW(None, text, "知纹客户端自检", icon | 0x10000)
+        except Exception:
+            pass
+
+
 def selftest() -> int:
     """打包/部署后的自检：确认依赖都打进去了、核心功能可用。不依赖图形界面。
 
@@ -741,17 +773,16 @@ def selftest() -> int:
     chk("机器码生成", lambda: ensure_device_id()[:12] + "…")
     chk("地址规范化", lambda: normalize_server("192.168.3.5") )
 
-    print(f"{APP_NAME} 客户端自检")
+    lines = [f"{APP_NAME} 客户端自检", ""]
     for name, detail in checks:
-        print(f"  OK    {name}: {detail}")
+        lines.append(f"  OK    {name}: {detail}")
     for f in failures:
-        print(f"  FAIL  {f}")
-    print()
-    if failures:
-        print(f"有 {len(failures)} 项失败")
-        return 1
-    print(f"全部 {len(checks)} 项通过")
-    return 0
+        lines.append(f"  FAIL  {f}")
+    lines.append("")
+    code = 1 if failures else 0
+    lines.append(f"有 {len(failures)} 项失败" if failures else f"全部 {len(checks)} 项通过")
+    _report_selftest(lines, code)
+    return code
 
 
 def main() -> int:

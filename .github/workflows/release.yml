@@ -76,7 +76,24 @@ jobs:
             BIN="dist/zhiwen-client"
           fi
           ls -la "$BIN"
-          "$BIN" --selftest
+          # Windows 打包成 GUI 子程序（console=False）后没有控制台，
+          # selftest 会把报告写进配置目录并在 Windows 上弹消息框 ——
+          # 在 CI 里弹框会一直挂着，所以这里设超时并用退出码判断。
+          # （超时会被判失败；正常情况它 1-2 秒就返回。）
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            timeout 120 "$BIN" --selftest || code=$?
+            # 弹框可能让进程超时（124）；此时改看报告文件是否全 OK
+            if [ "${code:-0}" = "124" ]; then
+              echo "selftest 超时（图形消息框阻塞），改为检查报告文件"
+              REPORT="$LOCALAPPDATA/zhiwen-client/selftest.txt"
+              cat "$REPORT" || true
+              grep -q "全部" "$REPORT"
+            else
+              exit "${code:-0}"
+            fi
+          else
+            timeout 120 "$BIN" --selftest
+          fi
 
       - name: 产物重命名
         shell: bash
