@@ -109,7 +109,44 @@
   .dlg-b{padding:6px 20px 14px;font-size:13px;color:var(--ink-2)}
   .dlg-f{display:flex;justify-content:flex-end;gap:9px;padding:12px 20px;border-top:1px solid var(--line)}
   .hint{font-size:11.5px;color:var(--ink-3);margin-top:8px;line-height:1.65}
+  .kpi b.warn{color:var(--warn)}
   code{font-family:var(--mono);font-size:11.5px;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:5px}
+  /* ── 远程终端 ───────────────────────────────────── */
+  .term-row td{padding:10px;background:rgba(0,0,0,.16);border-bottom:1px solid var(--line)}
+  tbody tr.term-row:hover td{background:rgba(0,0,0,.16)}
+  @media (prefers-color-scheme: light){
+    .term-row td, tbody tr.term-row:hover td{background:rgba(12,20,32,.035)}
+  }
+  .term{border:1px solid var(--line-2);border-radius:12px;overflow:hidden;
+    background:rgba(0,0,0,.22);box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+  @media (prefers-color-scheme: light){ .term{background:#fff} }
+  .term-h{display:flex;align-items:center;gap:9px;padding:9px 12px;flex-wrap:wrap;
+    border-bottom:1px solid var(--line);background:var(--glass-2)}
+  .term-title{font-size:12.5px;font-weight:600;letter-spacing:.2px}
+  .term-sub{font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+  .term-warn{padding:8px 12px;font-size:11.5px;line-height:1.7;color:var(--warn);
+    border-bottom:1px solid var(--line);background:rgba(255,176,32,.08)}
+  .term-out{max-height:340px;overflow:auto;padding:10px 12px;font-family:var(--mono);
+    font-size:12.5px;line-height:1.62;white-space:pre-wrap;word-break:break-word;
+    overscroll-behavior:contain}
+  /* 条目内部要 normal：否则会继承上面的 pre-wrap，把模板缩进渲染成空行 */
+  .term-entry{padding:7px 0;border-bottom:1px dashed var(--line);white-space:normal}
+  .term-entry:last-child{border-bottom:none;padding-bottom:2px}
+  .term-cmd{color:var(--accent);font-weight:560;white-space:pre-wrap;word-break:break-word}
+  .term-stdout{margin-top:3px;white-space:pre-wrap;word-break:break-word}
+  .term-stderr{margin-top:3px;white-space:pre-wrap;word-break:break-word;color:#ff8b8b}
+  @media (prefers-color-scheme: light){ .term-stderr{color:#b3261e} }
+  .term-note{margin-top:4px;font-size:11.5px;color:var(--ink-3)}
+  .term-note.bad{color:var(--bad)}
+  .term-meta{margin-top:4px;font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+  .term-meta.bad{color:var(--bad);font-weight:640}
+  .term-cut{margin-top:4px;font-size:11px;color:var(--warn)}
+  .term-hint{font-size:11.5px;color:var(--ink-3);line-height:1.75}
+  .term-in{display:flex;gap:8px;align-items:center;padding:10px 12px;
+    border-top:1px solid var(--line);background:var(--glass-2)}
+  .term-in input{flex:1;min-width:0;font-size:12.5px}
+  .term-in input:disabled{opacity:.55;cursor:not-allowed}
+  .term-in button{white-space:nowrap}
 </style>
 </head>
 <body>
@@ -232,6 +269,7 @@ function showLogin(msg){
   document.getElementById('login').style.display = 'grid';
   document.getElementById('login-err').textContent = msg || '';
   if (timer) { clearInterval(timer); timer = null; }
+  closeAllTerminals();   // 会话结束，轮询定时器一并清掉
 }
 function showApp(){
   document.getElementById('login').style.display = 'none';
@@ -270,14 +308,23 @@ function kvState(d){
 
 function renderKpis(st){
   const items = [
-    ['在线', st.online, '最近 ' + Math.round((st.online_window_seconds || 180) / 60) + ' 分钟内有心跳'],
-    ['环境总数', st.total_profiles ?? 0, '所有在线设备上报之和'],
-    ['正在运行', st.total_running ?? 0, '所有在线设备上报之和'],
-    ['已踢下线', st.revoked, '这些设备现在连不上'],
-    ['累计设备', st.total, '含已删除前见过的'],
+    ['在线', st.online, '最近 ' + Math.round((st.online_window_seconds || 180) / 60) + ' 分钟内有心跳', ''],
+    ['环境总数', st.total_profiles ?? 0, '所有在线设备上报之和', ''],
+    ['正在运行', st.total_running ?? 0, '所有在线设备上报之和', ''],
+    ['已踢下线', st.revoked, '这些设备现在连不上', ''],
+    ['累计设备', st.total, '含已删除前见过的', ''],
   ];
-  document.getElementById('kpis').innerHTML = items.map(([k, v, hint]) =>
-    `<div class="glass kpi"><b>${esc(v)}</b><span>${esc(k)}</span>
+  // shell 是可选字段（旧 hub 不会返回）：没有就不加这张卡，更不允许因此报错。
+  const sh = st && st.shell;
+  if (sh && typeof sh === 'object'){
+    const q = Number(sh.queued || 0);
+    const r = Number(sh.running || 0);
+    const hint = r > 0 ? `另有 ${r} 条正在设备上执行`
+      : (q > 0 ? '等设备来取；设备离线就会一直排队' : '队列是空的');
+    items.push(['待执行命令', q, hint, q > 0 ? 'warn' : '']);
+  }
+  document.getElementById('kpis').innerHTML = items.map(([k, v, hint, cls]) =>
+    `<div class="glass kpi"><b class="${esc(cls || '')}">${esc(v)}</b><span>${esc(k)}</span>
       <div class="hint" style="margin-top:2px">${esc(hint)}</div></div>`).join('');
 }
 
@@ -293,15 +340,21 @@ function envCell(d){
 
 function renderRows(){
   const tb = document.getElementById('rows');
+  // 整表重绘会摘掉终端 DOM，这里先记住"谁正在输入、滚到哪了"，重绘后还回去
+  const focusId = termFocusId();
+  const scrolls = new Map();
+  terminals.forEach(t => { if (t.open) scrolls.set(t.id, t.out.scrollTop); });
+
   if (!devices.length){
     tb.innerHTML = `<tr><td colspan="8" class="empty">还没有任何电脑连过这台服务器。<br>
       <span style="font-size:12px">装好客户端，填上本机地址就能用了。</span></td></tr>`;
+    closeAllTerminals();   // 设备没了，终端也就没得看了
     return;
   }
   tb.innerHTML = devices.map(d => {
     const id = esc(d.device_id);
     const revoked = d.status === 'revoked';
-    return `<tr>
+    return `<tr data-dev="${id}">
       <td>
         <div style="font-weight:560">${esc(d.label || d.hostname || '未命名设备')}</div>
         <div class="dim" style="font-size:11px">${esc(d.hostname || '')}${d.app_version ? ' · v' + esc(d.app_version) : ''}</div>
@@ -313,6 +366,7 @@ function renderRows(){
       <td class="mono dim">${esc(d.last_ip || '—')}</td>
       <td class="mono dim" title="${id}">${esc(d.device_id.slice(0, 10))}…</td>
       <td><div class="acts">
+        <button class="sm" data-act="term" data-id="${id}">终端</button>
         ${revoked
           ? `<button class="sm" data-act="restore" data-id="${id}">恢复</button>`
           : `<button class="sm danger" data-act="revoke" data-id="${id}">踢下线</button>`}
@@ -321,6 +375,14 @@ function renderRows(){
       </div></td>
     </tr>`;
   }).join('');
+
+  attachTerminals();   // 把开着的终端按 device_id 挂回对应行下方
+  scrolls.forEach((top, id) => {
+    const t = terminals.get(id);
+    if (t && t.open) t.out.scrollTop = top;
+  });
+  const ft = focusId && terminals.get(focusId);
+  if (ft && ft.open) ft.input.focus();
 }
 
 function renderEvents(list){
@@ -357,11 +419,15 @@ document.getElementById('rows').addEventListener('click', async (ev) => {
   const btn = ev.target.closest('button');
   if (!btn) return;
   const act = btn.dataset.act;
+  if (!act) return;   // 终端面板里的按钮走自己的监听，别在这里当成设备操作
   const id = btn.dataset.id;
   const dev = devices.find(x => x.device_id === id) || {};
   const name = dev.label || dev.hostname || id.slice(0, 10);
 
-  if (act === 'revoke'){
+  if (act === 'term'){
+    // 已经开着就聚焦过去，不再开第二个
+    openTerminal(id);
+  } else if (act === 'revoke'){
     askConfirm(`把「${name}」踢下线？`, '踢下线后这台电脑立即连不上服务器，它的同步与注册请求都会返回 403 DEVICE_REVOKED。随时可以点「恢复」放回来。', async () => {
       await api('POST', `/panel/api/devices/${encodeURIComponent(id)}/revoke`, { note: '面板手动踢下线' });
       toast(`${name} 已踢下线`, 'ok');
@@ -418,6 +484,430 @@ document.getElementById('dlg-ok').addEventListener('click', async () => {
   } catch (e) { toast(e.message, 'err'); }
   finally { btn.disabled = false; }
 });
+
+/* ── 远程终端（协议：docs/13-远程命令行协议.md）───────────────
+   投递 POST /v1/devices/{id}/shell                  → {job_id, status}
+   轮询 GET  /v1/devices/{id}/shell/{job_id}?wait=25 → 直到终态
+   历史 GET  /v1/devices/{id}/shell/history?limit=20
+   取消 POST /v1/devices/{id}/shell/{job_id}/cancel
+   三条硬约定：
+   1) 表格每 10 秒整表重绘，终端节点由 terminals 持有，重绘后原样挂回 ——
+      输出、滚动位置、输入框里还没发出去的命令都不会丢。
+   2) 设备与服务器来的文本一律 esc() / textContent：命令输出里可能有 <script>。
+   3) 每条命令一条轮询链；关终端、退出登录、关页面都清定时器。
+*/
+const TERM_HISTORY_LIMIT = 20;     // 打开时回显最近多少条
+const TERM_WAIT_SECONDS = 25;      // 服务端长轮询秒数（协议上限 30）
+const TERM_MAX_WAIT_MS = 120000;   // 前端兜底：最多等 120 秒
+const TERM_POLL_GAP_MS = 200;      // 两轮轮询之间的间隔
+const TERM_RENDER_CAP = 20000;     // 单条输出最多渲染多少字符（20 条历史才不至于卡住）
+const TERM_FINAL = ['done', 'error', 'timeout', 'canceled', 'expired'];
+const TERM_PLACEHOLDER = '输入命令，回车执行（↑/↓ 翻历史）';
+
+const terminals = new Map();       // device_id -> 终端对象
+const localCmdHistory = [];        // 本浏览器执行过的命令，↑/↓ 翻
+
+function encSeg(s){ return encodeURIComponent(String(s == null ? '' : s)); }
+function fmtMs(n){
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return v < 1000 ? Math.round(v) + ' ms' : (v / 1000).toFixed(2) + ' 秒';
+}
+function termScrollToEnd(t){ try { t.out.scrollTop = t.out.scrollHeight; } catch (_) {} }
+function termSleep(t, ms){
+  return new Promise(resolve => {
+    t.timerResolve = resolve;
+    t.timer = setTimeout(() => { t.timer = null; t.timerResolve = null; resolve(); }, ms);
+  });
+}
+function clearTermTimer(t){
+  if (t.timer){ clearTimeout(t.timer); t.timer = null; }
+  if (t.timerResolve){ const r = t.timerResolve; t.timerResolve = null; r(); }
+}
+function termDeviceName(d, id){
+  return (d && (d.label || d.hostname)) || String(id || '').slice(0, 10) || '未命名设备';
+}
+function termFocusId(){
+  const a = document.activeElement;
+  return a && a.dataset && a.dataset.term === 'input' ? a.dataset.termDevice : null;
+}
+
+function makeTerminal(dev){
+  const id = dev.device_id;
+  const row = document.createElement('tr');
+  row.className = 'term-row';
+  const cell = document.createElement('td');
+  cell.colSpan = 8;               // 与设备表 8 列对齐
+  row.appendChild(cell);
+
+  const root = document.createElement('div');
+  root.className = 'term';
+  root.innerHTML = `
+    <div class="term-h">
+      <div class="term-title">远程终端 · <b>${esc(termDeviceName(dev, id))}</b></div>
+      <span class="term-sub">${esc(String(id || '').slice(0, 12))}…</span>
+      <div class="grow"></div>
+      <span class="badge term-flag" data-term="flag">命令行：—</span>
+      <button class="sm" data-term="close">关闭</button>
+    </div>
+    <div class="term-warn" data-term="warn" hidden></div>
+    <div class="term-out" data-term="out" role="log"></div>
+    <div class="term-in">
+      <input data-term="input" data-term-device="${esc(id)}" autocomplete="off" spellcheck="false"
+             placeholder="${esc(TERM_PLACEHOLDER)}" aria-label="远程命令输入框">
+      <button class="sm primary" data-term="run">执行</button>
+      <button class="sm" data-term="cancel" disabled>取消</button>
+    </div>`;
+  cell.appendChild(root);
+
+  const q = sel => root.querySelector(`[data-term="${sel}"]`);
+  const t = {
+    id, dev, row, root, open: true, closed: false,
+    out: q('out'), input: q('input'), runBtn: q('run'), cancelBtn: q('cancel'),
+    flag: q('flag'), warn: q('warn'), titleB: root.querySelector('.term-title b'),
+    busy: false, jobId: null, pollToken: null, timer: null, timerResolve: null,
+    histIdx: localCmdHistory.length, current: null, startedAt: 0,
+  };
+  q('close').addEventListener('click', () => closeTerminal(t));
+  t.runBtn.addEventListener('click', () => runCommand(t));
+  t.cancelBtn.addEventListener('click', () => cancelJob(t));
+  t.input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter'){ ev.preventDefault(); runCommand(t); }
+    else if (ev.key === 'ArrowUp'){ ev.preventDefault(); histStep(t, -1); }
+    else if (ev.key === 'ArrowDown'){ ev.preventDefault(); histStep(t, 1); }
+  });
+  t.input.addEventListener('input', () => { t.histIdx = localCmdHistory.length; });
+  return t;
+}
+
+/** 把设备上报的开关/在线状态映射到终端界面（设备每 10 秒刷新一次，这里同步跟着更新）。 */
+function syncTerminalChrome(t){
+  const d = t.dev || {};
+  t.titleB.textContent = termDeviceName(d, t.id);
+  const on = d.shell_enabled;
+  if (on === true){ t.flag.className = 'badge term-flag ok'; t.flag.textContent = '命令行：开'; }
+  else if (on === false){ t.flag.className = 'badge term-flag bad'; t.flag.textContent = '命令行：关'; }
+  else { t.flag.className = 'badge term-flag'; t.flag.textContent = '命令行：未知'; }
+
+  const off = on === false;
+  t.input.disabled = off;
+  t.input.placeholder = off ? '这台电脑的远程命令行已关闭（在客户端里打开）' : TERM_PLACEHOLDER;
+  t.runBtn.disabled = off || t.busy;
+
+  const notes = [];
+  if (d.status === 'revoked') notes.push('这台设备已被踢下线，命令会被服务器拒绝；先在列表里点「恢复」。');
+  else if (!d.online) notes.push('设备离线，命令会在它上线后执行。');
+  if (off) notes.push('这台电脑的远程命令行已关闭（在客户端里打开）。');
+  t.warn.innerHTML = notes.map(n => `<div>${esc(n)}</div>`).join('');
+  t.warn.hidden = !notes.length;
+}
+
+function openTerminal(id){
+  const exist = terminals.get(id);
+  if (exist && exist.open){ focusTerminal(exist); return; }   // 别开第二个，聚焦已有的
+  const dev = devices.find(d => d.device_id === id) || { device_id: id };
+  const t = makeTerminal(dev);
+  terminals.set(id, t);
+  syncTerminalChrome(t);
+  renderRows();          // 重绘后 attachTerminals 会把终端行挂到设备行下方
+  t.input.focus();
+  loadTermHistory(t);
+}
+
+function focusTerminal(t){
+  try { t.row.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+  t.input.focus();
+  if (typeof t.root.animate === 'function'){
+    t.root.animate([
+      { boxShadow: '0 0 0 2px rgba(91,157,255,0)' },
+      { boxShadow: '0 0 0 2px rgba(91,157,255,.55)' },
+      { boxShadow: '0 0 0 2px rgba(91,157,255,0)' },
+    ], { duration: 700 });
+  }
+}
+
+function closeTerminal(t){
+  t.open = false;
+  t.closed = true;
+  t.pollToken = null;
+  clearTermTimer(t);
+  if (t.row && t.row.parentNode) t.row.parentNode.removeChild(t.row);
+  terminals.delete(t.id);
+}
+function closeAllTerminals(){
+  [...terminals.values()].forEach(t => { try { closeTerminal(t); } catch (_) {} });
+}
+window.addEventListener('beforeunload', closeAllTerminals);
+
+/** 整表重绘之后把还在开着的终端挂回对应设备行下面。 */
+function attachTerminals(){
+  if (!terminals.size) return;
+  const tb = document.getElementById('rows');
+  [...terminals.values()].forEach(t => {
+    if (!t.open) return;
+    const dev = devices.find(d => d.device_id === t.id);
+    const host = dev ? [...tb.children].find(r => r.dataset && r.dataset.dev === t.id) : null;
+    if (!host){ closeTerminal(t); return; }   // 设备记录没了，终端跟着收
+    t.dev = dev;
+    syncTerminalChrome(t);
+    host.after(t.row);
+  });
+}
+
+function rememberCommand(cmd){
+  if (!cmd) return;
+  if (localCmdHistory[localCmdHistory.length - 1] !== cmd) localCmdHistory.push(cmd);
+  if (localCmdHistory.length > 200) localCmdHistory.shift();
+}
+
+function histStep(t, dir){
+  const n = localCmdHistory.length;
+  if (!n) return;
+  if (dir < 0) t.histIdx = Math.max(0, Math.min(t.histIdx, n) - 1);
+  else {
+    if (t.histIdx >= n) { t.histIdx = n; return; }
+    t.histIdx = Math.min(n, t.histIdx + 1);
+  }
+  t.input.value = t.histIdx >= n ? '' : localCmdHistory[t.histIdx];
+  const end = t.input.value.length;
+  try { t.input.setSelectionRange(end, end); } catch (_) {}
+}
+
+async function runCommand(t){
+  if (t.input.disabled) return;
+  if (t.busy){ toast('上一条命令还没返回，等它结束再发', 'err'); return; }
+  const cmd = t.input.value.trim();
+  if (!cmd) return;
+  if (cmd.length > 4000){ toast('命令太长：协议上限 4000 字符', 'err'); return; }
+
+  rememberCommand(cmd);
+  t.input.value = '';
+  t.histIdx = localCmdHistory.length;
+  t.busy = true;
+  t.runBtn.disabled = true;
+  t.runBtn.textContent = '执行中…';
+  t.cancelBtn.disabled = false;
+
+  const entry = pushEntry(t, { command: cmd, status: 'queued' });
+  setNote(entry, '已投递，等设备来取…', '');
+  t.current = entry;
+  t.startedAt = Date.now();
+
+  try {
+    const res = await api('POST', `/v1/devices/${encSeg(t.id)}/shell`, { command: cmd });
+    if (t.closed) return;
+    const jobId = res && (res.job_id || res.id);
+    if (!jobId) throw new Error('服务器没返回 job_id');
+    t.jobId = jobId;
+    await pollUntilFinal(t, jobId, entry, t.startedAt);
+  } catch (e){
+    if (t.closed) return;
+    setNote(entry, '投递失败：' + (e.message || '未知错误'), 'bad');
+    toast(e.message || '投递失败', 'err');
+    finishBusy(t);
+  }
+}
+
+function pendingNote(status, waitedMs){
+  const sec = Math.max(0, Math.round(waitedMs / 1000));
+  if (status === 'running') return `设备执行中…（已等 ${sec} 秒）`;
+  if (waitedMs < 8000) return '已投递，等设备来取…';
+  return `等待设备执行…（已等 ${sec} 秒${sec >= 10 ? '，设备离线时会在它上线后执行' : ''}）`;
+}
+
+async function pollUntilFinal(t, jobId, entry, started){
+  const token = Symbol('term-poll');
+  t.pollToken = token;
+  while (true){
+    if (t.closed || t.pollToken !== token) return;
+    let job = null;
+    let err = null;
+    try {
+      const res = await api('GET',
+        `/v1/devices/${encSeg(t.id)}/shell/${encSeg(jobId)}?wait=${TERM_WAIT_SECONDS}`);
+      job = res && res.job ? res.job : res;
+    } catch (e){ err = e; }
+    if (t.closed || t.pollToken !== token) return;
+
+    const waited = Date.now() - started;
+    if (job){
+      applyJob(entry, job);
+      if (TERM_FINAL.indexOf(job.status) >= 0){
+        finishBusy(t);
+        // 只有在"本来就在这个终端里"时才抢焦点，别把用户正在改的名抢断
+        const a = document.activeElement;
+        if (!a || a === document.body || t.root.contains(a)) t.input.focus();
+        return;
+      }
+      setNote(entry, pendingNote(job.status, waited), '');
+    } else if (err){
+      if (waited > TERM_MAX_WAIT_MS){
+        setNote(entry, '查询结果一直失败，已停止等待：' + (err.message || '未知错误'), 'bad');
+        finishBusy(t);
+        toast('查询命令结果失败', 'err');
+        return;
+      }
+      setNote(entry, '查询结果出错，重试中…（' + (err.message || '未知错误') + '）', 'bad');
+    }
+    if (waited > TERM_MAX_WAIT_MS){
+      setNote(entry, '已等 120 秒还没返回，停止等待。命令可能仍在设备上执行，重开终端可从历史里看结果。', 'bad');
+      // 停止轮询，但保留取消能力：卡住的命令多半还在排队，用户还能撤掉它
+      t.pollToken = null;
+      t.busy = false;
+      t.runBtn.textContent = '执行';
+      t.runBtn.disabled = t.input.disabled;
+      t.cancelBtn.disabled = false;
+      toast('等待设备执行超时（120 秒）', 'err');
+      return;
+    }
+    await termSleep(t, TERM_POLL_GAP_MS);
+  }
+}
+
+function finishBusy(t){
+  t.busy = false;
+  t.jobId = null;
+  t.pollToken = null;
+  if (t.closed) return;
+  t.runBtn.textContent = '执行';
+  t.runBtn.disabled = t.input.disabled;
+  t.cancelBtn.disabled = true;
+}
+
+async function cancelJob(t){
+  if (!t.jobId){ toast('当前没有可取消的命令', 'err'); return; }
+  t.cancelBtn.disabled = true;
+  try {
+    const res = await api('POST',
+      `/v1/devices/${encSeg(t.id)}/shell/${encSeg(t.jobId)}/cancel`, {});
+    if (t.closed) return;
+    if (res && res.canceled){
+      if (t.current) setNote(t.current, '已取消（还没下发到设备）', 'bad');
+      finishBusy(t);
+      toast('已取消', 'ok');
+    } else {
+      t.cancelBtn.disabled = false;
+      toast('命令已下发到设备，取消不了；等它跑完', 'err');
+    }
+  } catch (e){
+    if (t.closed) return;
+    t.cancelBtn.disabled = false;
+    toast(e.message || '取消失败', 'err');
+  }
+}
+
+function setNote(entry, text, kind){
+  entry.note.textContent = text || '';
+  entry.note.hidden = !text;
+  entry.note.className = 'term-note' + (kind === 'bad' ? ' bad' : '');
+}
+
+function pushEntry(t, job, parent){
+  const el = document.createElement('div');
+  el.className = 'term-entry';
+  el.innerHTML = `<div class="term-cmd">$ ${esc(job && job.command ? job.command : '')}</div>
+    <div class="term-stdout" data-part="out" hidden></div>
+    <div class="term-stderr" data-part="err" hidden></div>
+    <div class="term-note" data-part="note" hidden></div>
+    <div class="term-meta" data-part="meta" hidden></div>
+    <div class="term-cut" data-part="cut" hidden>输出过长已截断</div>`;
+  const hint = t.out.querySelector('.term-hint');
+  if (hint) hint.remove();
+  const box = parent || t.out;
+  box.appendChild(el);
+  if (box === t.out) termScrollToEnd(t);
+  return {
+    el,
+    out: el.querySelector('[data-part="out"]'),
+    err: el.querySelector('[data-part="err"]'),
+    note: el.querySelector('[data-part="note"]'),
+    meta: el.querySelector('[data-part="meta"]'),
+    cut: el.querySelector('[data-part="cut"]'),
+  };
+}
+
+/** 把一条 job 渲染进条目：stdout → stderr（暗红）→ 退出码/耗时 → 说明。未完成直接返回。 */
+function applyJob(entry, job){
+  if (!job) return;
+  const status = job.status;
+  if (status === 'queued' || status === 'running') return;
+
+  const cap = (s) => {
+    const str = String(s == null ? '' : s);
+    return str.length > TERM_RENDER_CAP
+      ? { text: str.slice(0, TERM_RENDER_CAP), cut: true }
+      : { text: str, cut: false };
+  };
+  const so = cap(job.stdout);
+  const se = cap(job.stderr);
+  if (so.text){
+    entry.out.hidden = false;
+    entry.out.innerHTML = esc(so.text);
+  } else if (!se.text){
+    entry.out.hidden = false;
+    entry.out.innerHTML = '<span class="term-hint">（无输出）</span>';
+  } else {
+    entry.out.hidden = true;
+    entry.out.innerHTML = '';
+  }
+  entry.err.hidden = !se.text;
+  entry.err.innerHTML = se.text ? esc(se.text) : '';
+
+  const hasRc = job.rc !== null && job.rc !== undefined && Number.isFinite(Number(job.rc));
+  const bits = [];
+  if (hasRc) bits.push('退出码 ' + Number(job.rc));
+  else if (status === 'timeout') bits.push('已超时');
+  if (job.duration_ms != null) bits.push('耗时 ' + fmtMs(job.duration_ms));
+  entry.meta.textContent = bits.join(' · ');
+  entry.meta.hidden = !bits.length;
+  const bad = (hasRc && Number(job.rc) !== 0) || status === 'timeout' || status === 'error';
+  entry.meta.className = 'term-meta' + (bad ? ' bad' : '');
+
+  let note = '';
+  let noteBad = false;
+  if (job.error){ note = '没跑起来：' + job.error; noteBad = true; }
+  else if (status === 'timeout'){ note = '执行超时，设备侧已终止'; noteBad = true; }
+  else if (status === 'canceled'){ note = '已取消（还没下发到设备）'; }
+  else if (status === 'expired'){ note = '排队过期：设备一直没上线'; noteBad = true; }
+  setNote(entry, note, noteBad ? 'bad' : '');
+
+  entry.cut.hidden = !(job.truncated || so.cut || se.cut);
+}
+
+async function loadTermHistory(t){
+  if (!t.out.querySelector('.term-entry')) {
+    t.out.innerHTML = '<div class="term-hint">正在读取最近 20 条记录…</div>';
+  }
+  try {
+    const res = await api('GET',
+      `/v1/devices/${encSeg(t.id)}/shell/history?limit=${TERM_HISTORY_LIMIT}`);
+    if (t.closed) return;
+    const jobs = (res && res.jobs) || [];
+    if (!jobs.length){
+      if (!t.out.querySelector('.term-entry')) {
+        t.out.innerHTML = '<div class="term-hint">这台设备还没执行过远程命令。输入命令，回车执行。</div>';
+      }
+      return;
+    }
+    // 历史插在现有条目上面：历史可能比用户刚发的命令慢回来，绝不能覆盖它。
+    const frag = document.createDocumentFragment();
+    jobs.slice().reverse().forEach(job => {   // 接口给的是倒序，页面里让最新的在最下面
+      if (!job) return;
+      const entry = pushEntry(t, job, frag);
+      applyJob(entry, job);
+      if (job.status === 'queued' || job.status === 'running'){
+        setNote(entry, job.status === 'running' ? '仍在设备上执行…' : '仍在排队…', '');
+      }
+    });
+    t.out.insertBefore(frag, t.out.firstChild);
+    if (!t.busy) termScrollToEnd(t);
+  } catch (e){
+    if (t.closed) return;
+    if (!t.out.querySelector('.term-entry')) {
+      t.out.innerHTML = `<div class="term-hint">历史读取失败：${esc(e.message || '未知错误')}</div>`;
+    }
+  }
+}
 
 /* ── 启动 ───────────────────────────────────────── */
 async function boot(){

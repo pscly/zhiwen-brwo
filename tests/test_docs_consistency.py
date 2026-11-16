@@ -21,7 +21,7 @@ def _raised_codes() -> set[str]:
         text = f.read_text(encoding="utf-8")
         for m in re.finditer(
             r'(?:ApiError|ProfileError|SyncError|HubError|BundleError|EngineError'
-            r'|ProxyError|CDPError|CryptoError|DeviceError)\(\s*(?:\d+\s*,\s*)?"([A-Z][A-Z0-9_]{2,})"',
+            r'|ProxyError|CDPError|CryptoError|DeviceError|ShellError)\(\s*(?:\d+\s*,\s*)?"([A-Z][A-Z0-9_]{2,})"',
             text,
         ):
             codes.add(m.group(1))

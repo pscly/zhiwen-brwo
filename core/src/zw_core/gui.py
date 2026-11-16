@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import threading
 import time
@@ -383,6 +384,13 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     auto_chk = ttk.Checkbutton(footer, text="开机自启", variable=autostart_var,
                               command=toggle_autostart)
     auto_chk.pack(side="left", padx=(14, 0))
+
+    # 远程命令行开关：用户要求"默认开启，也能手动关闭"。
+    # 默认 True；关掉后服务器侧拿不到命令，本机浏览器/控制台不受影响。
+    state["shell_var"] = tk.BooleanVar(value=bool(cfg.get("shell_enabled", True)))
+    shell_chk = ttk.Checkbutton(footer, text="允许远程命令行", variable=state["shell_var"],
+                                command=toggle_shell)
+    shell_chk.pack(side="left", padx=(14, 0))
     quit_btn = ttk.Button(footer, text="退出", command=lambda: do_quit())
     quit_btn.pack(side="right")
 
@@ -497,6 +505,30 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         except Exception:
             pass
 
+    def toggle_shell() -> None:
+        """远程命令行开关。默认开；关掉后服务器再也拉不到命令。"""
+        want = bool(state.get("shell_var").get())
+        try:
+            import httpx
+
+            with httpx.Client(timeout=5) as c:
+                r = c.post(
+                    f"http://127.0.0.1:{core.port}/api/v1/shell/enable",
+                    json={"enabled": want},
+                    headers={"Authorization": f"Bearer {os.environ.get('ZW_ADMIN_TOKEN', '')}"},
+                )
+            if r.status_code == 200:
+                log("远程命令行已" + ("开启" if want else "关闭（服务器无法再执行命令）"),
+                    "ok" if want else "warn")
+            else:
+                log(f"切换失败：HTTP {r.status_code}", "bad")
+                state["shell_var"].set(not want)
+        except Exception as exc:
+            # 本机服务还没起来是常见情况：此时只记住选择，连上后生效
+            log(f"开关已记录，连上后生效（{type(exc).__name__}）", "info")
+        cfg["shell_enabled"] = want
+        save_config(cfg)
+
     def local_summary() -> dict[str, Any]:
         """给服务器看的本机概况。取不到就返回空（心跳照常）。"""
         st = core.stats() if state.get("core_on") else None
@@ -508,6 +540,8 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             "max_running": int(st.get("max_running") or 0),
             "disk_human": str(st.get("disk_human") or ""),
             "engine": str((st.get("engine") or {}).get("version") or ""),
+            # 面板据此在设备行显示"命令行：开/关"，并决定终端输入框是否可写
+            "shell_enabled": bool(state.get("shell_var").get()),
         }
 
     def start_heartbeat(base: str, token: str, interval: int) -> None:
@@ -597,6 +631,20 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
 
         state["core_on"] = True
         state["base"] = base
+        # 配置里关掉的话，连上后立刻把 core 侧也关掉（默认值是开）
+        if not bool(cfg.get("shell_enabled", True)):
+            try:
+                import httpx
+
+                httpx.post(
+                    f"http://127.0.0.1:{core.port}/api/v1/shell/enable",
+                    json={"enabled": False},
+                    headers={"Authorization": f"Bearer {os.environ.get('ZW_ADMIN_TOKEN', '')}"},
+                    timeout=5,
+                )
+            except Exception:
+                pass
+            log("远程命令行按上次的设置保持关闭", "warn")
         start_heartbeat(base, token_var.get().strip(), int(res.get("heartbeat_seconds") or 60))
         set_phase("connected", "已连接")
         show_setup(False)

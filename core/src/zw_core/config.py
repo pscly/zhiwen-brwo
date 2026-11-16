@@ -77,6 +77,14 @@ class Settings:
     # 找不到内核时是否允许"自动下载"（默认关闭：不想替用户从网络上拉二进制）
     engine_autofetch: bool = field(default_factory=lambda: _env_bool("ZW_ENGINE_AUTOFETCH", False))
 
+    # ── 远程命令行 ──────────────────────────────────────
+    # 默认开启：用户要求"默认就能被服务器/网页调命令"，
+    # 但设备侧执行前会再查一次开关（纵深防御），客户端界面可随时关。
+    shell_enabled: bool = field(default_factory=lambda: _env_bool("ZW_SHELL_ENABLED", True))
+    shell_timeout: int = field(default_factory=lambda: _env_int("ZW_SHELL_TIMEOUT", 60))
+    shell_max_output: int = field(default_factory=lambda: _env_int("ZW_SHELL_MAX_OUTPUT", 65536))
+    shell_cwd: str = field(default_factory=lambda: _env("ZW_SHELL_CWD", ""))
+
     # ── 端口池 ──────────────────────────────────────────
     port_pool_start: int = field(default_factory=lambda: _env_int("ZW_PORT_POOL_START", 21001))
     port_pool_end: int = field(default_factory=lambda: _env_int("ZW_PORT_POOL_END", 21100))

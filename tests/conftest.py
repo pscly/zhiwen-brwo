@@ -63,6 +63,10 @@ _ZW_VARS = [
     "ZW_REQUIRE_SIGNATURE",
     "ZW_SIGNATURE_SECRET",
     "ZW_LOG_DIR",
+    # hub 远程命令行
+    "ZW_SHELL_ENABLED",
+    "ZW_SHELL_MAX_OUTPUT",
+    "ZW_SHELL_QUEUE_LIMIT",
 ]
 
 for _name in _ZW_VARS:

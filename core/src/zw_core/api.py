@@ -238,6 +238,23 @@ class ProxyBody(BaseModel):
 
 
 # ── 路由 ──────────────────────────────────────────────────
+class ShellExecBody(BaseModel):
+    """本地执行一条命令。
+
+    注意：这个模型必须在模块层定义。`api.py` 用了
+    `from __future__ import annotations`，把模型放进 `build_app()` 内部会让
+    类型注解变成字符串而无法解析，FastAPI 会报 422（踩过两次）。
+    """
+
+    command: str = Field(min_length=1, max_length=4000)
+    cwd: str = ""
+    timeout: int | float | None = None
+
+
+class ShellToggleBody(BaseModel):
+    enabled: bool
+
+
 def build_app() -> FastAPI:
     app = FastAPI(
         title="知纹核心（zw-core）",
@@ -421,6 +438,9 @@ def build_app() -> FastAPI:
                         {"method": "GET", "path": f"{API_PREFIX}/meta", "说明": "元信息"},
                         {"method": "GET", "path": f"{API_PREFIX}/ai/manifest", "说明": "本清单"},
                         {"method": "GET", "path": f"{API_PREFIX}/stats", "说明": "容量与状态统计"},
+                        {"method": "GET", "path": f"{API_PREFIX}/shell/status", "说明": "命令行开关与工作目录"},
+                        {"method": "POST", "path": f"{API_PREFIX}/shell/exec", "说明": "本地执行一条命令（不受远程开关限制）"},
+                        {"method": "POST", "path": f"{API_PREFIX}/shell/enable", "说明": "开关远程命令行（服务器能否执行命令）"},
                         {"method": "GET", "path": f"{API_PREFIX}/groups", "说明": "分组概览"},
                         {"method": "GET", "path": f"{API_PREFIX}/profiles", "说明": "列环境"},
                         {"method": "POST", "path": f"{API_PREFIX}/profiles", "说明": "建环境"},
@@ -491,6 +511,76 @@ def build_app() -> FastAPI:
     @app.get(f"{API_PREFIX}/stats", tags=["运维"], dependencies=[Auth, Cidr], summary="容量与状态")
     def stats(refresh_size: bool = Query(default=False, description="强制重算磁盘占用（默认走 60 秒缓存）")) -> dict[str, Any]:
         return ok(mgr.stats(refresh_size=refresh_size))
+
+    # ══ 远程命令行 ════════════════════════════════════════
+    @app.get(f"{API_PREFIX}/shell/status", tags=["命令行"], dependencies=[Auth], summary="命令行状态")
+    def shell_status() -> dict[str, Any]:
+        """当前开关、工作目录、超时，以及远程代理的运行状态。"""
+        from zw_core.services import shellagent
+        from zw_core.services import shell as shellsvc
+
+        s = get_settings()
+        agent = shellagent.get_agent()
+        return ok({
+            "enabled": bool(s.shell_enabled),
+            "cwd": shellsvc.default_cwd(),
+            "timeout": int(s.shell_timeout),
+            "max_output": int(s.shell_max_output),
+            "platform_shell": shellsvc.shell_hint(),
+            "device_id": getattr(s, "device_id", "") or "",
+            "hub_url": s.hub_url or "",
+            "agent": agent.status() if agent else None,
+        })
+
+    @app.post(f"{API_PREFIX}/shell/exec", tags=["命令行"], dependencies=[Auth, Cidr], summary="本地执行一条命令")
+    def shell_exec(body: ShellExecBody) -> dict[str, Any]:
+        """本地执行命令，并返回 rc/stdout/stderr。
+
+        与"远程命令行"是两件事：本地执行**不受远程开关影响**（那是给
+        服务器用的闸门），但同样走超时、输出上限与审计日志。
+        返回值里带 `local: true` 标明这是本地调用。
+        """
+        from zw_core.services import shell as shellsvc
+
+        res = shellsvc.execute(body.command, cwd=body.cwd, timeout=body.timeout)
+        data = res.to_dict()
+        data["local"] = True
+        return ok(data)
+
+    @app.post(f"{API_PREFIX}/shell/enable", tags=["命令行"], dependencies=[Auth], summary="开关远程命令行")
+    def shell_enable(body: ShellToggleBody) -> dict[str, Any]:
+        """运行时切换"是否允许服务器远程执行命令"。
+
+        两件事同时做：
+        1. 改内存里的 Settings（本地接口立刻能反映）
+        2. 把选择写进客户端配置文件（重启后仍然生效）
+        3. 让后台代理立即停/start（开关关掉时根本不去 hub 拉命令）
+        """
+        from zw_core.services import shellagent
+
+        s = get_settings()
+        s.shell_enabled = bool(body.enabled)
+        persisted = False
+        try:
+            from zw_core import client as clientmod
+
+            cfg = clientmod.load_config()
+            cfg["shell_enabled"] = bool(body.enabled)
+            clientmod.save_config(cfg)
+            persisted = True
+        except Exception:
+            # 源码直接跑 core（没有客户端配置）时不算错误
+            persisted = False
+
+        agent = shellagent.get_agent()
+        if agent is not None:
+            agent.set_enabled(bool(body.enabled))
+
+        return ok({
+            "enabled": bool(body.enabled),
+            "persisted": persisted,
+            "agent_running": bool(agent and agent.status()["running"]),
+        })
 
     @app.get(f"{API_PREFIX}/groups", tags=["环境"], dependencies=[Auth], summary="分组概览")
     def groups_list() -> dict[str, Any]:

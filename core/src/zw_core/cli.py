@@ -509,6 +509,54 @@ def cmd_events(args: argparse.Namespace) -> None:
     _out(_call("GET", f"/api/v1/events?since={args.since}"), args.json)
 
 
+def cmd_shell(args: Any) -> int:
+    """在本机执行一条命令并打印结果。
+
+    注意这是**本地**执行：不受"远程命令行"开关影响（那个开关管的是
+    "服务器能不能通过 hub 让这台机器执行命令"）。但同样受超时与输出上限约束。
+    """
+    from zw_core.services import shell as shellsvc
+
+    res = shellsvc.execute(args.command, cwd=args.cwd, timeout=args.timeout)
+    if getattr(args, "json", False):
+        _out(res.to_dict(), True)
+        return 0 if res.rc == 0 and not res.error else 1
+    if res.stdout:
+        sys.stdout.write(res.stdout if res.stdout.endswith("\n") else res.stdout + "\n")
+    if res.stderr:
+        sys.stderr.write(res.stderr if res.stderr.endswith("\n") else res.stderr + "\n")
+    if res.error:
+        print(f"[失败] {res.error}")
+    if res.truncated:
+        from .config import get_settings as _gs
+
+        print(f"[提示] 输出超过上限（{_gs().shell_max_output} 字节），已截断")
+    print(f"[rc={res.rc} {res.duration_ms}ms cwd={res.cwd}]", file=sys.stderr)
+    return 0 if res.rc == 0 and not res.error else 1
+
+
+def cmd_shell_status(args: Any) -> int:
+    from zw_core.services import shellagent
+    from zw_core.services import shell as shellsvc
+
+    from .config import get_settings
+
+    s = get_settings()
+    agent = shellagent.get_agent()
+    _out({
+        "enabled": bool(s.shell_enabled),
+        "cwd": shellsvc.default_cwd(),
+        "timeout": int(s.shell_timeout),
+        "max_output": int(s.shell_max_output),
+        "platform_shell": shellsvc.shell_hint(),
+        "device_id": getattr(s, "device_id", "") or "",
+        "hub_url": s.hub_url or "",
+        "agent": agent.status() if agent else None,
+        "说明": "enabled 是「服务器能否远程执行命令」的开关；本机 zw shell 不受它限制",
+    }, True)
+    return 0
+
+
 def cmd_audit(args: argparse.Namespace) -> None:
     q = [f"limit={args.limit}"]
     if args.profile:
@@ -576,6 +624,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--since", type=float, default=0.0)
     j(sp)
     sp.set_defaults(func=cmd_events)
+
+    sp = sub.add_parser("shell", help="在本机执行一条命令（不经过服务器）")
+    sp.add_argument("command", help="要执行的命令，例如 'ipconfig /all'")
+    sp.add_argument("--cwd", default="", help="工作目录（默认用户主目录）")
+    sp.add_argument("--timeout", type=float, default=None, help="超时秒数（默认取配置）")
+    sp.add_argument("--json", action="store_true", help="输出完整 JSON（含 stdout/stderr/rc）")
+    sp.set_defaults(func=cmd_shell)
+
+    sp = sub.add_parser("shell-status", help="远程命令行开关与代理状态")
+    j(sp)
+    sp.set_defaults(func=cmd_shell_status)
 
     sp = sub.add_parser("audit", help="审计日志")
     sp.add_argument("--profile")

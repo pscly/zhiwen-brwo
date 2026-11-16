@@ -75,11 +75,35 @@ async def _lifespan(app: Any):
     if not eng["ok"]:
         logger.warning("没有找到浏览器内核：%s", eng.get("error", ""))
 
+    # 远程命令行代理：只在有 hub 地址 + 设备号时启动。
+    # 纯出站长轮询，设备不新开监听端口。
+    try:
+        from zw_core.services import shellagent
+
+        agent = shellagent.start_agent(
+            hub_url=s.hub_url,
+            device_id=getattr(s, "device_id", "") or "",
+            token=s.hub_token,
+            enabled=bool(s.shell_enabled),
+        )
+        if agent is not None:
+            logger.info("远程命令行已启用（设备可在客户端里关闭）")
+        elif s.shell_enabled:
+            logger.debug("跳过程序化远程命令行：没有 hub 地址或设备号")
+    except Exception as exc:  # noqa: BLE001  命令行代理坏了不能拖垮整个服务
+        logger.error("远程命令行代理启动失败：%s", exc)
+
     app.state.health_task = asyncio.create_task(_health_loop())
     started = time.time()
     try:
         yield
     finally:
+        try:
+            from zw_core.services import shellagent
+
+            shellagent.stop_agent()
+        except Exception:
+            pass
         task = getattr(app.state, "health_task", None)
         if task:
             task.cancel()

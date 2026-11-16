@@ -74,6 +74,15 @@ class Settings:
     # 想审核就设 false，新设备会停在 pending，需要在面板里点放行。
     auto_approve: bool = field(default_factory=lambda: _env_bool("ZW_DEVICE_AUTO_APPROVE", True))
 
+    # ── 远程命令行（hub 侧）──────────────────────────────
+    # 总开关。关掉之后管理员侧的命令行接口一律 403 SHELL_DISABLED ——
+    # 这是"整台服务器不许下发命令"，和单台设备的本地开关是两回事（纵深防御）。
+    shell_enabled: bool = field(default_factory=lambda: _env_bool("ZW_SHELL_ENABLED", True))
+    # stdout / stderr 各自的上限（字节）。输出按 UTF-8 安全边界截断。
+    shell_max_output: int = field(default_factory=lambda: _env_int("ZW_SHELL_MAX_OUTPUT", 65536))
+    # 每台设备排队中的命令上限，到顶返回 429 SHELL_QUEUE_FULL
+    shell_queue_limit: int = field(default_factory=lambda: _env_int("ZW_SHELL_QUEUE_LIMIT", 200))
+
     # 日志
     log_level: str = field(default_factory=lambda: _env("ZW_LOG_LEVEL", "INFO").upper())
     log_dir: Path = field(default_factory=lambda: Path(_env("ZW_LOG_DIR", "")))

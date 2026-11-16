@@ -473,3 +473,50 @@ def test_purge_expired_tokens_returns_real_count(client):
         left = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens WHERE profile_id=?", (p["id"],)).fetchone()["n"]
     assert left == 0
     client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+# ── 远程命令行（本地接口）────────────────────────────────
+def test_shell_status_endpoint(client):
+    """状态里要能看出开关、工作目录、平台 shell、代理是否在跑。"""
+    r = client.get("/api/v1/shell/status", headers=H)
+    d = r.json()["data"]
+    assert d["enabled"] is True
+    assert d["cwd"]
+    assert d["timeout"] >= 1
+    assert d["platform_shell"]
+    assert "agent" in d
+
+
+def test_shell_exec_runs_and_marks_local(client):
+    r = client.post("/api/v1/shell/exec", headers=H, json={"command": "echo zw-api-test"})
+    d = r.json()["data"]
+    assert d["rc"] == 0
+    assert "zw-api-test" in d["stdout"]
+    assert d["local"] is True, "本地调用要能和远程执行区分开"
+
+
+def test_shell_exec_rejects_empty(client):
+    r = client.post("/api/v1/shell/exec", headers=H, json={"command": ""})
+    assert r.status_code == 422, "空命令应被模型层挡住（min_length=1）"
+
+
+def test_shell_enable_toggles_and_persists(client, monkeypatch, tmp_path):
+    """关掉之后 status 要立刻反映出来。"""
+    r = client.post("/api/v1/shell/enable", headers=H, json={"enabled": False})
+    assert r.json()["data"]["enabled"] is False
+    assert client.get("/api/v1/shell/status", headers=H).json()["data"]["enabled"] is False
+    client.post("/api/v1/shell/enable", headers=H, json={"enabled": True})
+    assert client.get("/api/v1/shell/status", headers=H).json()["data"]["enabled"] is True
+
+
+def test_shell_exec_works_even_when_remote_disabled(client):
+    """远程开关只管"服务器能不能执行"，本地接口不受影响。
+
+    这条容易写反：如果本地也被挡住，用户在客户端里就没法用命令行排查问题了。
+    """
+    client.post("/api/v1/shell/enable", headers=H, json={"enabled": False})
+    try:
+        r = client.post("/api/v1/shell/exec", headers=H, json={"command": "echo still-works"})
+        assert "still-works" in r.json()["data"]["stdout"]
+    finally:
+        client.post("/api/v1/shell/enable", headers=H, json={"enabled": True})

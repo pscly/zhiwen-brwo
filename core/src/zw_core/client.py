@@ -860,6 +860,24 @@ def selftest(show_dialog: bool = True) -> int:
         return f"无控制台环境下启动成功（端口 {port}）"
 
     chk("本机服务可启动（无控制台）", _core_boot)
+
+    def _shell_ok() -> str:
+        """远程命令行的执行器必须真的能跑通一条命令。
+
+        这个功能一旦坏了，用户是"从服务器点执行、永远没反应"，
+        在客户端界面上完全看不出来 —— 所以放进自检。
+        """
+        from zw_core.services import shell as shellsvc
+
+        probe = "echo zw-selftest" if sys.platform != "win32" else "echo zw-selftest"
+        r = shellsvc.execute(probe, timeout=15)
+        if r.error:
+            raise RuntimeError(r.error)
+        if "zw-selftest" not in (r.stdout + r.stderr):
+            raise RuntimeError(f"输出不符合预期：{(r.stdout + r.stderr)[:120]!r}")
+        return f"{shellsvc.shell_hint()} 可用，{r.duration_ms}ms"
+
+    chk("远程命令行执行器", _shell_ok)
     chk("配置目录可写", lambda: (str(config_dir()), save_config({**load_config(), "selftest": 1}), "ok")[0])
     chk("机器码生成", lambda: ensure_device_id()[:12] + "…")
     chk("地址规范化", lambda: normalize_server("192.168.3.5") )

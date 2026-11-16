@@ -57,6 +57,25 @@ def _as_int(v: Any) -> int | None:
         return None
 
 
+def _as_bool(v: Any) -> int | None:
+    """转 0/1；没上报返回 None（COALESCE 后保持库里原值）。
+
+    不接 `bool("false") is True` 这种坑：客户端可能传字符串。
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        return 1 if v else 0
+    if isinstance(v, (int, float)):
+        return 1 if v else 0
+    text = str(v).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return 1
+    if text in ("0", "false", "no", "off"):
+        return 0
+    return None
+
+
 class DeviceError(Exception):
     def __init__(self, status: int, code: str, message: str) -> None:
         super().__init__(message)
@@ -83,7 +102,8 @@ CREATE TABLE IF NOT EXISTS devices (
   profiles     INTEGER NOT NULL DEFAULT 0,
   running      INTEGER NOT NULL DEFAULT 0,
   disk_human   TEXT NOT NULL DEFAULT '',
-  engine       TEXT NOT NULL DEFAULT ''
+  engine       TEXT NOT NULL DEFAULT '',
+  shell_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
 
@@ -119,6 +139,7 @@ class DeviceStore:
             ("running", "INTEGER NOT NULL DEFAULT 0"),
             ("disk_human", "TEXT NOT NULL DEFAULT ''"),
             ("engine", "TEXT NOT NULL DEFAULT ''"),
+            ("shell_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ):
             try:
                 c.execute(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
@@ -178,7 +199,11 @@ class DeviceStore:
                 c.close()
 
     def touch(self, device_id: str, ip: str = "", stats: dict[str, Any] | None = None) -> dict[str, Any]:
-        """心跳。`stats` 是本机概况（环境数/运行中/磁盘），有就更新。"""
+        """心跳。`stats` 是本机概况（环境数/运行中/磁盘/命令行开关），有就更新。
+
+        `shell_enabled` 也走这里：面板据此显示"命令行：开 / 关"。
+        没上报就保持库里原值（`COALESCE`），不能因为一次空心跳把开关状态清掉。
+        """
         now = time.time()
         st = stats or {}
         with self._lock:
@@ -188,10 +213,12 @@ class DeviceStore:
                     "UPDATE devices SET last_seen=?, last_ip=COALESCE(NULLIF(?,''),last_ip),"
                     " profiles=COALESCE(?,profiles), running=COALESCE(?,running),"
                     " disk_human=COALESCE(NULLIF(?,''),disk_human),"
-                    " engine=COALESCE(NULLIF(?,''),engine) WHERE device_id=?",
+                    " engine=COALESCE(NULLIF(?,''),engine),"
+                    " shell_enabled=COALESCE(?,shell_enabled) WHERE device_id=?",
                     (now, ip,
                      _as_int(st.get("profiles")), _as_int(st.get("running")),
                      str(st.get("disk_human") or ""), str(st.get("engine") or ""),
+                     _as_bool(st.get("shell_enabled")),
                      device_id),
                 )
                 c.commit()
@@ -347,4 +374,6 @@ class DeviceStore:
         d = dict(row)
         d["online"] = d.get("status") == STATUS_ACTIVE and (now - float(d.get("last_seen") or 0)) < ONLINE_WINDOW
         d["last_seen_ago"] = max(0, int(now - float(d.get("last_seen") or 0)))
+        # 库里存 0/1，出参给布尔 —— 面板直接显示"开/关"，不用再猜 0 和 1 的含义
+        d["shell_enabled"] = bool(d.get("shell_enabled") or 0)
         return d

@@ -30,6 +30,7 @@ import ipaddress
 import json
 import logging
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .config import get_settings
 from .devices import DeviceError, DeviceStore
+from .shell import ShellError, ShellQueue
 from .store import HubError, Store
 
 logger = logging.getLogger("zw.hub")
@@ -53,6 +55,8 @@ app = FastAPI(
 
 _store: Store | None = None
 _devices: DeviceStore | None = None
+_shell_queue: ShellQueue | None = None
+_shell_queue_lock = threading.Lock()
 
 
 def store() -> Store:
@@ -71,6 +75,26 @@ def devices() -> DeviceStore:
     return _devices
 
 
+def shell_queue() -> ShellQueue:
+    """远程命令队列（懒加载单例）。
+
+    和其它两个单例不同，这里必须双检加锁：ShellQueue 的**状态在内存里**，
+    如果两个并发首请求各自造一个实例，投递进来的命令只有其中一个看得见，
+    设备另一侧就会永远空转。多一把锁比"偶发丢命令"便宜得多。
+    """
+    global _shell_queue
+    if _shell_queue is None:
+        with _shell_queue_lock:
+            if _shell_queue is None:
+                s = get_settings()
+                _shell_queue = ShellQueue(
+                    s.data_dir / "shell.db",
+                    max_output=s.shell_max_output,
+                    queue_limit=s.shell_queue_limit,
+                )
+    return _shell_queue
+
+
 # ── 响应包装 ──────────────────────────────────────────────
 def ok(data: Any = None) -> dict[str, Any]:
     return {"ok": True, "data": data}
@@ -83,6 +107,11 @@ async def _hub_error_handler(_: Request, exc: HubError) -> JSONResponse:
 
 @app.exception_handler(DeviceError)
 async def _device_error_handler(_: Request, exc: DeviceError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"ok": False, "code": exc.code, "message": exc.message})
+
+
+@app.exception_handler(ShellError)
+async def _shell_error_handler(_: Request, exc: ShellError) -> JSONResponse:
     return JSONResponse(status_code=exc.status, content={"ok": False, "code": exc.code, "message": exc.message})
 
 
@@ -194,6 +223,8 @@ def meta() -> dict[str, Any]:
             "keep_revisions": s.keep_revisions,
             "lease_ttl": s.lease_ttl,
             "max_blob_bytes": s.max_blob_bytes,
+            "shell_enabled": s.shell_enabled,
+            "shell_max_output": s.shell_max_output,
             "server_time": time.time(),
         }
     )
@@ -215,11 +246,13 @@ def ai_manifest() -> dict[str, Any]:
                 "revision": "单调递增的快照版本号，从 1 开始",
                 "key_fp": "客户端主密码派生密钥的指纹（16 位 hex），hub 用它判断快照能否被某台机器解开",
                 "lease": "跨机互斥锁，防止两台机器同时使用同一个环境",
+                "shell_job": "远程命令任务：管理员投递 → 设备长轮询取走 → 设备回传结果（协议见 docs/13）",
             },
             "workflows": {
                 "推送": "PUT /v1/blobs/{pid}/{rev} → PUT /v1/latest/{pid}",
                 "拉取": "GET /v1/latest/{pid} → GET /v1/blobs/{pid}/{rev}",
                 "占用环境": "POST /v1/leases/{pid} → 定期 POST /v1/leases/{pid}/heartbeat → DELETE /v1/leases/{pid}?owner=",
+                "远程命令": "POST /v1/devices/{device_id}/shell → 设备 GET /v1/devices/shell/next → 设备 POST /v1/devices/shell/{job_id}/result",
             },
             "errors": {
                 "REVISION_EXISTS": "版本号已被占用，换下一个 revision 或先 GET 看最新",
@@ -227,6 +260,9 @@ def ai_manifest() -> dict[str, Any]:
                 "PROFILE_BUSY": "环境被别的机器持有，等租约过期或让对方释放",
                 "NO_LATEST": "该环境还没有成功推送过",
                 "CIDR_FORBIDDEN": "调用方地址不在 ZW_ALLOWED_CIDRS 里",
+                "SHELL_DISABLED": "服务器端关掉了远程命令行（ZW_SHELL_ENABLED=false）",
+                "SHELL_QUEUE_FULL": "该设备排队中的命令到顶（默认 200 条），等它执行完再投",
+                "SHELL_JOB_NOT_FOUND": "没有这条命令，或它属于别的设备",
             },
             "安全模型": "hub 只存 AEAD 密文；主密码不进 hub；传输为局域网 HTTP，完整性由密文自身保证",
             "endpoints": [
@@ -245,6 +281,13 @@ def ai_manifest() -> dict[str, Any]:
                 {"method": "POST", "path": "/v1/leases/{pid}/heartbeat", "desc": "续租"},
                 {"method": "DELETE", "path": "/v1/leases/{pid}", "desc": "释放租约"},
                 {"method": "GET", "path": "/v1/leases/{pid}", "desc": "查租约"},
+                # ── 远程命令行（设备拉取 + 长轮询，协议见 docs/13）──
+                {"method": "GET", "path": "/v1/devices/shell/next", "desc": "设备侧：长轮询取一条待执行命令"},
+                {"method": "POST", "path": "/v1/devices/shell/{job_id}/result", "desc": "设备侧：回传执行结果"},
+                {"method": "POST", "path": "/v1/devices/{device_id}/shell", "desc": "管理员：投递命令"},
+                {"method": "GET", "path": "/v1/devices/{device_id}/shell/{job_id}", "desc": "管理员：查命令状态（可长轮询等终态）"},
+                {"method": "GET", "path": "/v1/devices/{device_id}/shell/history", "desc": "管理员：命令历史"},
+                {"method": "POST", "path": "/v1/devices/{device_id}/shell/{job_id}/cancel", "desc": "管理员：取消还没下发的命令"},
             ],
         }
     )
@@ -421,6 +464,7 @@ def enroll_info() -> dict[str, Any]:
             "token_required": bool(s.token),
             "auto_approve": s.auto_approve,
             "heartbeat_seconds": 60,
+            "shell_enabled": s.shell_enabled,
             "hint": "先 POST /v1/devices/enroll 带上 device_id；之后所有请求带 X-ZW-Device 头",
         }
     )
@@ -589,7 +633,10 @@ def panel_whoami(request: Request) -> dict[str, Any]:
 
 @app.get("/panel/api/stats", dependencies=[PanelAuth], include_in_schema=False)
 def panel_stats() -> dict[str, Any]:
-    return ok(devices().stats())
+    data = devices().stats()
+    # 远程命令行的 KPI（排队 / 在跑 / 完成 / 失败 / 有几台设备在等）
+    data["shell"] = shell_queue().stats()
+    return ok(data)
 
 
 @app.get("/panel/api/devices", dependencies=[PanelAuth], include_in_schema=False)
@@ -627,6 +674,167 @@ def panel_delete(device_id: str, request: Request) -> dict[str, Any]:
 @app.get("/panel/api/events", dependencies=[PanelAuth], include_in_schema=False)
 def panel_events(limit: int = 100) -> dict[str, Any]:
     return ok({"events": devices().events(limit=max(1, min(limit, 500)))})
+
+
+# ══════════════════════════════════════════════════════════
+#  远程命令行（设备拉取 + 长轮询，协议见 docs/13-远程命令行协议.md）
+#
+#  ## ⚠ 顺序敏感：这一段的路由声明顺序不能随便调
+#
+#  FastAPI/Starlette 按**声明顺序**逐条匹配，先命中就返回。这个仓库已经被
+#  同类问题坑过两次（见 core/src/zw_core/api.py 顶部，以及 api.py 里
+#  /profiles/batch 被当成"环境名叫 batch"）。这里的坑有两类：
+#
+#  1. **固定路径必须排在通配段之前**：
+#     `GET /v1/devices/{device_id}/shell/history` 与
+#     `GET /v1/devices/{device_id}/shell/{job_id}` 段数完全一样，
+#     如果 `{job_id}` 先声明，`.../shell/history` 会被当成"job_id 叫 history"，
+#     结果永远 404 SHELL_JOB_NOT_FOUND。所以 history 先声明。
+#  2. **设备侧的两条固定路径放在整段最前面**：`/v1/devices/shell/next` 与
+#     `/v1/devices/shell/{job_id}/result` 一旦被将来的管理员侧通配段
+#     （例如有人加 `/v1/devices/{device_id}/shell/{job_id}` 的变体）先吃掉，
+#     设备的轮询就会静默失效 —— 加新路由时请继续把固定路径写在上半段。
+#
+#  已有的 `/v1/devices/enroll`、`/v1/devices/heartbeat` 声明在本段之前
+#  （文件上半部分），顺序上天然安全；测试里也有一条用例守着它们不被吃掉。
+# ══════════════════════════════════════════════════════════
+def _device_id_of(request: Request) -> str:
+    """设备身份。与心跳一致：只认 `X-ZW-Device` 头。"""
+    return (request.headers.get("x-zw-device") or "").strip()
+
+
+def _require_shell_enabled() -> None:
+    """hub 端总开关。关掉后**所有**命令行接口都不干活（面板也不许绕过）。"""
+    if not get_settings().shell_enabled:
+        raise ShellError(403, "SHELL_DISABLED", "这台服务器关闭了远程命令行（ZW_SHELL_ENABLED=false）")
+
+
+def admin_auth(request: Request) -> str:
+    """管理员鉴权：面板会话 cookie **或** `Authorization: Bearer <ZW_HUB_TOKEN>`。
+
+    返回操作者标识（写审计日志用）。
+    - cookie 复用 `panel_auth` 的那套 HMAC，不需要额外存储；
+    - Bearer 只在 `ZW_HUB_TOKEN` 非空时接受 —— 留空意味着"这台服务器不要令牌"，
+      此时不能拿空串当口令放行；
+    - 两者都不对时统一 401，不告诉对方"你有 cookie 但过期了"还是"令牌不对"。
+    - 网段白名单（`_check_cidr`）在鉴权之前先过，和面板登录保持一致。
+    """
+    _check_cidr(request)
+    s = get_settings()
+    got = request.cookies.get(PANEL_COOKIE, "")
+    if got and hmac.compare_digest(got, _panel_token()):
+        return s.panel_user
+    authz = request.headers.get("authorization", "")
+    token = authz[7:].strip() if authz[:7].lower() == "bearer " else ""
+    if s.token and token and hmac.compare_digest(token, s.token):
+        return "api-token"
+    raise HubError(401, "UNAUTHENTICATED", "需要管理面板会话（cookie）或 Authorization: Bearer <令牌>")
+
+
+AdminAuth = Depends(admin_auth)
+
+
+# ── 顺序敏感①：设备侧固定路径，必须在管理员侧通配段之前 ──────────
+@app.get("/v1/devices/shell/next", summary="设备侧：长轮询取一条待执行命令")
+def device_shell_next(request: Request, wait: float = 25.0) -> dict[str, Any]:
+    """设备出站长轮询。`wait` 秒内没命令就返回 `{"job": null}`（上限 30）。
+
+    设备**只有在本地开关打开时**才会调这个接口 —— 那是"关闭"真正生效的地方。
+    hub 端开关关掉时这里也直接 403，免得设备白等 25 秒。
+    """
+    _require_shell_enabled()
+    dev = _device_id_of(request)
+    devices().require_active(dev)          # 被踢的设备在这里 403 DEVICE_REVOKED
+    return ok({"job": shell_queue().next_job(dev, wait=wait)})
+
+
+@app.post("/v1/devices/shell/{job_id}/result", summary="设备侧：回传执行结果")
+def device_shell_result(
+    job_id: str,
+    request: Request,
+    body: dict[str, Any] | None = Body(default=None),
+) -> dict[str, Any]:
+    """设备回传结果。
+
+    这里**不查** hub 端开关：结果可能属于关开关之前已经下发的那条命令，
+    拒收只会让那条 job 永远停在 running。开关的作用是"不许再下发"。
+    """
+    dev = _device_id_of(request)
+    devices().require_active(dev)
+    payload = body if isinstance(body, dict) else {}
+    shell_queue().complete(
+        job_id,
+        dev,
+        rc=payload.get("rc", 0),
+        stdout=payload.get("stdout", ""),
+        stderr=payload.get("stderr", ""),
+        duration_ms=payload.get("duration_ms", 0),
+        truncated=bool(payload.get("truncated", False)),
+        error=payload.get("error", ""),
+    )
+    return ok({"accepted": True})
+
+
+# ── 顺序敏感②：管理员侧（带 {device_id} 通配段，固定路径在下面先声明）──
+@app.post("/v1/devices/{device_id}/shell", summary="管理员：投递一条命令")
+def shell_submit(
+    device_id: str,
+    request: Request,
+    actor: str = AdminAuth,
+    body: dict[str, Any] | None = Body(default=None),
+) -> dict[str, Any]:
+    """投递命令。设备**离线也允许**（排队等它回来），但被踢下线的不给投。
+
+    审计只记"谁、哪台设备、多长的命令"，**不记命令原文**：
+    命令行里经常带密码，日志不该成为泄漏渠道（协议 §5.3）。
+    """
+    _require_shell_enabled()
+    devices().require_active(device_id)
+    payload = body if isinstance(body, dict) else {}
+    job = shell_queue().submit(
+        device_id,
+        payload.get("command", ""),
+        cwd=payload.get("cwd", ""),
+        timeout=payload.get("timeout"),
+    )
+    logger.info("管理员投递远程命令 device=%s job=%s actor=%s chars=%s",
+                device_id, job["id"], actor, len(job["command"]))
+    return ok({"job_id": job["id"], "status": job["status"]})
+
+
+# ⚠ 这条必须在下面的 `/{job_id}` 之前：段数一样，先声明才不会把 history 当 job_id
+@app.get("/v1/devices/{device_id}/shell/history", summary="管理员：命令历史")
+def shell_history(
+    device_id: str,
+    request: Request,
+    actor: str = AdminAuth,
+    limit: int = 50,
+) -> dict[str, Any]:
+    _require_shell_enabled()
+    return ok({"jobs": shell_queue().history(device_id, limit=limit)})
+
+
+@app.get("/v1/devices/{device_id}/shell/{job_id}", summary="管理员：查命令状态")
+def shell_get(
+    device_id: str,
+    job_id: str,
+    request: Request,
+    actor: str = AdminAuth,
+    wait: float = 30.0,
+) -> dict[str, Any]:
+    """`wait` 秒内变终态就立刻返回，否则原样返回当前状态（默认 30，上限 30）。"""
+    _require_shell_enabled()
+    return ok({"job": shell_queue().wait_terminal(job_id, device_id, wait=wait)})
+
+
+@app.post("/v1/devices/{device_id}/shell/{job_id}/cancel", summary="管理员：取消还没下发的命令")
+def shell_cancel(device_id: str, job_id: str, request: Request, actor: str = AdminAuth) -> dict[str, Any]:
+    """只有 `queued` 能取消；已经下发给设备的一律返回 `canceled: false`。"""
+    _require_shell_enabled()
+    canceled = shell_queue().cancel(job_id, device_id)
+    if canceled:
+        logger.info("管理员取消远程命令 device=%s job=%s actor=%s", device_id, job_id, actor)
+    return ok({"canceled": canceled})
 
 
 # ── 启动 ──────────────────────────────────────────────────
