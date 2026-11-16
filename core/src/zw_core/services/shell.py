@@ -113,7 +113,16 @@ def _decode(data: bytes) -> str:
         preferred = locale.getpreferredencoding(False) or ""
     except Exception:
         preferred = ""
-    for enc in ("utf-8", "gbk", "cp1252", preferred or "utf-8"):
+    oem = ""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            # OEM 代码页才是 cmd 内建命令真正使用的编码（英文版是 cp437）
+            oem = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+        except Exception:
+            oem = ""
+    for enc in ("utf-8", "gbk", oem, preferred, "cp1252"):
         try:
             return data.decode(enc)
         except (UnicodeDecodeError, LookupError):
@@ -165,14 +174,30 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         pass
 
 
+def _needs_utf8_console(command: str) -> bool:
+    """命令里有没有非 ASCII 字符。"""
+    return any(ord(ch) > 127 for ch in command)
+
+
 def _build_argv(command: str) -> list[str]:
     """把命令交给系统 shell 执行。
 
     用 `cmd /c` 与 `/bin/sh -c` 而不是 `shell=True`：
     后者在某些平台上会多包一层，且不利于我们自己控制进程组。
+
+    ## Windows 上要先切代码页
+
+    英文版 Windows 的控制台代码页是 cp437，`cmd /c echo 中文` 会把中文
+    直接**替换成 `?`**（字符在编码成"输出字节"那一步就丢了，我们再怎么解码也救不回来）。
+    实测：CI 的英文 Windows 上 stdout 就是 `????`。
+
+    所以命令里出现非 ASCII 时，先 `chcp 65001` 把子进程的控制台切到 UTF-8，
+    再执行原命令。`>nul` 是为了不把 "Active code page: 65001" 混进输出里。
     """
     if sys.platform == "win32":
         comspec = os.environ.get("COMSPEC") or "cmd.exe"
+        if _needs_utf8_console(command):
+            command = f"chcp 65001>nul & {command}"
         return [comspec, "/d", "/s", "/c", command]
     shell = "/bin/sh"
     if not Path(shell).exists():

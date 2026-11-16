@@ -149,3 +149,22 @@ def test_audit_log_keeps_command_but_not_output(tmp_path, caplog):
     joined = " ".join(rec.getMessage() for rec in caplog.records)
     assert secret not in joined, "日志里不该出现命令输出"
     assert "cat" in joined, "但命令本身要留痕（审计需要）"
+
+
+def test_windows_chinese_command_switches_codepage(monkeypatch):
+    """Windows 上非 ASCII 命令要先 `chcp 65001`。
+
+    英文版 Windows 的控制台代码页是 cp437，`cmd /c echo 中文` 在**编码成输出字节**
+    那一步就把中文换成 `?` 了 —— 我们再怎么解码也救不回来（CI 实测输出 `????`）。
+    """
+    from zw_core.services import shell as sh
+
+    monkeypatch.setattr(sh.sys, "platform", "win32")
+    argv = sh._build_argv("echo 中文测试")
+    assert argv[0].lower().endswith("cmd.exe")
+    assert "chcp 65001" in argv[-1], argv
+    assert argv[-1].endswith("echo 中文测试"), "原命令必须完整保留在最后"
+
+    # 纯 ASCII 命令不要多这一层（避免引入不必要的 shell 解析风险）
+    plain = sh._build_argv("ipconfig /all")
+    assert "chcp" not in plain[-1]
