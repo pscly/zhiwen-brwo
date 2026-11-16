@@ -79,12 +79,29 @@ def test_execute_timeout_kills_children():
 
 
 def test_chinese_output_is_not_mojibake():
+    """中文输出不能出现替换字符（我们这层不能把字弄坏）。
+
+    ## Windows 上为什么不用 `echo`
+
+    `cmd /c echo 中文` 在**英文版 Windows**（代码页 cp437）上，字符在 cmd
+    写输出之前就被换成 `?` 了 —— 这是 cmd + 非中文代码页的固有限制，
+    不是我们的解码问题（`chcp 65001` 也救不了内建 echo：它对管道输出无效）。
+    中文版 Windows（cp936）上 `echo 中文` 是正常的。
+
+    所以这里在 Windows 上改用 PowerShell 显式把输出编码设成 UTF-8，
+    验证的是**我们的执行器与解码链路**能不能把 UTF-8 字节正确还原成中文 ——
+    这才是这条测试该管的事。
+    """
     if sys.platform == "win32":
-        # cmd 的 echo 输出走系统代码页，_decode 会按 GBK/UTF-8 依次尝试
-        r = sh.execute("echo 中文测试", timeout=10)
+        r = sh.execute(
+            'powershell -NoProfile -NonInteractive -Command '
+            '"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Write-Output (\'中文测试\')"',
+            timeout=30,
+        )
     else:
         r = sh.execute('printf "中文测试\\n"', timeout=10)
-    assert "中文测试" in r.stdout
+    assert "中文测试" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert "\ufffd" not in r.stdout, "不该出现替换字符（说明解码猜错了编码）"
 
 
 def test_output_is_truncated_and_flagged():
