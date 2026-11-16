@@ -1,0 +1,2134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>知纹 · 机群控制台</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+/* ============================================================================
+   知纹主控台（hub :8700/）
+   设计沿用 core 控制台那套「深色液态玻璃」语言：近黑底 + 极淡冷光 + 1px 高光描边。
+   三条硬约束（见 docs/15-主控台契约.md 第五节）：
+     1) 单文件、零外部依赖（内网离线，不能引 CDN / 字体 / 外部 JS）；
+     2) 深色与浅色都成立；
+     3) 窄屏（<720px）卡片竖排、表格横向滚动。
+   字号阶梯 10.5 / 11 / 12 / 13 / 14 / 20，圆角只有 14 / 12 / 9 / 999 四档。
+   ========================================================================== */
+:root{
+  --bg:#08090b;
+  --ink:#eef1f6; --ink-2:#a3abb8; --ink-3:#737b89; --ink-4:#4d545f;
+  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.12); --line-3:rgba(255,255,255,.18);
+  --glass:rgba(24,27,33,.55); --glass-lite:rgba(255,255,255,.045); --glass-hover:rgba(255,255,255,.075);
+  --glass-sunk:rgba(0,0,0,.28);
+  --hi:inset 0 1px 0 rgba(255,255,255,.08);
+  --sh-1:0 1px 2px rgba(0,0,0,.35);
+  --sh-2:0 10px 30px -12px rgba(0,0,0,.65), 0 2px 8px -4px rgba(0,0,0,.5);
+  --sh-3:0 32px 80px -24px rgba(0,0,0,.8), 0 6px 20px -8px rgba(0,0,0,.6);
+  --accent:#5d9dff; --accent-dk:#2f6fe0;
+  --ok:#3ddc97; --warn:#f5b544; --bad:#ff5f57;
+  --r-card:14px; --r-ctrl:9px; --r-pill:999px;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:24px;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --ui:-apple-system,BlinkMacSystemFont,"SF Pro SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --ease:cubic-bezier(.32,.72,0,1);
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#eceef2; --ink:#14171c; --ink-2:#4d5563; --ink-3:#7a8290; --ink-4:#a3aab6;
+    --line:rgba(12,18,28,.10); --line-2:rgba(12,18,28,.16); --line-3:rgba(12,18,28,.24);
+    --glass:rgba(255,255,255,.74); --glass-lite:rgba(255,255,255,.6); --glass-hover:rgba(12,18,28,.06);
+    --glass-sunk:rgba(12,18,28,.05);
+    --hi:inset 0 1px 0 rgba(255,255,255,.9);
+    --sh-1:0 1px 2px rgba(16,24,40,.08);
+    --sh-2:0 10px 30px -14px rgba(16,24,40,.28), 0 2px 6px -3px rgba(16,24,40,.12);
+    --sh-3:0 30px 70px -26px rgba(16,24,40,.35), 0 8px 20px -10px rgba(16,24,40,.18);
+    --accent:#2f6fe0;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html{height:100%}
+body{
+  margin:0; min-height:100%; background:var(--bg); color:var(--ink);
+  font:13px/1.55 var(--ui); -webkit-font-smoothing:antialiased; letter-spacing:.005em;
+}
+/* 背景氛围层：两团极淡冷光。固定在 body::before，切视图时不会跟着重绘。 */
+body::before{
+  content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+  background:
+    radial-gradient(900px 520px at 14% -6%, rgba(93,157,255,.10), transparent 62%),
+    radial-gradient(760px 460px at 96% 8%, rgba(61,220,151,.055), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,.018), transparent 32%);
+}
+::selection{background:rgba(93,157,255,.32)}
+:focus-visible{outline:2px solid rgba(93,157,255,.55); outline-offset:2px}
+a{color:inherit}
+.mono{font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:12px}
+.dim{color:var(--ink-2)} .faint{color:var(--ink-3)} .muted{color:var(--ink-4)}
+.ellip{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.grow{flex:1 1 auto; min-width:var(--s2)}
+.link{color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(93,157,255,.3)}
+.link:hover{border-bottom-color:var(--accent)}
+
+/* ── 登录 ───────────────────────────────────────────────────────────────── */
+#login{position:relative; z-index:2; min-height:100vh; display:grid; place-items:center; padding:var(--s6) var(--s4)}
+.login-card{
+  width:min(392px,94vw); padding:30px 28px var(--s5); border-radius:18px; text-align:left;
+  border:1px solid var(--line-2);
+  background:linear-gradient(180deg, rgba(30,34,42,.92), rgba(16,18,23,.95));
+  box-shadow:var(--sh-3), inset 0 1px 0 rgba(255,255,255,.1);
+  backdrop-filter:blur(30px) saturate(150%); -webkit-backdrop-filter:blur(30px) saturate(150%);
+}
+@media (prefers-color-scheme: light){
+  .login-card{background:linear-gradient(180deg,#fff,#f6f7fa)}
+}
+.login-card .brand{margin-bottom:var(--s5)}
+.login-card label{display:block; font-size:11px; color:var(--ink-3); margin:var(--s3) 0 6px; letter-spacing:.04em}
+.login-err{min-height:18px; margin-top:var(--s3); font-size:12px; color:var(--bad)}
+.login-hint{margin-top:var(--s4); font-size:11px; color:var(--ink-4); line-height:1.7}
+.shake{animation:shake .3s var(--ease)}
+@keyframes shake{25%{transform:translateX(-6px)}75%{transform:translateX(6px)}}
+@media (prefers-reduced-motion:reduce){ .shake{animation:none} }
+
+/* ── 品牌 ───────────────────────────────────────────────────────────────── */
+.brand{display:flex; align-items:center; gap:10px; min-width:0}
+.brand-mark{
+  width:28px; height:28px; border-radius:9px; flex:none; position:relative;
+  background:conic-gradient(from 210deg at 50% 50%, #6ea8ff, #3ddc97 38%, #6ea8ff 72%, #2f6fe0);
+  box-shadow:var(--hi), 0 4px 14px -6px rgba(93,157,255,.9);
+}
+.brand-mark::after{content:""; position:absolute; inset:5px; border-radius:6px; background:var(--bg); opacity:.84}
+.brand-mark::before{
+  content:""; position:absolute; inset:9px 7px; border-radius:3px; z-index:1;
+  border:1px solid rgba(255,255,255,.6); border-top-color:transparent; border-bottom-color:transparent;
+}
+.brand-txt{display:flex; flex-direction:column; line-height:1.15; min-width:0}
+.brand-txt b{font-size:15px; font-weight:680; letter-spacing:.04em; white-space:nowrap}
+.brand-txt span{font-size:11px; color:var(--ink-3); letter-spacing:.03em; white-space:nowrap}
+
+/* ── 顶栏 ───────────────────────────────────────────────────────────────── */
+.topbar{
+  position:sticky; top:0; z-index:20; display:flex; align-items:center; gap:var(--s3);
+  padding:10px var(--s6);
+  border-bottom:1px solid var(--line);
+  background:rgba(10,12,16,.82);
+  backdrop-filter:blur(22px) saturate(150%); -webkit-backdrop-filter:blur(22px) saturate(150%);
+}
+@media (prefers-color-scheme: light){ .topbar{background:rgba(248,249,251,.86)} }
+.tabs{display:flex; align-items:center; gap:2px; padding:3px; border-radius:var(--r-pill);
+  border:1px solid var(--line); background:var(--glass-sunk)}
+.tab{
+  appearance:none; border:0; background:none; cursor:pointer; font:inherit; font-size:12.5px;
+  color:var(--ink-3); padding:5px 13px; border-radius:var(--r-pill);
+  transition:background .14s var(--ease), color .14s var(--ease);
+}
+.tab:hover{color:var(--ink); background:var(--glass-lite)}
+.tab.active{
+  color:var(--ink); background:linear-gradient(180deg, rgba(255,255,255,.13), rgba(255,255,255,.05));
+  box-shadow:var(--hi), 0 1px 6px -2px rgba(0,0,0,.6); font-weight:560;
+}
+@media (prefers-color-scheme: light){
+  .tab.active{background:#fff; box-shadow:0 1px 4px rgba(16,24,40,.12)}
+}
+.tb-right{display:flex; align-items:center; gap:var(--s2); margin-left:auto}
+.conn{
+  display:inline-flex; align-items:center; gap:7px; height:26px; padding:0 10px;
+  border:1px solid var(--line); border-radius:var(--r-pill); background:var(--glass-lite);
+  font:11px/1 var(--mono); color:var(--ink-3); white-space:nowrap;
+}
+.conn.err{color:var(--bad); border-color:rgba(255,95,87,.35)}
+.pulse{width:6px; height:6px; border-radius:50%; background:var(--ok); position:relative; flex:none}
+.pulse::after{content:""; position:absolute; inset:-3px; border-radius:50%; border:1px solid var(--ok);
+  animation:pulse 2.4s var(--ease) infinite; opacity:.5}
+.pulse.off{background:var(--ink-4)} .pulse.off::after{display:none}
+.pulse.err{background:var(--bad)} .pulse.err::after{border-color:var(--bad)}
+.pulse.busy{background:var(--accent)} .pulse.busy::after{border-color:var(--accent)}
+@keyframes pulse{0%{transform:scale(.7);opacity:.6}70%{transform:scale(1.5);opacity:0}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){ .pulse::after{animation:none} }
+.acct{
+  display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-2);
+  padding-left:var(--s2); border-left:1px solid var(--line); white-space:nowrap;
+}
+.acct .who{font-family:var(--mono); color:var(--ink); font-size:12px}
+
+/* ── 控件 ───────────────────────────────────────────────────────────────── */
+.btn{
+  display:inline-flex; align-items:center; justify-content:center; gap:6px; height:30px; padding:0 11px;
+  border-radius:var(--r-ctrl); cursor:pointer; border:1px solid var(--line-2);
+  background:linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.03));
+  color:var(--ink); font:13px/1 var(--ui); box-shadow:var(--hi), var(--sh-1);
+  transition:background .14s var(--ease), border-color .14s var(--ease), color .14s var(--ease);
+  white-space:nowrap; text-decoration:none;
+}
+.btn:hover{border-color:var(--line-3); background:linear-gradient(180deg, rgba(255,255,255,.115), rgba(255,255,255,.05))}
+.btn[disabled],.btn.off{opacity:.42; cursor:not-allowed; pointer-events:none}
+.btn.primary{background:linear-gradient(180deg,#6ba6ff,var(--accent-dk)); border-color:rgba(93,157,255,.6);
+  color:#fff; box-shadow:inset 0 1px 0 rgba(255,255,255,.28), 0 6px 18px -8px rgba(47,111,224,.9)}
+.btn.primary:hover{background:linear-gradient(180deg,#7db0ff,#3576e8)}
+.btn.ghost{background:transparent; box-shadow:none; border-color:transparent; color:var(--ink-2)}
+.btn.ghost:hover{background:var(--glass-lite); color:var(--ink); border-color:var(--line)}
+.btn.danger{color:var(--bad); border-color:rgba(255,95,87,.28)}
+.btn.danger:hover{background:rgba(255,95,87,.10); border-color:rgba(255,95,87,.5)}
+.btn.sm{height:26px; padding:0 9px; font-size:12px; border-radius:7px}
+.btn.xs{height:22px; padding:0 7px; font-size:11px; border-radius:6px}
+.btn.block{width:100%; height:36px; margin-top:var(--s5)}
+.input{
+  width:100%; height:34px; padding:0 11px; border-radius:var(--r-ctrl);
+  border:1px solid var(--line-2); background:var(--glass-sunk); color:var(--ink);
+  font:13px/1.4 var(--ui); outline:none; min-width:0;
+  transition:border-color .14s var(--ease), box-shadow .14s var(--ease);
+}
+.input::placeholder{color:var(--ink-4)}
+.input:focus{border-color:rgba(93,157,255,.6); box-shadow:0 0 0 3px rgba(93,157,255,.16)}
+.input[disabled]{opacity:.55; cursor:not-allowed}
+#p{font-family:var(--mono)}
+
+/* ── 布局 ───────────────────────────────────────────────────────────────── */
+main{position:relative; z-index:2; padding:var(--s5) var(--s6) 88px; max-width:1440px; margin:0 auto}
+.view-sec{animation:vin .2s var(--ease)}
+@keyframes vin{from{opacity:.4; transform:translateY(3px)}to{opacity:1; transform:none}}
+@media (prefers-reduced-motion:reduce){ .view-sec{animation:none} }
+.sec-head{display:flex; align-items:baseline; gap:var(--s2); margin:var(--s4) 0 var(--s3); flex-wrap:wrap}
+.sec-head h2{margin:0; font-size:12px; font-weight:600; color:var(--ink-2); letter-spacing:.08em; text-transform:uppercase}
+.sec-head .sub{font-size:11px; color:var(--ink-4)}
+.glass{
+  position:relative; border-radius:var(--r-card); border:1px solid var(--line);
+  background:linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.018));
+  box-shadow:var(--hi), var(--sh-2);
+  backdrop-filter:blur(18px) saturate(150%); -webkit-backdrop-filter:blur(18px) saturate(150%);
+}
+@media (prefers-color-scheme: light){ .glass{background:rgba(255,255,255,.72)} }
+.card{padding:var(--s4) var(--s5)}
+.empty{padding:40px 20px; text-align:center; color:var(--ink-3); font-size:13px}
+.empty b{display:block; color:var(--ink-2); font-size:14px; font-weight:600; margin-bottom:5px}
+.empty .e-ico{font-size:24px; opacity:.45; margin-bottom:6px; display:block}
+
+/* 提示条 */
+#banner-stack{max-width:1440px; margin:0 auto; padding:var(--s3) var(--s6) 0}
+.banner{
+  display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap;
+  padding:9px 13px; margin-bottom:var(--s2); border-radius:var(--r-ctrl);
+  font-size:12px; line-height:1.65;
+  border:1px solid var(--line-2); background:var(--glass-lite); color:var(--ink-2);
+}
+.banner b{color:var(--ink)}
+.banner code{font-family:var(--mono); font-size:11px; background:rgba(255,255,255,.10);
+  padding:1px 5px; border-radius:4px; color:var(--ink)}
+@media (prefers-color-scheme: light){ .banner code{background:rgba(12,18,28,.07)} }
+.banner.warn{border-color:rgba(245,181,68,.34); background:rgba(245,181,68,.10); color:#ffd899}
+@media (prefers-color-scheme: light){ .banner.warn{color:#7a4c00} }
+.banner.bad{border-color:rgba(255,95,87,.34); background:rgba(255,95,87,.10); color:#ffc2bd}
+@media (prefers-color-scheme: light){ .banner.bad{color:#8d1c14} }
+.banner.info{border-color:rgba(93,157,255,.30); background:rgba(93,157,255,.09); color:#cfdef7}
+@media (prefers-color-scheme: light){ .banner.info{color:#1e3f7a} }
+
+/* KPI + 服务器信息 */
+.kpi-grid{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:var(--s3)}
+@media (max-width:980px){ .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+.kpi{padding:12px var(--s4) 13px; border-radius:var(--r-card); border:1px solid var(--line);
+  background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.015));
+  box-shadow:var(--hi), var(--sh-1); position:relative; overflow:hidden}
+.kpi::after{content:""; position:absolute; left:0; right:0; top:0; height:1px;
+  background:linear-gradient(90deg, transparent, rgba(255,255,255,.28), transparent); opacity:.5}
+.kpi-val{font-size:25px; font-weight:600; letter-spacing:-.03em; line-height:1.1; font-variant-numeric:tabular-nums}
+.kpi-label{font-size:11px; color:var(--ink-3); margin-top:4px}
+.kpi-hint{font-size:10.5px; color:var(--ink-4); margin-top:2px}
+.srv{display:flex; align-items:center; gap:var(--s4); flex-wrap:wrap;
+  margin-top:var(--s3); padding:9px 14px; font-size:11.5px; color:var(--ink-3)}
+.srv em{font-style:normal; color:var(--ink-4)}
+.srv b{color:var(--ink-2); font-weight:500; font-family:var(--mono); font-size:11px}
+
+/* ── 机器卡片 ───────────────────────────────────────────────────────────── */
+.mach-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(352px,1fr)); gap:var(--s3); align-items:start}
+@media (max-width:720px){ .mach-grid{grid-template-columns:1fr} }
+.mach{padding:14px 16px 12px; min-width:0; display:flex; flex-direction:column}
+.mach.term-open{grid-column:1/-1}
+.mach-h{display:flex; align-items:flex-start; gap:9px; min-width:0}
+.mach-h .pulse{margin-top:7px}
+.mach-id{min-width:0; flex:1 1 auto}
+.mach-name{margin:0; font-size:14px; font-weight:600; letter-spacing:-.01em;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; line-height:1.35}
+.mach-sub{font-size:11px; color:var(--ink-3); margin-top:2px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.mach-badges{display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end; max-width:58%; flex:none}
+.badge{
+  display:inline-flex; align-items:center; gap:4px; height:19px; padding:0 7px; border-radius:var(--r-pill);
+  font-size:11px; border:1px solid var(--line-2); background:var(--glass-lite); color:var(--ink-2);
+  white-space:nowrap; max-width:190px; overflow:hidden; text-overflow:ellipsis;
+}
+.badge.ok{color:var(--ok); border-color:rgba(61,220,151,.3); background:rgba(61,220,151,.1)}
+.badge.warn{color:var(--warn); border-color:rgba(245,181,68,.3); background:rgba(245,181,68,.1)}
+.badge.bad{color:var(--bad); border-color:rgba(255,95,87,.3); background:rgba(255,95,87,.1)}
+.dot{width:6px; height:6px; border-radius:50%; background:var(--ink-4); display:inline-block; flex:none}
+.dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)}
+.mach-fields{
+  display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px 14px;
+  margin:var(--s3) 0 0; padding:var(--s3) 0 0; border-top:1px dashed var(--line);
+}
+.mach-fields .f{display:flex; flex-direction:column; gap:1px; min-width:0}
+.mach-fields .f.wide{grid-column:1/-1}
+.mach-fields dt{font-size:10.5px; color:var(--ink-4); letter-spacing:.04em}
+.mach-fields dd{margin:0; font-size:12.5px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+/* 引擎版本号经常比这一格宽：允许折两行，比留个"Chrome 149.0.78…"更好读 */
+.mach-fields .f.eng dd{white-space:normal; overflow-wrap:anywhere; line-height:1.35}
+.mach-fields .f.wide dd{display:flex; align-items:center; gap:var(--s2)}
+.mach-fields .f.wide dd span{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--mono); font-size:11.5px; color:var(--ink-2)}
+@media (min-width:900px){ .mach.term-open .mach-fields{grid-template-columns:repeat(6,minmax(0,1fr))} }
+@media (max-width:560px){ .mach-fields{grid-template-columns:repeat(2,minmax(0,1fr))} }
+.mach-acts{display:flex; gap:6px; flex-wrap:wrap; padding-top:var(--s3); margin-top:auto}
+.mach-acts .spacer{flex:1 1 auto}
+.mach-term{margin-top:var(--s3)}
+
+/* ── 浏览器视图 ─────────────────────────────────────────────────────────── */
+.br-list{display:flex; flex-direction:column; gap:var(--s3)}
+.br-sec{padding:var(--s4) var(--s5) var(--s5)}
+.br-h{display:flex; align-items:center; gap:var(--s2); min-width:0; margin-bottom:var(--s3); flex-wrap:wrap}
+.br-name{margin:0; font-size:13.5px; font-weight:600; letter-spacing:-.01em; min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.br-sub{font-size:11px; color:var(--ink-4); font-family:var(--mono)}
+.br-note{padding:14px var(--s4); border-radius:var(--r-ctrl); border:1px dashed var(--line-2);
+  color:var(--ink-3); font-size:12px; background:var(--glass-sunk)}
+.table-wrap{overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:var(--r-ctrl);
+  border:1px solid var(--line); background:rgba(0,0,0,.10)}
+@media (prefers-color-scheme: light){ .table-wrap{background:rgba(255,255,255,.55)} }
+table.tbl{width:100%; border-collapse:separate; border-spacing:0; font-size:13px; min-width:720px}
+.tbl thead th{text-align:left; font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink-3); padding:8px 12px; white-space:nowrap; background:rgba(255,255,255,.03);
+  border-bottom:1px solid var(--line)}
+@media (prefers-color-scheme: light){ .tbl thead th{background:rgba(12,18,28,.03)} }
+.tbl tbody td{padding:9px 12px; border-bottom:1px solid rgba(255,255,255,.045); vertical-align:middle}
+@media (prefers-color-scheme: light){ .tbl tbody td{border-bottom-color:rgba(12,18,28,.06)} }
+.tbl tbody tr:last-child td{border-bottom:none}
+.tbl tbody tr:hover td{background:rgba(255,255,255,.028)}
+@media (prefers-color-scheme: light){ .tbl tbody tr:hover td{background:rgba(12,18,28,.022)} }
+.cell-main{font-weight:560; font-size:13px}
+.cell-sub{font-size:10.5px; color:var(--ink-4); margin-top:1px; font-family:var(--mono)}
+.tbl tbody td:first-child,.tbl thead th:first-child{min-width:150px}
+.cdp-cell{display:flex; align-items:center; gap:6px; min-width:0}
+.cdp-cell .ellip{max-width:min(38vw,300px); display:inline-block; vertical-align:middle}
+/* 窄屏表格是横向滚动的：给一句提示，别让人以为地址就是被截断的 */
+.br-scroll-hint{display:none; margin-top:7px; font-size:10.5px; color:var(--ink-4)}
+@media (max-width:720px){ .br-scroll-hint{display:block} }
+
+/* ── 令牌视图 ───────────────────────────────────────────────────────────── */
+.sec-list{display:flex; flex-direction:column}
+.sec-row{display:grid; grid-template-columns:132px minmax(0,1fr) auto; gap:var(--s3);
+  align-items:center; padding:11px 2px; border-bottom:1px solid var(--line)}
+.sec-row:last-child{border-bottom:none}
+.sec-k{font-size:12px; color:var(--ink-3)}
+.sec-vwrap{min-width:0}
+.sec-v{font-family:var(--mono); font-size:12.5px; min-width:0; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; letter-spacing:.02em}
+.sec-v.muted{font-family:var(--ui); font-size:12px}
+.sec-acts{display:flex; gap:6px; justify-self:end}
+.sec-note{font-size:11px; color:var(--ink-3); line-height:1.55; margin-top:3px; white-space:normal}
+@media (max-width:600px){
+  .sec-row{grid-template-columns:minmax(0,1fr); gap:5px}
+  .sec-v{white-space:normal; word-break:break-all}
+  .sec-acts{justify-self:start}
+}
+.sec-warn{margin-bottom:var(--s4)}
+
+/* ── 事件流 ─────────────────────────────────────────────────────────────── */
+.ev-list{max-height:min(64vh,560px); overflow:auto; display:flex; flex-direction:column}
+.ev{display:grid; grid-template-columns:104px minmax(0,1fr); gap:var(--s3); align-items:center;
+  padding:8px 4px; border-bottom:1px solid var(--line); font-size:12px}
+.ev:last-child{border-bottom:none}
+.ev-t{font-family:var(--mono); font-size:11px; color:var(--ink-4); white-space:nowrap}
+.ev-b{min-width:0; display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+.ev-dev{font-size:12.5px; font-weight:560; color:var(--ink); min-width:0;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%}
+.ev-by{font-size:11px; color:var(--ink-3); font-family:var(--mono)}
+.ev-note{color:var(--ink-3); font-size:11.5px}
+@media (max-width:620px){
+  .ev{grid-template-columns:minmax(0,1fr); gap:2px}
+  .ev-t{order:2}
+}
+
+/* ── 远程终端 ───────────────────────────────────────────────────────────── */
+.term{border:1px solid var(--line-2); border-radius:12px; overflow:hidden;
+  background:rgba(0,0,0,.34); box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
+@media (prefers-color-scheme: light){ .term{background:#fff} }
+.term-h{display:flex; align-items:center; gap:9px; padding:8px 12px; flex-wrap:wrap;
+  border-bottom:1px solid var(--line); background:rgba(255,255,255,.03)}
+.term-title{font-size:12.5px; font-weight:600; letter-spacing:.01em}
+.term-title b{font-weight:600}
+.term-sub{font-size:11px; color:var(--ink-4); font-family:var(--mono)}
+.term-warn{padding:8px 12px; font-size:11.5px; line-height:1.7; color:var(--warn);
+  border-bottom:1px solid var(--line); background:rgba(245,181,68,.08)}
+.term-out{max-height:320px; overflow:auto; padding:10px 12px; font-family:var(--mono);
+  font-size:12.5px; line-height:1.62; white-space:pre-wrap; word-break:break-word; overscroll-behavior:contain}
+/* 条目内部要 normal：否则会继承上面的 pre-wrap，把模板缩进渲染成空行 */
+.term-entry{padding:7px 0; border-bottom:1px dashed var(--line); white-space:normal}
+.term-entry:last-child{border-bottom:none; padding-bottom:2px}
+.term-cmd{color:var(--accent); font-weight:560; white-space:pre-wrap; word-break:break-word}
+.term-stdout{margin-top:3px; white-space:pre-wrap; word-break:break-word}
+.term-stderr{margin-top:3px; white-space:pre-wrap; word-break:break-word; color:#ff8b8b}
+@media (prefers-color-scheme: light){ .term-stderr{color:#b3261e} }
+.term-note{margin-top:4px; font-size:11.5px; color:var(--ink-3)}
+.term-note.bad{color:var(--bad)}
+.term-meta{margin-top:4px; font-size:11px; color:var(--ink-3); font-variant-numeric:tabular-nums}
+.term-meta.bad{color:var(--bad); font-weight:640}
+.term-cut{margin-top:4px; font-size:11px; color:var(--warn)}
+.term-hint{font-size:11.5px; color:var(--ink-3); line-height:1.75}
+.term-in{display:flex; gap:8px; align-items:center; padding:9px 12px;
+  border-top:1px solid var(--line); background:rgba(255,255,255,.03)}
+.term-in .input{flex:1 1 auto; height:30px; font-family:var(--mono); font-size:12.5px}
+
+/* ── Toast ──────────────────────────────────────────────────────────────── */
+.toast-wrap{position:fixed; right:16px; bottom:16px; z-index:120; display:flex; flex-direction:column;
+  gap:8px; align-items:flex-end; max-width:min(420px,92vw); pointer-events:none}
+.toast{
+  pointer-events:auto; max-width:100%; display:flex; align-items:flex-start; gap:8px;
+  padding:9px 12px; border-radius:11px; border:1px solid var(--line-2); border-left:2px solid var(--accent);
+  background:rgba(24,27,33,.97); color:var(--ink); box-shadow:var(--sh-3), var(--hi);
+  font-size:12.5px; backdrop-filter:blur(20px); animation:tin .2s var(--ease);
+}
+@media (prefers-color-scheme: light){ .toast{background:rgba(255,255,255,.98)} }
+.toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--bad)}
+.toast-t{line-height:1.5; word-break:break-word}
+@keyframes tin{from{opacity:0; transform:translateX(10px)}to{opacity:1; transform:none}}
+@media (prefers-reduced-motion:reduce){ .toast{animation:none} }
+
+/* ── 对话框 ─────────────────────────────────────────────────────────────── */
+dialog.dlg{
+  padding:0; border:1px solid var(--line-2); border-radius:16px; color:var(--ink);
+  background:linear-gradient(180deg, rgba(28,31,38,.98), rgba(17,19,24,.99));
+  box-shadow:var(--sh-3), inset 0 1px 0 rgba(255,255,255,.09);
+  width:min(420px,92vw);
+}
+@media (prefers-color-scheme: light){ dialog.dlg{background:linear-gradient(180deg,#fff,#f7f8fb)} }
+dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
+.dlg-h{display:flex; align-items:center; gap:var(--s2); padding:var(--s4) var(--s5) var(--s2)}
+.dlg-h h2{margin:0; font-size:15px; font-weight:620; letter-spacing:-.01em}
+.dlg-x{margin-left:auto; width:26px; height:26px; border-radius:7px; border:1px solid transparent;
+  background:transparent; color:var(--ink-3); cursor:pointer; font-size:14px; line-height:1; display:grid; place-items:center}
+.dlg-x:hover{background:var(--glass-lite); color:var(--ink); border-color:var(--line)}
+.dlg-b{padding:0 var(--s5) var(--s4); font-size:12.5px; color:var(--ink-2); line-height:1.7; min-height:20px}
+.dlg-f{display:flex; align-items:center; gap:var(--s2); padding:var(--s3) var(--s5); border-top:1px solid var(--line)}
+.dlg-f .grow{flex:1}
+
+/* ── 窄屏 ───────────────────────────────────────────────────────────────── */
+@media (max-width:860px){
+  .topbar{flex-wrap:wrap; gap:var(--s2); padding:9px 14px}
+  .brand-txt span{display:none}
+  .topbar .tabs{order:9; width:100%; overflow-x:auto}
+  .topbar .tabs .tab{flex:1 1 auto}
+  .tb-right{margin-left:auto}
+  main{padding:var(--s3) 14px 72px}
+  #banner-stack{padding:var(--s3) 14px 0}
+  .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:520px){
+  .conn{display:none}
+  .acct{border-left:0; padding-left:0}
+  .mach-badges{max-width:46%}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ 登录（未登录时只显示这一屏，不跳转） ═══════════════════════════ -->
+<div id="login">
+  <form class="login-card" id="login-form" autocomplete="off" novalidate>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div class="brand-txt"><b>知纹 · 机群控制台</b><span>服务器端管理</span></div>
+    </div>
+    <label for="u">登录名</label>
+    <input class="input" id="u" name="username" autocomplete="username" required>
+    <label for="p">密码</label>
+    <input class="input" id="p" name="password" type="password" autocomplete="current-password" required>
+    <div class="login-err" id="login-err" role="status"></div>
+    <button class="btn primary block" id="btn-login" type="submit">登录</button>
+    <div class="login-hint">
+      这是你自己服务器的管理面板。忘记密码就看部署机上的
+      <code>/opt/zhiwen-hub/.env</code> 里 <code>ZW_PANEL_USER</code> 与 <code>ZW_PANEL_PASSWORD</code>。
+    </div>
+  </form>
+</div>
+
+<!-- ═══ 主控台 ═════════════════════════════════════════════════════════ -->
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div class="brand-txt"><b>知纹</b><span>机群控制台</span></div>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="视图切换">
+      <button class="tab active" type="button" data-view="machines" role="tab" aria-selected="true">机器</button>
+      <button class="tab" type="button" data-view="browsers" role="tab" aria-selected="false">浏览器</button>
+      <button class="tab" type="button" data-view="secrets" role="tab" aria-selected="false">令牌</button>
+      <button class="tab" type="button" data-view="events" role="tab" aria-selected="false">事件</button>
+    </nav>
+    <div class="tb-right">
+      <span class="conn" id="conn"><span class="pulse off"></span><span id="conn-text">未连接</span></span>
+      <button class="btn sm ghost" id="btn-auto" type="button" title="暂停/恢复每 10 秒的自动刷新">自动刷新 · 10s</button>
+      <button class="btn sm" id="btn-refresh" type="button">刷新</button>
+      <span class="acct" title="当前登录账号">账号 <span class="who" id="acct-who">—</span></span>
+      <button class="btn sm ghost" id="btn-logout" type="button">退出</button>
+    </div>
+  </header>
+
+  <div id="banner-stack"></div>
+
+  <main>
+    <!-- ① 机器 -->
+    <section class="view-sec" id="view-machines" role="tabpanel" aria-label="机器">
+      <div class="kpi-grid" id="kpis"></div>
+      <div class="srv glass" id="srv" hidden></div>
+      <div class="sec-head">
+        <h2>机器</h2>
+        <span class="sub">每 10 秒自动刷新；卡片里的「终端」能直接在这台机器上执行命令</span>
+      </div>
+      <div class="mach-grid" id="mach-list"></div>
+      <div class="glass empty" id="mach-empty" hidden></div>
+    </section>
+
+    <!-- ② 浏览器 -->
+    <section class="view-sec" id="view-browsers" role="tabpanel" aria-label="浏览器" hidden>
+      <div class="sec-head">
+        <h2>浏览器环境</h2>
+        <span class="sub">按机器分组；CDP 地址可点可复制，局域网内直接接管</span>
+      </div>
+      <div class="br-list" id="br-list"></div>
+    </section>
+
+    <!-- ③ 令牌 -->
+    <section class="view-sec" id="view-secrets" role="tabpanel" aria-label="令牌" hidden>
+      <div class="banner info sec-warn">
+        <b>安全提示</b>这些是服务器 <code>.env</code> 里的真实值 —— 面板密码等于服务器管理权。
+        只在本机 / 局域网内使用，不要把 8700 透到公网；用完把「显示」收起来。
+      </div>
+      <div class="sec-head">
+        <h2>令牌与凭据</h2>
+        <span class="sub">来源：GET /v1/console/secrets（敏感接口，不会写日志）</span>
+      </div>
+      <div class="glass card"><div id="sec-body"></div></div>
+    </section>
+
+    <!-- ④ 事件 -->
+    <section class="view-sec" id="view-events" role="tabpanel" aria-label="事件" hidden>
+      <div class="sec-head">
+        <h2>最近事件</h2>
+        <span class="sub">谁注册 / 踢下线 / 恢复 / 删除，最近 50 条</span>
+      </div>
+      <div class="glass card"><div class="ev-list" id="ev-list"></div></div>
+    </section>
+  </main>
+</div>
+
+<div class="toast-wrap" id="toast-wrap" aria-live="polite"></div>
+
+<dialog class="dlg" id="dlg">
+  <div class="dlg-h">
+    <h2 id="dlg-title">确认</h2>
+    <button class="dlg-x" id="dlg-x" type="button" aria-label="关闭">✕</button>
+  </div>
+  <div class="dlg-b" id="dlg-body"></div>
+  <div class="dlg-f">
+    <div class="grow"></div>
+    <button class="btn sm" id="dlg-cancel" type="button">取消</button>
+    <button class="btn sm primary" id="dlg-ok" type="button">确定</button>
+  </div>
+</dialog>
+
+<noscript><div class="banner warn" style="margin:14px">这个页面需要开启 JavaScript 才能用。</div></noscript>
+
+<script>
+'use strict';
+/* ============================================================================
+   知纹主控台前端
+   ---------------------------------------------------------------------------
+   数据来源（契约 docs/15-主控台契约.md）：
+     GET /v1/console/overview   机器 + 浏览器 + 事件（首屏一次拉完）
+     GET /v1/console/secrets    令牌与凭据（敏感，只在令牌视图里拉）
+     POST /panel/api/login      登录（cookie 会话）
+     /panel/api/device*         踢下线 / 恢复 / 改名 / 删除（旧接口，契约里保留）
+     /v1/devices/{id}/shell*    远程终端队列（协议 docs/13-远程命令行协议.md）
+   ---------------------------------------------------------------------------
+   三条实现约定，改这里之前先读：
+   1) 机器卡片是**建一次、之后只改文字**（cards 里持有 DOM）。整块 innerHTML 重绘会把
+      终端里的输入框、滚动位置、还没发出去的命令一起抹掉 —— 每 10 秒一刷就没法用了。
+   2) 所有设备名 / 环境名 / 事件备注都是用户可控文本：走 textContent，或拼 HTML 前过 esc()。
+   3) overview 未就绪（404/405）时退回旧的 /panel/api/* 拉一份等价数据，并在顶部挂一条
+      「主控台接口未就绪」提示 —— 主控台不能因为后端还没实现就白屏。
+   ========================================================================== */
+
+const VIEWS = ['machines', 'browsers', 'secrets', 'events'];
+const REFRESH_MS = 10000;
+
+function $(sel, root){ return (root || document).querySelector(sel); }
+function $$(sel, root){ return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+function num(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
+function enc(s){ return encodeURIComponent(String(s == null ? '' : s)); }
+function pad2(n){ return n < 10 ? '0' + n : String(n); }
+function hhmmss(ts){
+  const d = new Date(ts || Date.now());
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+}
+function fmtTime(ts){
+  const d = new Date((Number(ts) || 0) * 1000);
+  if (!d.getTime()) return '—';
+  return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + hhmmss(d.getTime());
+}
+function fmtAgo(sec){
+  if (sec == null || !Number.isFinite(Number(sec))) return '—';
+  const s = Math.max(0, Math.round(Number(sec)));
+  if (s < 10) return '刚刚';
+  if (s < 60) return s + ' 秒前';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+  return Math.floor(s / 86400) + ' 天前';
+}
+function fmtDuration(sec){
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.floor(s / 60) + ' 分钟';
+  if (s < 86400) return Math.floor(s / 3600) + ' 小时 ' + (Math.floor(s / 60) % 60) + ' 分';
+  return Math.floor(s / 86400) + ' 天 ' + (Math.floor(s / 3600) % 24) + ' 小时';
+}
+function devName(dev){
+  if (!dev) return '未命名设备';
+  const id = String(dev.device_id || '');
+  return dev.label || dev.hostname || (id ? id.slice(0, 10) + '…' : '未命名设备');
+}
+function joinUrl(base, path){
+  const b = String(base || '').replace(/\/+$/, '');
+  const p = String(path || '');
+  if (!b) return p;
+  return b + (p.charAt(0) === '/' ? p : '/' + p);
+}
+
+/* ── Toast ──────────────────────────────────────────────────────────────── */
+function toast(msg, kind){
+  const box = $('#toast-wrap');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (kind || '');
+  const t = document.createElement('div');
+  t.className = 'toast-t';
+  t.textContent = String(msg == null ? '' : msg);   // 一律 textContent：msg 可能带设备名
+  el.appendChild(t);
+  box.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = '.3s';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 320);
+  }, kind === 'err' ? 6000 : 2800);
+}
+
+/* ── 接口封装 ───────────────────────────────────────────────────────────── */
+async function api(method, path, body){
+  const opt = { method: method, headers: {}, credentials: 'same-origin' };
+  if (body !== undefined){
+    opt.headers['Content-Type'] = 'application/json';
+    opt.body = JSON.stringify(body);
+  }
+  let res;
+  try { res = await fetch(path, opt); }
+  catch (e){
+    const err = new Error('连不上服务器（' + ((e && e.message) || '网络错误') + '）');
+    err.status = 0;
+    throw err;
+  }
+  let payload = null;
+  try { payload = await res.json(); } catch (_) { payload = null; }
+  const isLoginCall = (path === '/panel/api/login' || path === '/panel/api/whoami' || path === '/panel/api/logout');
+  if (res.status === 401 && !isLoginCall){
+    onUnauthenticated((payload && payload.message) || '登录已过期，请重新登录');
+    const err = new Error('未登录');
+    err.status = 401;
+    err.code = (payload && payload.code) || 'PANEL_UNAUTHENTICATED';
+    throw err;
+  }
+  if (!res.ok || !payload || payload.ok === false){
+    const err = new Error((payload && payload.message) || ('HTTP ' + res.status));
+    err.status = res.status;
+    err.code = (payload && payload.code) || '';
+    throw err;
+  }
+  return payload.data !== undefined ? payload.data : payload;
+}
+
+/* ── 复制 ───────────────────────────────────────────────────────────────── */
+function legacyCopy(text){
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.top = '0';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand && document.execCommand('copy'); } catch (_) { ok = false; }
+  ta.remove();
+  if (!ok) throw new Error('copy failed');
+}
+async function copy(text, okMsg){
+  const val = String(text == null ? '' : text);
+  if (!val){ toast('没有可复制的内容', 'err'); return; }
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(val);
+    else legacyCopy(val);
+    toast(okMsg || '已复制', 'ok');
+  } catch (_){
+    try { legacyCopy(val); toast(okMsg || '已复制', 'ok'); }
+    catch (e2){ toast('复制失败，请手动选中复制', 'err'); }
+  }
+}
+
+/* ── 全局状态 ───────────────────────────────────────────────────────────── */
+const state = {
+  logged: false,
+  user: '',
+  meta: null,
+  view: 'machines',
+  scroll: {},          // 视图 -> window.scrollY
+  data: null,          // 规范化后的 overview
+  degraded: false,
+  degradedReason: '',
+  lastOk: 0,
+  failCount: 0,
+  refreshing: false,
+  paused: false,
+  timer: null,
+  secrets: null,
+  secretsErr: null,
+  secretsBusy: false,
+  revealed: Object.create(null),   // 令牌视图里哪些字段已点过「显示」
+};
+
+/* ── 顶部提示条 ─────────────────────────────────────────────────────────── */
+const banners = Object.create(null);
+function banner(key, kind, text, codeText){
+  let el = banners[key];
+  if (!el){
+    el = document.createElement('div');
+    el.className = 'banner';
+    el.dataset.k = key;
+    $('#banner-stack').appendChild(el);
+    banners[key] = el;
+  }
+  el.textContent = '';
+  if (!text){ el.hidden = true; return el; }
+  el.className = 'banner ' + (kind || 'info');
+  el.hidden = false;
+  el.appendChild(document.createTextNode(text));
+  if (codeText){
+    const c = document.createElement('code');
+    c.textContent = codeText;
+    el.appendChild(document.createTextNode(' '));
+    el.appendChild(c);
+  }
+  return el;
+}
+function applyBanners(){
+  const srv = (state.data && state.data.server) || {};
+  const meta = state.meta || {};
+  const defaultCreds = srv.default_credentials === true || meta.default_credentials === true;
+  banner('creds', 'warn', defaultCreds
+    ? '正在使用默认账号密码（admin / 1234），任何人都能登进来。改法：编辑服务器上的 .env，设置 ZW_PANEL_USER 与 ZW_PANEL_PASSWORD，再重启容器。'
+    : '');
+  banner('degraded', 'warn', state.degraded ? (state.degradedReason || '主控台接口未就绪，已切到兼容模式。') : '');
+}
+
+/* ── 连接状态 ───────────────────────────────────────────────────────────── */
+function setConn(kind, text){
+  const el = $('#conn');
+  if (el) el.className = 'conn' + (kind === 'err' ? ' err' : '');
+  const dot = el && el.querySelector('.pulse');
+  if (dot) dot.className = 'pulse' + (kind === 'ok' ? '' : kind === 'err' ? ' err' : ' busy');
+  const t = $('#conn-text');
+  if (t) t.textContent = text;
+}
+function setUser(name){
+  state.user = String(name || '');
+  const el = $('#acct-who');
+  if (el) el.textContent = state.user || '已登录';
+}
+
+/* ── 登录 / 退出 ────────────────────────────────────────────────────────── */
+function showLogin(msg){
+  state.logged = false;
+  closeAllTerminals();
+  stopTimer();
+  const app = $('#app');
+  const login = $('#login');
+  if (app) app.hidden = true;
+  if (login) login.hidden = false;
+  const err = $('#login-err');
+  if (err) err.textContent = msg || '';
+  const u = $('#u');
+  if (u) setTimeout(() => { try { u.focus(); } catch (_) {} }, 30);
+}
+function onUnauthenticated(msg){
+  if (!state.logged) return;
+  showLogin(msg || '登录已过期，请重新登录');
+  toast('登录已过期，请重新登录', 'err');
+}
+function showApp(){
+  state.logged = true;
+  const login = $('#login');
+  const app = $('#app');
+  if (login) login.hidden = true;
+  if (app) app.hidden = false;
+  const err = $('#login-err');
+  if (err) err.textContent = '';
+  const p = $('#p');
+  if (p) p.value = '';
+}
+
+$('#login-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const errBox = $('#login-err');
+  const btn = $('#btn-login');
+  const u = $('#u').value.trim();
+  const p = $('#p').value;
+  errBox.textContent = '';
+  if (!u || !p){ errBox.textContent = '请填写登录名和密码'; return; }
+  btn.disabled = true;
+  try {
+    const res = await api('POST', '/panel/api/login', { username: u, password: p });
+    setUser((res && res.user) || u);
+    showApp();
+    await boot();
+  } catch (e){
+    errBox.textContent = e.message || '登录失败';
+    const card = $('.login-card');
+    if (card){
+      card.classList.add('shake');
+      setTimeout(() => card.classList.remove('shake'), 340);
+    }
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#btn-logout').addEventListener('click', async () => {
+  try { await api('POST', '/panel/api/logout', {}); } catch (_) { /* 退出不挑错 */ }
+  setUser('');
+  state.data = null;
+  state.secrets = null;
+  state.scroll = {};
+  showLogin('已退出');
+});
+
+$('#btn-refresh').addEventListener('click', () => { refresh({ manual: true }); });
+
+/* ── 自动刷新开关 ───────────────────────────────────────────────────────── */
+const AUTO_ON = '自动刷新 · 10s';
+const AUTO_OFF = '自动刷新 · 已暂停';
+function syncAutoBtn(){
+  const b = $('#btn-auto');
+  if (!b) return;
+  b.textContent = state.paused ? AUTO_OFF : AUTO_ON;
+  b.classList.toggle('off', false);
+  b.setAttribute('aria-pressed', state.paused ? 'false' : 'true');
+}
+$('#btn-auto').addEventListener('click', () => {
+  state.paused = !state.paused;
+  syncAutoBtn();
+  if (!state.paused && state.logged) refresh({});
+  toast(state.paused ? '已暂停自动刷新（手动点「刷新」）' : '已恢复自动刷新（每 10 秒）', 'ok');
+  if (state.logged && state.lastOk) setConn('ok', '已连接 · ' + hhmmss(state.lastOk));
+  else setConn('off', state.paused ? '已暂停' : '未连接');
+});
+function startTimer(){
+  stopTimer();
+  state.timer = setInterval(() => {
+    if (state.paused) return;
+    if (document.hidden) return;
+    refresh({});
+  }, REFRESH_MS);
+}
+function stopTimer(){
+  if (state.timer){ clearInterval(state.timer); state.timer = null; }
+}
+
+/* ── 对话框（替代 alert / confirm / prompt）────────────────────────────── */
+let dlgHandler = null;
+function openDialog(opts){
+  const d = $('#dlg');
+  $('#dlg-title').textContent = opts.title || '确认';
+  const body = $('#dlg-body');
+  body.textContent = '';
+  if (opts.text){
+    const p = document.createElement('div');
+    p.textContent = opts.text;
+    body.appendChild(p);
+  }
+  let input = null;
+  if (opts.input){
+    input = document.createElement('input');
+    input.className = 'input';
+    input.id = 'dlg-input';
+    input.type = 'text';
+    input.maxLength = 64;
+    input.value = opts.input.value || '';
+    input.style.marginTop = '10px';
+    if (opts.input.placeholder) input.placeholder = opts.input.placeholder;
+    input.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter'){ ev.preventDefault(); $('#dlg-ok').click(); }
+    });
+    body.appendChild(input);
+  }
+  const okBtn = $('#dlg-ok');
+  okBtn.textContent = opts.okText || '确定';
+  okBtn.className = 'btn sm ' + (opts.danger ? 'danger' : 'primary');
+  dlgHandler = opts.onOk || null;
+  if (!d.open) d.showModal();
+  if (input) setTimeout(() => { try { input.focus(); input.select(); } catch (_) {} }, 30);
+}
+function closeDialog(){
+  const d = $('#dlg');
+  dlgHandler = null;
+  if (d.open) d.close();
+}
+$('#dlg-cancel').addEventListener('click', closeDialog);
+$('#dlg-x').addEventListener('click', closeDialog);
+$('#dlg-ok').addEventListener('click', async () => {
+  const btn = $('#dlg-ok');
+  const input = $('#dlg-input');
+  const val = input ? input.value : undefined;
+  const fn = dlgHandler;
+  if (!fn){ closeDialog(); return; }
+  btn.disabled = true;
+  try {
+    await fn(val);
+    closeDialog();
+  } catch (e){
+    toast(e.message || '操作失败', 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
+function askConfirm(title, text, onOk, okText){
+  openDialog({ title: title, text: text, onOk: onOk, okText: okText || '确定', danger: true });
+}
+function askText(title, text, initial, onOk){
+  openDialog({ title: title, text: text, input: { value: initial || '', placeholder: '新的显示名' }, onOk: onOk, okText: '保存' });
+}
+
+/* ── 数据：overview / 兼容模式 ─────────────────────────────────────────── */
+function normBrowser(b){
+  b = b || {};
+  return {
+    id: String(b.id || ''),
+    name: b.name || '',
+    state: String(b.state || ''),
+    group: b.group || '',
+    cdp_http: b.cdp_http || '',
+    cdp_ws: b.cdp_ws || '',
+  };
+}
+function normMachine(m){
+  m = m || {};
+  const shell = (m.shell_enabled === true) ? true : (m.shell_enabled === false ? false : null);
+  const reach = (m.core_reachable === true) ? true : (m.core_reachable === false ? false : null);
+  return {
+    device_id: String(m.device_id || ''),
+    label: m.label || '',
+    hostname: m.hostname || '',
+    platform: m.platform || '',
+    arch: m.arch || '',
+    app_version: m.app_version || '',
+    status: m.status || 'active',
+    online: m.online === true,
+    last_seen_ago: (typeof m.last_seen_ago === 'number' ? m.last_seen_ago : null),
+    last_ip: m.last_ip || '',
+    shell_enabled: shell,
+    profiles: num(m.profiles),
+    running: num(m.running),
+    max_running: num(m.max_running),
+    disk_human: m.disk_human || '',
+    engine: m.engine || '',
+    core_base: m.core_base || '',
+    core_reachable: reach,
+    browsers: (Array.isArray(m.browsers) ? m.browsers : []).map(normBrowser).filter(b => b.id || b.name),
+  };
+}
+function normalizeOverview(d){
+  const data = d || {};
+  return {
+    server: (data.server && typeof data.server === 'object') ? data.server : {},
+    totals: (data.totals && typeof data.totals === 'object') ? data.totals : {},
+    machines: (Array.isArray(data.machines) ? data.machines : []).map(normMachine).filter(m => m.device_id),
+    events: Array.isArray(data.events) ? data.events : [],
+  };
+}
+
+/** 兼容模式：/v1/console/overview 还没实现时，用旧的 /panel/api/* 拼一份同样形状的数据。 */
+async function loadLegacy(){
+  const [meta, stats, list, ev] = await Promise.all([
+    api('GET', '/panel/api/meta').catch(() => null),
+    api('GET', '/panel/api/stats').catch(() => null),
+    api('GET', '/panel/api/devices'),
+    api('GET', '/panel/api/events?limit=50').catch(() => ({ events: [] })),
+  ]);
+  if (meta) state.meta = meta;
+  const devices = (list && list.devices) || [];
+  const machines = devices.map(d => {
+    const coreBase = d.core_base || '';
+    const inv = Array.isArray(d.inventory) ? d.inventory : [];
+    return normMachine(Object.assign({}, d, {
+      browsers: inv.map(b => ({
+        id: b.id, name: b.name, state: b.state, group: b.group,
+        cdp_http: b.cdp_http || (coreBase && b.cdp_path ? joinUrl(coreBase, b.cdp_path) : ''),
+        cdp_ws: b.cdp_ws || '',
+      })),
+    }));
+  });
+  const events = ((ev && ev.events) || []).map(e => ({
+    ts: e.ts, action: e.action, device_id: e.device_id,
+    by: e.actor || e.by || '',
+    note: (e.detail && typeof e.detail === 'object' && e.detail.note) || '',
+  }));
+  return normalizeOverview({
+    server: meta ? {
+      version: meta.version, data_dir: meta.data_dir,
+      token_required: meta.token_required, auto_approve: meta.auto_approve,
+      default_credentials: meta.default_credentials,
+      shell_enabled: (stats && stats.shell && typeof stats.shell.enabled === 'boolean') ? stats.shell.enabled : null,
+      uptime_seconds: null, allowed_cidrs: null,
+    } : {},
+    totals: stats ? {
+      machines: stats.total, online: stats.online,
+      browsers: machines.reduce((s, m) => s + m.browsers.length, 0),
+      running: stats.total_running,
+    } : {},
+    machines: machines,
+    events: events,
+  });
+}
+
+async function loadOverview(){
+  try {
+    const data = await api('GET', '/v1/console/overview');
+    return normalizeOverview(data);
+  } catch (e){
+    if (e.status === 401) throw e;
+    const fallback = await loadLegacy();
+    fallback.__degraded = true;
+    fallback.__degradedReason = (e.status === 404 || e.status === 405)
+      ? '主控台接口未就绪（GET /v1/console/overview 返回 ' + e.status + '），已切到兼容模式：机器与事件来自旧面板接口，浏览器清单可能不完整。'
+      : '主控台接口出错（' + (e.message || '未知错误') + '），已切到兼容模式。';
+    return fallback;
+  }
+}
+
+async function refresh(opts){
+  const manual = !!(opts && opts.manual);
+  if (!state.logged || state.refreshing) return;
+  state.refreshing = true;
+  setConn('busy', '刷新中…');
+  try {
+    const data = await loadOverview();
+    state.data = data;
+    state.degraded = !!data.__degraded;
+    state.degradedReason = data.__degradedReason || '';
+    state.lastOk = Date.now();
+    state.failCount = 0;
+    applyBanners();
+    banner('refresh', 'bad', '');
+    renderAll();
+    if (!state.user){
+      const u = (data.server && data.server.panel_user) || (state.meta && state.meta.user) || '';
+      if (u) setUser(u);
+    }
+    setConn('ok', '已连接 · ' + hhmmss(state.lastOk));
+    if (manual) toast('已刷新', 'ok');
+    if (manual && state.view === 'secrets') loadSecrets(true);
+  } catch (e){
+    if (e.status === 401) return;   // 已经跳回登录页
+    state.failCount++;
+    const had = state.lastOk ? hhmmss(state.lastOk) : '';
+    setConn('err', had ? '刷新失败 · 停在 ' + had : '连接失败');
+    banner('refresh', 'bad', '刷新失败：' + (e.message || '未知错误') + (had ? '（页面显示的是 ' + had + ' 的数据，没清空）' : ''));
+    if (manual || !state.lastOk) toast(e.message || '刷新失败', 'err');
+    if (!state.lastOk){ renderAll(); renderEmpty(); }
+  } finally {
+    state.refreshing = false;
+  }
+}
+
+/* ── 视图切换（URL hash 记忆）───────────────────────────────────────────── */
+function syncTabs(){
+  $$('#tabs .tab').forEach(b => {
+    const on = b.dataset.view === state.view;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+}
+function switchView(v, fromHash){
+  if (VIEWS.indexOf(v) < 0) v = 'machines';
+  if (v === state.view && !fromHash){ syncTabs(); return; }
+  if (state.view) state.scroll[state.view] = window.scrollY || 0;
+  state.view = v;
+  VIEWS.forEach(x => { const el = $('#view-' + x); if (el) el.hidden = (x !== v); });
+  syncTabs();
+  if (!fromHash && location.hash !== '#' + v) location.hash = '#' + v;
+  const y = state.scroll[v] || 0;
+  window.scrollTo(0, y);
+  if (v === 'secrets') loadSecrets(false);
+  if (v === 'machines') terminals.forEach(t => { try { termScrollToEnd(t); } catch (_) {} });
+}
+$('#tabs').addEventListener('click', ev => {
+  const b = ev.target.closest('.tab');
+  if (!b) return;
+  switchView(b.dataset.view, false);
+});
+window.addEventListener('hashchange', () => {
+  const v = String(location.hash || '').replace(/^#/, '');
+  const target = VIEWS.indexOf(v) >= 0 ? v : 'machines';
+  if (target !== state.view) switchView(target, true);
+});
+
+/* ── KPI / 服务器信息 ───────────────────────────────────────────────────── */
+function renderKpis(){
+  const d = state.data || {};
+  const t = d.totals || {};
+  const machines = d.machines || [];
+  const online = (t.online != null) ? num(t.online) : machines.filter(m => m.online).length;
+  const browsers = (t.browsers != null) ? num(t.browsers) : machines.reduce((s, m) => s + m.browsers.length, 0);
+  const running = (t.running != null) ? num(t.running) : machines.reduce((s, m) => s + m.running, 0);
+  const total = (t.machines != null) ? num(t.machines) : machines.length;
+  const items = [
+    ['机器', total, '在册设备（含离线、含已踢）'],
+    ['在线', online, '180 秒内有心跳'],
+    ['浏览器', browsers, '已上报的环境数'],
+    ['运行中', running, '正在跑的环境'],
+  ];
+  $('#kpis').innerHTML = items.map(([k, v, hint]) =>
+    '<div class="kpi"><div class="kpi-val">' + esc(v) + '</div>' +
+    '<div class="kpi-label">' + esc(k) + '</div>' +
+    '<div class="kpi-hint">' + esc(hint) + '</div></div>').join('');
+}
+function renderSrv(){
+  const s = (state.data && state.data.server) || {};
+  const parts = [];
+  const push = (k, v) => {
+    if (v == null || v === '') return;
+    parts.push('<span><em>' + esc(k) + '</em> <b>' + esc(v) + '</b></span>');
+  };
+  push('版本', s.version ? 'v' + s.version : '');
+  push('已运行', s.uptime_seconds != null ? fmtDuration(s.uptime_seconds) : '');
+  push('数据目录', s.data_dir || '');
+  push('命令行', s.shell_enabled === true ? '开' : (s.shell_enabled === false ? '关' : ''));
+  push('设备令牌', s.token_required === true ? '需要' : (s.token_required === false ? '不需要' : ''));
+  push('自动放行', s.auto_approve === true ? '开' : (s.auto_approve === false ? '关' : ''));
+  if (Array.isArray(s.allowed_cidrs) && s.allowed_cidrs.length) push('白名单', s.allowed_cidrs.join('、'));
+  const box = $('#srv');
+  box.innerHTML = parts.length ? parts.join('') : '<span class="muted">服务器信息未上报</span>';
+  box.hidden = false;
+}
+
+/* ── 机器卡片 ───────────────────────────────────────────────────────────── */
+const cards = new Map();   // device_id -> { root, refs, dev }
+
+function buildCard(dev){
+  const root = document.createElement('article');
+  root.className = 'mach glass';
+  root.dataset.dev = dev.device_id;
+  // 骨架里只有静态文字；所有用户可控内容一律在 fillCard 里用 textContent 写入
+  root.innerHTML = [
+    '<div class="mach-h">',
+    '  <span class="pulse off" data-r="dot"></span>',
+    '  <div class="mach-id"><h3 class="mach-name" data-r="name"></h3>',
+    '    <div class="mach-sub" data-r="sub"></div></div>',
+    '  <div class="mach-badges" data-r="badges"></div>',
+    '</div>',
+    '<dl class="mach-fields">',
+    '  <div class="f"><dt>环境</dt><dd data-r="env"></dd></div>',
+    '  <div class="f"><dt>磁盘</dt><dd data-r="disk"></dd></div>',
+    '  <div class="f eng"><dt>引擎</dt><dd data-r="engine"></dd></div>',
+    '  <div class="f"><dt>命令行</dt><dd data-r="shell"></dd></div>',
+    '  <div class="f"><dt>IP</dt><dd data-r="ip"></dd></div>',
+    '  <div class="f"><dt>最近在线</dt><dd data-r="seen"></dd></div>',
+    '  <div class="f wide"><dt>机器码</dt><dd><span data-r="code"></span>',
+    '    <button class="btn xs ghost" type="button" data-act="copy-code">复制</button></dd></div>',
+    '</dl>',
+    '<div class="mach-acts">',
+    '  <button class="btn sm" type="button" data-act="term">终端</button>',
+    '  <a class="btn sm" data-r="open" target="_blank" rel="noopener noreferrer">打开控制台</a>',
+    '  <button class="btn sm danger" type="button" data-act="revoke">踢下线</button>',
+    '  <button class="btn sm" type="button" data-act="restore" hidden>恢复</button>',
+    '  <button class="btn sm" type="button" data-act="rename">改名</button>',
+    '  <span class="spacer"></span>',
+    '  <button class="btn sm ghost" type="button" data-act="delete">删除</button>',
+    '</div>',
+    '<div class="mach-term" data-r="termhost" hidden></div>',
+  ].join('');
+  const refs = {
+    dot: root.querySelector('[data-r="dot"]'),
+    name: root.querySelector('[data-r="name"]'),
+    sub: root.querySelector('[data-r="sub"]'),
+    badges: root.querySelector('[data-r="badges"]'),
+    env: root.querySelector('[data-r="env"]'),
+    disk: root.querySelector('[data-r="disk"]'),
+    engine: root.querySelector('[data-r="engine"]'),
+    shell: root.querySelector('[data-r="shell"]'),
+    ip: root.querySelector('[data-r="ip"]'),
+    seen: root.querySelector('[data-r="seen"]'),
+    code: root.querySelector('[data-r="code"]'),
+    open: root.querySelector('[data-r="open"]'),
+    termhost: root.querySelector('[data-r="termhost"]'),
+    termBtn: root.querySelector('[data-act="term"]'),
+    revokeBtn: root.querySelector('[data-act="revoke"]'),
+    restoreBtn: root.querySelector('[data-act="restore"]'),
+    copyBtn: root.querySelector('[data-act="copy-code"]'),
+  };
+  return { root: root, refs: refs, dev: dev };
+}
+
+function fillCard(card, dev){
+  const r = card.refs;
+  r.name.textContent = devName(dev);
+
+  const bits = [];
+  if (dev.hostname && dev.hostname !== dev.label) bits.push(dev.hostname);
+  if (dev.app_version) bits.push('v' + dev.app_version);
+  const pa = [dev.platform, dev.arch].filter(Boolean).join(' / ');
+  if (pa) bits.push(pa);
+  r.sub.textContent = bits.join(' · ') || '未上报机型信息';
+
+  const revoked = dev.status === 'revoked';
+  const online = dev.online && !revoked;
+  r.dot.className = 'pulse' + (revoked ? ' err' : online ? '' : ' off');
+  r.dot.title = revoked ? '已踢下线' : online ? '在线' : '离线';
+
+  // 徽章是纯静态字符串，不含用户数据
+  const bg = [];
+  if (revoked) bg.push('<span class="badge bad">已踢下线</span>');
+  else if (online) bg.push('<span class="badge ok">在线</span>');
+  else bg.push('<span class="badge">离线</span>');
+  if (dev.shell_enabled === true) bg.push('<span class="badge ok">命令行开</span>');
+  else if (dev.shell_enabled === false) bg.push('<span class="badge bad">命令行关</span>');
+  if (dev.core_base && dev.core_reachable === false) bg.push('<span class="badge warn">控制台不可直连</span>');
+  r.badges.innerHTML = bg.join('');
+
+  r.env.textContent = (dev.profiles || dev.running)
+    ? dev.profiles + ' 个 · ' + dev.running + ' 运行'
+    : '—';
+  r.env.title = dev.max_running ? ('同时运行上限 ' + dev.max_running) : '';
+  r.disk.textContent = dev.disk_human || '—';
+  r.engine.textContent = dev.engine || '—';
+  r.engine.title = dev.engine || '';
+  r.disk.title = dev.disk_human || '';
+  r.ip.title = dev.last_ip || '';
+  r.sub.title = bits.join(' · ');
+  r.shell.textContent = dev.shell_enabled === true ? '开' : dev.shell_enabled === false ? '关' : '未知';
+  r.shell.className = dev.shell_enabled === true ? '' : 'muted';
+  r.ip.textContent = dev.last_ip || '—';
+  r.seen.textContent = fmtAgo(dev.last_seen_ago);
+  r.code.textContent = dev.device_id;
+  r.copyBtn.dataset.copy = dev.device_id;
+
+  if (dev.core_base){
+    r.open.href = dev.core_base;
+    r.open.classList.remove('off');
+    r.open.removeAttribute('aria-disabled');
+    r.open.removeAttribute('tabindex');
+    r.open.title = dev.core_reachable === false
+      ? '这台机器上报的管理地址上次没探测通（可能在 NAT 后面），点击仍会尝试打开'
+      : '在新标签页打开这台机器自己的本地控制台';
+  } else {
+    r.open.removeAttribute('href');
+    r.open.classList.add('off');
+    r.open.setAttribute('aria-disabled', 'true');
+    r.open.setAttribute('tabindex', '-1');
+    r.open.title = '这台机器没上报 core_base（客户端需 ≥0.5.0，且 core 与 hub 同网段）';
+  }
+  r.revokeBtn.hidden = revoked;
+  r.restoreBtn.hidden = !revoked;
+}
+
+function cmpDevices(a, b){
+  const ao = (a.online && a.status !== 'revoked') ? 0 : 1;
+  const bo = (b.online && b.status !== 'revoked') ? 0 : 1;
+  if (ao !== bo) return ao - bo;
+  const an = (a.label || a.hostname || a.device_id).toLowerCase();
+  const bn = (b.label || b.hostname || b.device_id).toLowerCase();
+  return an < bn ? -1 : an > bn ? 1 : 0;
+}
+
+/** 顺序变了才重排：移动 DOM 节点会让终端输入框失去焦点，所以先记下焦点再还原。 */
+function reorderCards(list, order){
+  const active = document.activeElement;
+  const hadFocus = active && active.dataset && active.dataset.termDevice ? active : null;
+  const sel = hadFocus && typeof hadFocus.selectionStart === 'number'
+    ? [hadFocus.selectionStart, hadFocus.selectionEnd] : null;
+  order.forEach(id => {
+    const c = cards.get(id);
+    if (c) list.appendChild(c.root);
+  });
+  if (hadFocus && document.activeElement !== hadFocus){
+    try {
+      hadFocus.focus();
+      if (sel) hadFocus.setSelectionRange(sel[0], sel[1]);
+    } catch (_) {}
+  }
+}
+
+function renderEmpty(){
+  const box = $('#mach-empty');
+  const has = state.data && state.data.machines && state.data.machines.length;
+  const total = state.data ? ((state.data.totals && __num(state.data.totals.machines)) || state.data.machines.length) : 0;
+  box.hidden = !!has;
+  if (has) return;
+  if (!state.data){
+    box.innerHTML = state.failCount
+      ? '<span class="e-ico">!</span><b>读取失败</b><div>看顶部那条红色提示；点右上角「刷新」重试。</div>'
+      : '<span class="e-ico">◌</span><b>正在读取机器列表…</b>';
+    return;
+  }
+  if (total > 0 && state.data.machines.length === 0){
+    box.innerHTML = '<span class="e-ico">◌</span><b>机器列表为空</b>' +
+      '<div>接口说有 ' + esc(total) + ' 台机器，但这一页没拿到条目；点右上角「刷新」再试一次。</div>';
+    return;
+  }
+  box.innerHTML = '<span class="e-ico">◌</span><b>还没有任何电脑连过这台服务器</b>' +
+    '<div>装好客户端（zw-core），在它里面填上 <span class="mono">http://本机IP:8700</span> 就能注册上来。</div>';
+}
+function __num(v){ const n = Number(v); return Number.isFinite(n) ? n : 0; }
+
+function renderMachines(){
+  const list = $('#mach-list');
+  const devs = (state.data ? state.data.machines : []).slice().sort(cmpDevices);
+  const alive = new Set(devs.map(d => d.device_id));
+
+  Array.from(cards.keys()).forEach(id => {
+    if (alive.has(id)) return;
+    closeTerminal(id);            // 设备记录没了，终端跟着收
+    const c = cards.get(id);
+    if (c && c.root.parentNode) c.root.parentNode.removeChild(c.root);
+    cards.delete(id);
+  });
+
+  devs.forEach(dev => {
+    let c = cards.get(dev.device_id);
+    if (!c){
+      c = buildCard(dev);
+      cards.set(dev.device_id, c);
+    }
+    c.dev = dev;
+    fillCard(c, dev);
+    if (!list.contains(c.root)) list.appendChild(c.root);
+  });
+
+  const order = devs.map(d => d.device_id);
+  const cur = Array.prototype.map.call(list.children, el => el.dataset.dev);
+  if (order.join('|') !== cur.join('|')) reorderCards(list, order);
+
+  terminals.forEach((t, id) => {
+    const dev = devs.filter(d => d.device_id === id)[0];
+    if (dev){ t.dev = dev; syncTermChrome(t); }
+  });
+  renderEmpty();
+}
+
+/* ── 浏览器视图 ─────────────────────────────────────────────────────────── */
+function stateBadge(st){
+  const s = String(st || '');
+  if (s === 'running') return '<span class="badge ok"><i class="dot ok"></i>running</span>';
+  if (s === 'stopped') return '<span class="badge"><i class="dot"></i>stopped</span>';
+  if (s === 'starting' || s === 'stopping') return '<span class="badge warn"><i class="dot warn"></i>' + esc(s) + '</span>';
+  if (!s) return '<span class="muted">—</span>';
+  return '<span class="badge">' + esc(s) + '</span>';
+}
+function cdpCell(url, label){
+  if (!url) return '<span class="muted">—</span>';
+  return '<div class="cdp-cell"><span class="mono ellip" title="' + esc(url) + '">' + esc(url) + '</span>' +
+    '<button class="btn xs ghost" type="button" data-copy="' + esc(url) + '" data-label="已复制 ' + esc(label) + '">复制</button></div>';
+}
+function renderBrowsers(){
+  const host = $('#br-list');
+  const devs = (state.data ? state.data.machines : []).slice().sort(cmpDevices);
+  if (!devs.length){
+    host.innerHTML = '<div class="glass empty"><span class="e-ico">◌</span><b>还没有机器</b>' +
+      '<div>机器上线并上报环境清单之后，这里会按机器分组列出浏览器。</div></div>';
+    return;
+  }
+  host.innerHTML = devs.map(dev => {
+    const head = '<div class="br-h">' +
+      '<span class="pulse ' + (dev.online && dev.status !== 'revoked' ? '' : 'off') + '"></span>' +
+      '<h3 class="br-name">' + esc(devName(dev)) + '</h3>' +
+      '<span class="br-sub">' + esc([dev.hostname, dev.last_ip].filter(Boolean).join(' · ')) + '</span>' +
+      '<div class="grow"></div>' +
+      '<span class="badge">' + dev.browsers.length + ' 个环境</span>' +
+      '</div>';
+    if (!dev.browsers.length){
+      return '<section class="br-sec glass">' + head +
+        '<div class="br-note">这台还没上报浏览器清单（客户端需 ≥0.5.0）</div></section>';
+    }
+    const rows = dev.browsers.map(b => {
+      const httpCell = b.cdp_http
+        ? '<div class="cdp-cell">' +
+          '<a class="mono ellip link" href="' + esc(b.cdp_http) + '" target="_blank" rel="noopener noreferrer" ' +
+          'title="' + esc(b.cdp_http) + '">' + esc(b.cdp_http) + '</a>' +
+          '<button class="btn xs ghost" type="button" data-copy="' + esc(b.cdp_http) + '" data-label="已复制 CDP HTTP 地址">复制</button>' +
+          '</div>'
+        : '<span class="muted">' + (dev.core_base ? '—' : '需 core_base') + '</span>';
+      return '<tr>' +
+        '<td><div class="cell-main">' + esc(b.name || b.id || '未命名环境') + '</div>' +
+        '<div class="cell-sub">' + esc(b.id) + '</div></td>' +
+        '<td>' + stateBadge(b.state) + '</td>' +
+        '<td>' + (b.group ? '<span class="badge">' + esc(b.group) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+        '<td>' + httpCell + '</td>' +
+        '<td>' + cdpCell(b.cdp_ws, 'CDP WS 地址') + '</td>' +
+        '</tr>';
+    }).join('');
+    const noBase = dev.core_base ? '' :
+      '<div class="br-note" style="margin-top:10px">这台没上报 core_base，CDP 地址拼不出来：' +
+      '用「机器 → 终端」在那台机器上操作，或让客户端升到 ≥0.5.0。</div>';
+    return '<section class="br-sec glass">' + head +
+      '<div class="table-wrap"><table class="tbl"><thead><tr>' +
+      '<th>环境名</th><th>状态</th><th>分组</th><th>CDP HTTP</th><th>CDP WS</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<div class="br-scroll-hint">← 左右滑动看完整 CDP 地址</div>' + noBase +
+      '</section>';
+  }).join('');
+}
+
+/* ── 令牌视图 ───────────────────────────────────────────────────────────── */
+function maskOf(v){
+  const s = String(v == null ? '' : v);
+  if (!s) return '—';
+  return '•'.repeat(Math.min(16, Math.max(8, s.length)));
+}
+function noteEl(text, kind){
+  const d = document.createElement('div');
+  d.className = 'br-note' + (kind ? ' ' + kind : '');
+  d.textContent = text;
+  return d;
+}
+function secRow(key, label, value, opts){
+  opts = opts || {};
+  const row = document.createElement('div');
+  row.className = 'sec-row';
+  row.dataset.k = key;
+
+  const k = document.createElement('div');
+  k.className = 'sec-k';
+  k.textContent = label;
+
+  const wrap = document.createElement('div');   // 值 + 它自己的备注，避免备注看着像下一行的
+  wrap.className = 'sec-vwrap';
+  const v = document.createElement('div');
+  v.className = 'sec-v';
+
+  const acts = document.createElement('div');
+  acts.className = 'sec-acts';
+
+  if (opts.empty){
+    v.classList.add('muted');
+    v.textContent = opts.empty;
+  } else if (opts.badge){
+    const b = document.createElement('span');
+    b.className = 'badge ' + (opts.badgeOk ? 'ok' : '');
+    b.textContent = opts.badge;
+    v.appendChild(b);
+  } else if (opts.masked){
+    const shown = !!state.revealed[key];
+    v.textContent = shown ? value : maskOf(value);
+    const t = document.createElement('button');
+    t.type = 'button';
+    t.className = 'btn xs ghost';
+    t.textContent = shown ? '隐藏' : '显示';
+    t.dataset.reveal = key;
+    t.addEventListener('click', () => {
+      state.revealed[key] = !state.revealed[key];
+      const now = !!state.revealed[key];
+      v.textContent = now ? value : maskOf(value);
+      t.textContent = now ? '隐藏' : '显示';
+    });
+    acts.appendChild(t);
+  } else {
+    v.textContent = value;
+  }
+
+  if (opts.copy && value){
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn xs';
+    b.textContent = '复制';
+    b.dataset.copyText = value;
+    b.addEventListener('click', () => copy(value, '已复制' + label));
+    acts.appendChild(b);
+  }
+
+  wrap.appendChild(v);
+  if (opts.note){
+    const n = document.createElement('div');
+    n.className = 'sec-note';
+    n.textContent = opts.note;
+    wrap.appendChild(n);
+  }
+  row.appendChild(k);
+  row.appendChild(wrap);
+  row.appendChild(acts);
+  return row;
+}
+
+function renderSecrets(){
+  const box = $('#sec-body');
+  box.textContent = '';
+  if (state.secretsErr){
+    const e = state.secretsErr;
+    const notReady = (e.status === 404 || e.status === 405);
+    box.appendChild(noteEl(notReady
+      ? '主控台接口未就绪（GET /v1/console/secrets 返回 ' + e.status + '）。等服务器端把这个接口实现之后，这里会显示面板账号、面板密码、hub 令牌与网段白名单。'
+      : ('读取令牌失败：' + (e.message || '未知错误'))));
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn sm';
+    b.textContent = '重试';
+    b.style.marginTop = '12px';
+    b.addEventListener('click', () => loadSecrets(true));
+    box.appendChild(b);
+    return;
+  }
+  if (!state.secrets){
+    box.appendChild(noteEl(state.secretsBusy ? '正在读取…' : '还没读取，点右上角「刷新」重试。'));
+    return;
+  }
+  const s = state.secrets;
+  const list = document.createElement('div');
+  list.className = 'sec-list';
+  list.appendChild(secRow('panel_user', '面板账号', s.panel_user || '—', { copy: true }));
+  list.appendChild(secRow('panel_password', '面板密码', s.panel_password || '', {
+    masked: true, copy: true, note: '能登进面板就等于能改服务器：改密码请改 .env 里的 ZW_PANEL_PASSWORD。',
+  }));
+  if (s.hub_token_set === false || !s.hub_token){
+    list.appendChild(secRow('hub_token', 'Hub 令牌', '', { empty: '未设置（ZW_HUB_TOKEN 为空：这台服务器不要求设备令牌）' }));
+  } else {
+    list.appendChild(secRow('hub_token', 'Hub 令牌', s.hub_token, {
+      masked: true, copy: true, note: 'AI / 脚本用 Authorization: Bearer <令牌> 访问 /v1/*。',
+    }));
+  }
+  list.appendChild(secRow('sync_password', '同步主密码', '', {
+    badge: s.sync_password_set ? '已设置' : '未设置',
+    badgeOk: !!s.sync_password_set,
+    note: '看不到原文：它只用来加解密快照，hub 也不需要知道它。',
+  }));
+  const cidrs = Array.isArray(s.allowed_cidrs) ? s.allowed_cidrs.filter(Boolean) : [];
+  list.appendChild(secRow('allowed_cidrs', '网段白名单', cidrs.length ? cidrs.join('、') : '',
+    cidrs.length ? { copy: true, note: '只有这些网段能连；留空等于任何网段都能连。' } : { empty: '未限制（任何网段都能连）' }));
+  list.appendChild(secRow('auto_approve', '自动放行新设备', '', {
+    badge: s.auto_approve ? '开（注册即通过）' : '关（需要人工批准）', badgeOk: !!s.auto_approve,
+  }));
+  box.appendChild(list);
+  if (s.hint){
+    const h = document.createElement('div');
+    h.className = 'sec-note';
+    h.style.marginTop = '12px';
+    h.textContent = s.hint;
+    box.appendChild(h);
+  }
+}
+
+async function loadSecrets(force){
+  if (state.secretsBusy) return;
+  if (!force && state.secrets !== null) return;   // 已经拿到就不再重复拉（敏感接口）
+  state.secretsBusy = true;
+  state.secretsErr = null;
+  if (!state.secrets) renderSecrets();
+  try {
+    const d = await api('GET', '/v1/console/secrets');
+    state.secrets = d || {};
+    if (!state.user && state.secrets.panel_user) setUser(state.secrets.panel_user);
+  } catch (e){
+    if (e.status === 401) return;
+    state.secretsErr = e;
+  } finally {
+    state.secretsBusy = false;
+    renderSecrets();
+  }
+}
+
+/* ── 事件视图 ───────────────────────────────────────────────────────────── */
+const ACTION_LABEL = { enroll: '注册', revoke: '踢下线', restore: '恢复', delete: '删除', note: '改名', heartbeat: '心跳' };
+const ACTION_TONE = { enroll: 'accent', revoke: 'bad', restore: 'ok', delete: 'bad', note: '', heartbeat: '' };
+function normEvent(e){
+  e = e || {};
+  const note = (typeof e.note === 'string' && e.note) ||
+    (e.detail && typeof e.detail === 'object' && typeof e.detail.note === 'string' ? e.detail.note : '');
+  return {
+    ts: num(e.ts),
+    action: String(e.action || ''),
+    device_id: String(e.device_id || ''),
+    by: String(e.by || e.actor || ''),
+    note: String(note || ''),
+  };
+}
+function deviceLabelOf(id){
+  const dev = (state.data ? state.data.machines : []).filter(m => m.device_id === id)[0];
+  if (dev) return devName(dev);
+  return id ? id.slice(0, 12) + '…' : '未知设备';
+}
+function renderEvents(){
+  const box = $('#ev-list');
+  const top = box.scrollTop;
+  const list = ((state.data && state.data.events) || []).map(normEvent).slice(0, 50);
+  if (!list.length){
+    box.innerHTML = '<div class="empty" style="padding:26px"><b>还没有事件</b>' +
+      '<div>注册、踢下线、恢复、删除都会出现在这里。</div></div>';
+    return;
+  }
+  box.innerHTML = list.map(e => {
+    const act = ACTION_LABEL[e.action] || e.action || '事件';
+    const tone = ACTION_TONE[e.action] || '';
+    return '<div class="ev">' +
+      '<span class="ev-t">' + esc(fmtTime(e.ts)) + '</span>' +
+      '<span class="ev-b">' +
+      '<span class="badge ' + esc(tone) + '">' + esc(act) + '</span>' +
+      '<span class="ev-dev">' + esc(deviceLabelOf(e.device_id)) + '</span>' +
+      (e.by ? '<span class="ev-by">by ' + esc(e.by) + '</span>' : '') +
+      (e.note ? '<span class="ev-note">' + esc(e.note) + '</span>' : '') +
+      '</span></div>';
+  }).join('');
+  box.scrollTop = top;   // 刷新不跳回顶部
+}
+
+function renderAll(){
+  renderSrv();
+  renderKpis();
+  renderMachines();
+  renderBrowsers();
+  renderEvents();
+}
+
+/* ── 远程终端（协议：docs/13-远程命令行协议.md）───────────────────────────
+   投递 POST /v1/devices/{id}/shell                  → {job_id, status}
+   轮询 GET  /v1/devices/{id}/shell/{job_id}?wait=25 → 直到终态
+   历史 GET  /v1/devices/{id}/shell/history?limit=20
+   取消 POST /v1/devices/{id}/shell/{job_id}/cancel
+   三条硬约定：
+   1) 终端 DOM 由 terminals 持有，卡片只改文字 → 每 10 秒的刷新不会丢输出、
+      不会丢滚动位置、不会丢输入框里还没发出去的命令；
+   2) 设备与服务器来的文本一律 esc() / textContent：命令输出里可能有 <script>；
+   3) 每条命令一条轮询链；关终端、退出登录、关页面都清定时器。
+*/
+const TERM_HISTORY_LIMIT = 20;
+const TERM_WAIT_SECONDS = 25;
+const TERM_MAX_WAIT_MS = 120000;
+const TERM_POLL_GAP_MS = 200;
+const TERM_RENDER_CAP = 20000;
+const TERM_FINAL = ['done', 'error', 'timeout', 'canceled', 'expired'];
+const TERM_PLACEHOLDER = '输入命令，回车执行（↑/↓ 翻历史）';
+
+const terminals = new Map();     // device_id -> 终端对象
+const localCmdHistory = [];      // 本浏览器执行过的命令，↑/↓ 翻
+
+function fmtMs(n){
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return v < 1000 ? Math.round(v) + ' ms' : (v / 1000).toFixed(2) + ' 秒';
+}
+function termScrollToEnd(t){ try { t.out.scrollTop = t.out.scrollHeight; } catch (_) {} }
+function termSleep(t, ms){
+  return new Promise(resolve => {
+    t.timerResolve = resolve;
+    t.timer = setTimeout(() => { t.timer = null; t.timerResolve = null; resolve(); }, ms);
+  });
+}
+function clearTermTimer(t){
+  if (t.timer){ clearTimeout(t.timer); t.timer = null; }
+  if (t.timerResolve){ const r = t.timerResolve; t.timerResolve = null; r(); }
+}
+
+function makeTerminal(dev, card){
+  const id = dev.device_id;
+  const root = document.createElement('div');
+  root.className = 'term';
+  root.innerHTML = [
+    '<div class="term-h">',
+    '  <div class="term-title">远程终端 · <b data-term="name"></b></div>',
+    '  <span class="term-sub" data-term="sub"></span>',
+    '  <div class="grow"></div>',
+    '  <span class="badge" data-term="flag">命令行：—</span>',
+    '  <button class="btn xs ghost" type="button" data-term="close">关闭</button>',
+    '</div>',
+    '<div class="term-warn" data-term="warn" hidden></div>',
+    '<div class="term-out" data-term="out" role="log" aria-live="polite"></div>',
+    '<div class="term-in">',
+    '  <input class="input" data-term="input" data-term-device autocomplete="off" spellcheck="false" ',
+    '         placeholder="' + esc(TERM_PLACEHOLDER) + '" aria-label="远程命令输入框">',
+    '  <button class="btn sm primary" type="button" data-term="run">执行</button>',
+    '  <button class="btn sm" type="button" data-term="cancel" disabled>取消</button>',
+    '</div>',
+  ].join('');
+  const q = sel => root.querySelector('[data-term="' + sel + '"]');
+  const t = {
+    id: id, dev: dev, card: card, root: root, open: true, closed: false,
+    name: q('name'), sub: q('sub'), flag: q('flag'), warn: q('warn'),
+    out: q('out'), input: q('input'), runBtn: q('run'), cancelBtn: q('cancel'),
+    busy: false, jobId: null, pollToken: null, timer: null, timerResolve: null,
+    histIdx: localCmdHistory.length, current: null, startedAt: 0,
+  };
+  t.name.textContent = devName(dev);                 // 用户可控 → textContent
+  t.sub.textContent = String(id).slice(0, 14) + '…';
+  t.input.dataset.termDevice = id;                   // 重排卡片后按这个找回焦点
+  q('close').addEventListener('click', () => closeTerminal(id));
+  t.runBtn.addEventListener('click', () => runCommand(t));
+  t.cancelBtn.addEventListener('click', () => cancelJob(t));
+  t.input.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter'){ ev.preventDefault(); runCommand(t); }
+    else if (ev.key === 'ArrowUp'){ ev.preventDefault(); histStep(t, -1); }
+    else if (ev.key === 'ArrowDown'){ ev.preventDefault(); histStep(t, 1); }
+  });
+  t.input.addEventListener('input', () => { t.histIdx = localCmdHistory.length; });
+  card.refs.termhost.appendChild(root);
+  return t;
+}
+
+function syncTermChrome(t){
+  const d = t.dev || {};
+  t.name.textContent = devName(d);
+  const on = d.shell_enabled;
+  if (on === true){ t.flag.className = 'badge ok'; t.flag.textContent = '命令行：开'; }
+  else if (on === false){ t.flag.className = 'badge bad'; t.flag.textContent = '命令行：关'; }
+  else { t.flag.className = 'badge'; t.flag.textContent = '命令行：未知'; }
+
+  const off = on === false;
+  t.input.disabled = off;
+  t.input.placeholder = off ? '这台电脑的远程命令行已关闭（在客户端里打开）' : TERM_PLACEHOLDER;
+  t.runBtn.disabled = off || t.busy;
+
+  const notes = [];
+  if (d.status === 'revoked') notes.push('这台设备已被踢下线，命令会被服务器拒绝；先在卡片里点「恢复」。');
+  else if (d.online === false) notes.push('设备离线，命令会在它上线后执行。');
+  if (off) notes.push('这台电脑的远程命令行已关闭（在客户端里打开）。');
+  t.warn.textContent = '';
+  notes.forEach(n => {
+    const div = document.createElement('div');
+    div.textContent = n;
+    t.warn.appendChild(div);
+  });
+  t.warn.hidden = !notes.length;
+}
+
+function setTermBtn(card, open){
+  if (!card || !card.refs.termBtn) return;
+  card.refs.termBtn.textContent = open ? '收起终端' : '终端';
+  card.refs.termBtn.title = open ? '收起这个终端（命令历史还在）' : '在这台机器上执行命令';
+}
+
+function openTerminal(id){
+  const card = cards.get(id);
+  if (!card) return;
+  const exist = terminals.get(id);
+  if (exist && exist.open){ focusTerminal(exist); return; }
+  const dev = (state.data ? state.data.machines.filter(d => d.device_id === id)[0] : null) || { device_id: id };
+  const t = makeTerminal(dev, card);
+  terminals.set(id, t);
+  card.refs.termhost.hidden = false;
+  card.root.classList.add('term-open');
+  setTermBtn(card, true);
+  syncTermChrome(t);
+  t.input.focus();
+  try { card.root.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+  loadTermHistory(t);
+}
+function focusTerminal(t){
+  try { t.root.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+  try { t.input.focus(); } catch (_) {}
+  if (typeof t.root.animate === 'function'){
+    try {
+      t.root.animate([
+        { boxShadow: '0 0 0 2px rgba(93,157,255,0)' },
+        { boxShadow: '0 0 0 2px rgba(93,157,255,.5)' },
+        { boxShadow: '0 0 0 2px rgba(93,157,255,0)' },
+      ], { duration: 650 });
+    } catch (_) {}
+  }
+}
+function closeTerminal(id){
+  const t = terminals.get(id);
+  if (!t) return;
+  t.open = false;
+  t.closed = true;
+  t.pollToken = null;
+  clearTermTimer(t);
+  if (t.root.parentNode) t.root.parentNode.removeChild(t.root);
+  terminals.delete(id);
+  const card = cards.get(id);
+  if (card){
+    card.refs.termhost.hidden = true;
+    card.root.classList.remove('term-open');
+    setTermBtn(card, false);
+  }
+}
+function closeAllTerminals(){
+  Array.from(terminals.keys()).forEach(id => { try { closeTerminal(id); } catch (_) {} });
+}
+window.addEventListener('beforeunload', closeAllTerminals);
+
+function rememberCommand(cmd){
+  if (!cmd) return;
+  if (localCmdHistory[localCmdHistory.length - 1] !== cmd) localCmdHistory.push(cmd);
+  if (localCmdHistory.length > 200) localCmdHistory.shift();
+}
+function histStep(t, dir){
+  const n = localCmdHistory.length;
+  if (!n) return;
+  if (dir < 0) t.histIdx = Math.max(0, Math.min(t.histIdx, n) - 1);
+  else {
+    if (t.histIdx >= n){ t.histIdx = n; return; }
+    t.histIdx = Math.min(n, t.histIdx + 1);
+  }
+  t.input.value = t.histIdx >= n ? '' : localCmdHistory[t.histIdx];
+  const end = t.input.value.length;
+  try { t.input.setSelectionRange(end, end); } catch (_) {}
+}
+
+async function runCommand(t){
+  if (t.input.disabled) return;
+  if (t.busy){ toast('上一条命令还没返回，等它结束再发', 'err'); return; }
+  const cmd = t.input.value.trim();
+  if (!cmd) return;
+  if (cmd.length > 4000){ toast('命令太长：协议上限 4000 字符', 'err'); return; }
+
+  rememberCommand(cmd);
+  t.input.value = '';
+  t.histIdx = localCmdHistory.length;
+  t.busy = true;
+  t.runBtn.disabled = true;
+  t.runBtn.textContent = '执行中…';
+  t.cancelBtn.disabled = false;
+
+  const entry = pushEntry(t, { command: cmd, status: 'queued' });
+  setNote(entry, '已投递，等设备来取…', '');
+  t.current = entry;
+  t.startedAt = Date.now();
+
+  try {
+    const res = await api('POST', '/v1/devices/' + enc(t.id) + '/shell', { command: cmd });
+    if (t.closed) return;
+    const jobId = res && (res.job_id || res.id);
+    if (!jobId) throw new Error('服务器没返回 job_id');
+    t.jobId = jobId;
+    await pollUntilFinal(t, jobId, entry, t.startedAt);
+  } catch (e){
+    if (t.closed) return;
+    setNote(entry, '投递失败：' + (e.message || '未知错误'), 'bad');
+    toast(e.message || '投递失败', 'err');
+    finishBusy(t);
+  }
+}
+function pendingNote(status, waitedMs){
+  const sec = Math.max(0, Math.round(waitedMs / 1000));
+  if (status === 'running') return '设备执行中…（已等 ' + sec + ' 秒）';
+  if (waitedMs < 8000) return '已投递，等设备来取…';
+  return '等待设备执行…（已等 ' + sec + ' 秒' + (sec >= 10 ? '，设备离线时会在它上线后执行' : '') + '）';
+}
+async function pollUntilFinal(t, jobId, entry, started){
+  const token = {};               // 每次投递一个身份标记，用来作废上一条轮询链
+  t.pollToken = token;
+  while (true){
+    if (t.closed || t.pollToken !== token) return;
+    let job = null;
+    let err = null;
+    try {
+      const res = await api('GET', '/v1/devices/' + enc(t.id) + '/shell/' + enc(jobId) + '?wait=' + TERM_WAIT_SECONDS);
+      job = res && res.job ? res.job : res;
+    } catch (e){ err = e; }
+    if (t.closed || t.pollToken !== token) return;
+
+    const waited = Date.now() - started;
+    if (job){
+      applyJob(entry, job);
+      if (TERM_FINAL.indexOf(job.status) >= 0){
+        finishBusy(t);
+        // 只在"焦点本来就在这个终端里"时抢回来，别打断用户正在改的名
+        const a = document.activeElement;
+        if (!a || a === document.body || t.root.contains(a)) t.input.focus();
+        return;
+      }
+      setNote(entry, pendingNote(job.status, waited), '');
+    } else if (err){
+      if (waited > TERM_MAX_WAIT_MS){
+        setNote(entry, '查询结果一直失败，已停止等待：' + (err.message || '未知错误'), 'bad');
+        finishBusy(t);
+        toast('查询命令结果失败', 'err');
+        return;
+      }
+      setNote(entry, '查询结果出错，重试中…（' + (err.message || '未知错误') + '）', 'bad');
+    }
+    if (waited > TERM_MAX_WAIT_MS){
+      setNote(entry, '已等 120 秒还没返回，停止等待。命令可能仍在设备上执行，重开终端能从历史里看结果。', 'bad');
+      t.pollToken = null;
+      t.busy = false;
+      t.runBtn.textContent = '执行';
+      t.runBtn.disabled = t.input.disabled;
+      t.cancelBtn.disabled = false;
+      toast('等待设备执行超时（120 秒）', 'err');
+      return;
+    }
+    await termSleep(t, TERM_POLL_GAP_MS);
+  }
+}
+function finishBusy(t){
+  t.busy = false;
+  t.jobId = null;
+  t.pollToken = null;
+  if (t.closed) return;
+  t.runBtn.textContent = '执行';
+  t.runBtn.disabled = t.input.disabled;
+  t.cancelBtn.disabled = true;
+}
+async function cancelJob(t){
+  if (!t.jobId){ toast('当前没有可取消的命令', 'err'); return; }
+  t.cancelBtn.disabled = true;
+  try {
+    const res = await api('POST', '/v1/devices/' + enc(t.id) + '/shell/' + enc(t.jobId) + '/cancel', {});
+    if (t.closed) return;
+    if (res && res.canceled){
+      if (t.current) setNote(t.current, '已取消（还没下发到设备）', 'bad');
+      finishBusy(t);
+      toast('已取消', 'ok');
+    } else {
+      t.cancelBtn.disabled = false;
+      toast('命令已下发到设备，取消不了；等它跑完', 'err');
+    }
+  } catch (e){
+    if (t.closed) return;
+    t.cancelBtn.disabled = false;
+    toast(e.message || '取消失败', 'err');
+  }
+}
+function setNote(entry, text, kind){
+  entry.note.textContent = text || '';
+  entry.note.hidden = !text;
+  entry.note.className = 'term-note' + (kind === 'bad' ? ' bad' : '');
+}
+function pushEntry(t, job, parent){
+  const el = document.createElement('div');
+  el.className = 'term-entry';
+  el.innerHTML = [
+    '<div class="term-cmd" data-part="cmd"></div>',
+    '<div class="term-stdout" data-part="out" hidden></div>',
+    '<div class="term-stderr" data-part="err" hidden></div>',
+    '<div class="term-note" data-part="note" hidden></div>',
+    '<div class="term-meta" data-part="meta" hidden></div>',
+    '<div class="term-cut" data-part="cut" hidden>输出过长已截断（保留头部）</div>',
+  ].join('');
+  el.querySelector('[data-part="cmd"]').textContent = '$ ' + (job && job.command ? job.command : '');
+  const hint = t.out.querySelector('.term-hint');
+  if (hint) hint.remove();
+  const box = parent || t.out;
+  box.appendChild(el);
+  if (box === t.out) termScrollToEnd(t);
+  return {
+    el: el,
+    out: el.querySelector('[data-part="out"]'),
+    err: el.querySelector('[data-part="err"]'),
+    note: el.querySelector('[data-part="note"]'),
+    meta: el.querySelector('[data-part="meta"]'),
+    cut: el.querySelector('[data-part="cut"]'),
+  };
+}
+function applyJob(entry, job){
+  if (!job) return;
+  const status = job.status;
+  if (status === 'queued' || status === 'running') return;
+
+  const cap = (s) => {
+    const str = String(s == null ? '' : s);
+    return str.length > TERM_RENDER_CAP
+      ? { text: str.slice(0, TERM_RENDER_CAP), cut: true }
+      : { text: str, cut: false };
+  };
+  const so = cap(job.stdout);
+  const se = cap(job.stderr);
+  if (so.text){
+    entry.out.hidden = false;
+    entry.out.textContent = so.text;
+  } else if (!se.text){
+    entry.out.hidden = false;
+    entry.out.textContent = '（无输出）';
+  } else {
+    entry.out.hidden = true;
+    entry.out.textContent = '';
+  }
+  entry.err.hidden = !se.text;
+  entry.err.textContent = se.text || '';
+
+  const hasRc = job.rc !== null && job.rc !== undefined && Number.isFinite(Number(job.rc));
+  const bits = [];
+  if (hasRc) bits.push('退出码 ' + Number(job.rc));
+  else if (status === 'timeout') bits.push('已超时');
+  if (job.duration_ms != null) bits.push('耗时 ' + fmtMs(job.duration_ms));
+  entry.meta.textContent = bits.join(' · ');
+  entry.meta.hidden = !bits.length;
+  const bad = (hasRc && Number(job.rc) !== 0) || status === 'timeout' || status === 'error';
+  entry.meta.className = 'term-meta' + (bad ? ' bad' : '');
+
+  let note = '';
+  let noteBad = false;
+  if (job.error){ note = '没跑起来：' + job.error; noteBad = true; }
+  else if (status === 'timeout'){ note = '执行超时，设备侧已终止'; noteBad = true; }
+  else if (status === 'canceled'){ note = '已取消（还没下发到设备）'; }
+  else if (status === 'expired'){ note = '排队过期：设备一直没上线'; noteBad = true; }
+  setNote(entry, note, noteBad ? 'bad' : '');
+
+  entry.cut.hidden = !(job.truncated || so.cut || se.cut);
+}
+async function loadTermHistory(t){
+  if (!t.out.querySelector('.term-entry')){
+    t.out.textContent = '';
+    const h = document.createElement('div');
+    h.className = 'term-hint';
+    h.textContent = '正在读取最近 ' + TERM_HISTORY_LIMIT + ' 条记录…';
+    t.out.appendChild(h);
+  }
+  try {
+    const res = await api('GET', '/v1/devices/' + enc(t.id) + '/shell/history?limit=' + TERM_HISTORY_LIMIT);
+    if (t.closed) return;
+    const jobs = (res && res.jobs) || [];
+    if (!jobs.length){
+      if (!t.out.querySelector('.term-entry')){
+        t.out.textContent = '';
+        const h = document.createElement('div');
+        h.className = 'term-hint';
+        h.textContent = '这台设备还没执行过远程命令。输入命令，回车执行。';
+        t.out.appendChild(h);
+      }
+      return;
+    }
+    // 历史插在现有条目上面：历史可能比用户刚发的命令慢回来，绝不能覆盖它
+    const frag = document.createDocumentFragment();
+    jobs.slice().reverse().forEach(job => {
+      if (!job) return;
+      const entry = pushEntry(t, job, frag);
+      applyJob(entry, job);
+      if (job.status === 'queued' || job.status === 'running'){
+        setNote(entry, job.status === 'running' ? '仍在设备上执行…' : '仍在排队…', '');
+      }
+    });
+    t.out.insertBefore(frag, t.out.firstChild);
+    if (!t.busy) termScrollToEnd(t);
+  } catch (e){
+    if (t.closed) return;
+    if (!t.out.querySelector('.term-entry')){
+      t.out.textContent = '';
+      const h = document.createElement('div');
+      h.className = 'term-hint';
+      h.textContent = '历史读取失败：' + (e.message || '未知错误');
+      t.out.appendChild(h);
+    }
+  }
+}
+
+/* ── 机器卡片上的操作（事件委托：卡片是复用的，不能每个按钮绑一次）──────── */
+$('#mach-list').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-act]');
+  if (!btn) return;
+  const cardEl = btn.closest('.mach');
+  const id = cardEl && cardEl.dataset.dev;
+  if (!id) return;
+  const dev = (state.data ? state.data.machines.filter(m => m.device_id === id)[0] : null);
+  if (!dev) return;
+  const act = btn.dataset.act;
+  const name = devName(dev);
+
+  try {
+    if (act === 'term'){
+      if (terminals.has(id)) closeTerminal(id);
+      else openTerminal(id);
+      return;
+    }
+    if (act === 'copy-code'){ await copy(dev.device_id, '已复制机器码'); return; }
+
+    if (act === 'revoke'){
+      askConfirm('把「' + name + '」踢下线？',
+        '踢下线后这台电脑立即连不上服务器：心跳、同步、远程命令都会返回 403 DEVICE_REVOKED。随时可以点「恢复」放回来。',
+        async () => {
+          await api('POST', '/panel/api/devices/' + enc(id) + '/revoke', { note: '主控台手动踢下线' });
+          toast(name + ' 已踢下线', 'ok');
+          await refresh({});
+        }, '踢下线');
+      return;
+    }
+    if (act === 'restore'){
+      askConfirm('恢复「' + name + '」？',
+        '恢复后这台电脑的心跳与同步会重新被接受（最多等一个心跳周期，约 60 秒）。',
+        async () => {
+          await api('POST', '/panel/api/devices/' + enc(id) + '/restore', {});
+          toast(name + ' 已恢复', 'ok');
+          await refresh({});
+        }, '恢复');
+      return;
+    }
+    if (act === 'rename'){
+      askText('给「' + name + '」改名', '只影响主控台里的显示名，不影响那台电脑。',
+        dev.label || '', async (v) => {
+          const label = String(v == null ? '' : v).trim();
+          if (!label){ toast('名字不能为空', 'err'); throw new Error('名字不能为空'); }
+          await api('PATCH', '/panel/api/devices/' + enc(id), { label: label });
+          toast('已改名为「' + label + '」', 'ok');
+          await refresh({});
+        });
+      return;
+    }
+    if (act === 'delete'){
+      askConfirm('删除设备记录「' + name + '」？',
+        '只删服务器上的记录。那台电脑下次启动会作为「新设备」重新出现（它的机器码还在本地）。想永久禁止，用「踢下线」。',
+        async () => {
+          await api('DELETE', '/panel/api/devices/' + enc(id), {});
+          toast('已删除设备记录', 'ok');
+          await refresh({});
+        }, '删除');
+      return;
+    }
+  } catch (e){
+    toast(e.message || '操作失败', 'err');
+  }
+});
+
+/* 浏览器视图里的「复制」按钮（事件委托：表格每次刷新都重建）*/
+$('#br-list').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-copy]');
+  if (!btn) return;
+  ev.preventDefault();
+  copy(btn.dataset.copy, btn.dataset.label || '已复制');
+});
+
+/* ── 启动 ───────────────────────────────────────────────────────────────── */
+async function boot(){
+  setUser(state.user);
+  try {
+    if (!state.meta) state.meta = await api('GET', '/panel/api/meta').catch(() => null);
+    if (state.meta && state.meta.user) setUser(state.meta.user);
+  } catch (_) { /* 拿不到就用登录时填的名字 */ }
+  const hashView = String(location.hash || '').replace(/^#/, '');
+  switchView(VIEWS.indexOf(hashView) >= 0 ? hashView : 'machines', true);
+  // 地址栏补上规范 hash：分享 / 刷新回去都能停在同一个视图
+  if (location.hash !== '#' + state.view) location.hash = '#' + state.view;
+  syncAutoBtn();
+  await refresh({});
+  startTimer();
+}
+
+(async function start(){
+  // 用 whoami 探活：未登录是**正常状态**，不该在 console 里留一条 401
+  try {
+    const me = await api('GET', '/panel/api/whoami');
+    if (me && me.logged_in){
+      showApp();
+      await boot();
+      return;
+    }
+  } catch (_) { /* 服务器不可达时也走登录页 */ }
+  showLogin('');
+})();
+</script>
+</body>
+</html>

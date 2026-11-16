@@ -50,7 +50,18 @@ class FakeHub:
 
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
-                outer.results.append((self.path, json.loads(self.rfile.read(n) or b"{}")))
+                raw = self.rfile.read(n) or b"{}"
+                # 注册接口也要能模拟"被踢下线"：否则 ensure_registered
+                # 的拒绝分支永远测不到（踢下线必须连重新注册也挡住）。
+                if outer.revoked and self.path.endswith("/v1/devices/enroll"):
+                    body = json.dumps({"ok": False, "code": outer.revoked, "message": "x"}).encode()
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                outer.results.append((self.path, json.loads(raw)))
                 body = b'{"ok":true,"data":{"accepted":true}}'
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -227,3 +238,103 @@ def test_set_hub_repoints_agent(isolated):
         hub1.close()
         hub2.close()
     assert "two" in hub2.results[0][1]["stdout"]
+
+
+def test_ensure_registered_enrolls_device(isolated):
+    """服务器上直接跑的 core 要能自己注册成设备。
+
+    没有客户端帮它注册时（3.5 上那个 systemd core 就是这种），
+    不补这一步心跳会 403 DEVICE_UNKNOWN，面板里看不到这台机器。
+    """
+    from zw_core.services.shellagent import ensure_registered
+
+    hub = FakeHub([])
+    try:
+        res = ensure_registered(hub.url, "zwd_selfregister1234567890", timeout=5)  # type: ignore[call-arg]
+    except TypeError:
+        res = ensure_registered(hub.url, "zwd_selfregister1234567890")
+    finally:
+        hub.close()
+    assert res.get("ok") is True, res
+
+
+def test_ensure_registered_requires_inputs(isolated):
+    from zw_core.services.shellagent import ensure_registered
+
+    assert ensure_registered("", "zwd_x").get("ok") is False
+    assert ensure_registered("http://x:8700", "").get("ok") is False
+
+
+def test_ensure_registered_reports_revoked(isolated):
+    """被踢下线的设备不能靠重启注册复活 —— 那等于踢下线形同虚设。"""
+    from zw_core.services.shellagent import ensure_registered
+
+    hub = FakeHub([], revoked="DEVICE_REVOKED")
+    try:
+        res = ensure_registered(hub.url, "zwd_revoked123456789012345")
+    finally:
+        hub.close()
+    assert res.get("ok") is False
+    assert res.get("code") == "DEVICE_REVOKED"
+
+
+def test_heartbeat_thread_reports_shell_enabled(isolated):
+    """无客户端的 core 要自己发心跳，并上报 shell_enabled。
+
+    不心跳的话：注册后 3 分钟被判离线 → 面板一直是灰的，
+    也没人上报"这台能不能执行命令"，终端输入框会一直是禁用的。
+    """
+    from zw_core.services.shellagent import HeartbeatThread
+
+    seen: list[dict] = []
+    hub = FakeHub([])
+    # 拦截心跳 POST，记录 payload
+    orig_post = hub.results
+
+    # 心跳间隔有 15 秒下限（防忙轮询），所以测试用 send_now() 直接发一次，
+    # 不去等定时器 —— 那会让单测变成十几秒。
+    hb = HeartbeatThread(hub.url, "zwd_hb123456789012345678", interval=15, enabled=True)
+    assert hb.send_now() is True
+    st = hb.status()
+    hub.close()
+    assert st["last_ok"] > 0, "应该成功发过至少一次心跳"
+    assert st["last_error"] == ""
+
+
+def test_heartbeat_thread_requires_inputs(isolated):
+    from zw_core.services.shellagent import start_heartbeat, stop_agent
+
+    assert start_heartbeat("", "zwd_x") is None
+    assert start_heartbeat("http://x:8700", "") is None
+    stop_agent()
+
+
+def test_heartbeat_payload_carries_core_base_and_inventory(isolated):
+    """心跳必须带 core_base 与浏览器清单 —— 主控台靠它们展示 CDP 地址。
+
+    只报数字（几个环境、几个在跑）是不够的：用户要在主控台上看到
+    "这台机器上有哪些浏览器、CDP 地址是多少"，那就得把清单传上去。
+    """
+    from zw_core.services import manager as mgr
+    from zw_core.services.shellagent import HeartbeatThread
+
+    mgr.create_profile({"name": "清单测试A"})
+    mgr.create_profile({"name": "清单测试B"})
+
+    hb = HeartbeatThread("http://127.0.0.1:1", "zwd_x123456789012345678")
+    payload = hb._payload()
+    assert payload["core_base"].startswith("http")
+    inv = payload["inventory"]
+    assert len(inv) == 2, inv
+    names = {i["name"] for i in inv}
+    assert names == {"清单测试A", "清单测试B"}
+    for item in inv:
+        assert item["cdp_path"].startswith("/cdp/")
+        assert "seed" not in item and "password" not in item, "清单里不能带敏感字段"
+
+
+def test_send_now_returns_false_without_hub(isolated):
+    from zw_core.services.shellagent import HeartbeatThread
+
+    assert HeartbeatThread("", "zwd_x").send_now() is False
+    assert HeartbeatThread("http://127.0.0.1:1", "").send_now() is False

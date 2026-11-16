@@ -57,6 +57,46 @@ def _as_int(v: Any) -> int | None:
         return None
 
 
+_INVENTORY_MAX = 200          # 单台设备最多存 200 个环境，防被灌爆
+
+
+def _dump_inventory(v: Any) -> str | None:
+    """把设备上报的浏览器清单压成 JSON 文本。
+
+    只做基本清洗（裁字段、限条数），不做业务校验 —— hub 不该对
+    设备端的字段做假设，展示层缺字段就显示"—"。
+    返回 None 表示"这次没上报"，SQL 里的 COALESCE 会保留旧值。
+    """
+    if not isinstance(v, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for item in v[:_INVENTORY_MAX]:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "id": str(item.get("id") or "")[:64],
+            "name": str(item.get("name") or "")[:120],
+            "state": str(item.get("state") or "")[:32],
+            "group": str(item.get("group") or "")[:64],
+            "cdp_path": str(item.get("cdp_path") or "")[:200],
+        })
+    try:
+        return json.dumps(out, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_inventory(raw: Any) -> list[dict[str, Any]]:
+    """读回清单。坏数据返回空列表，绝不让它把接口带崩。"""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
 def _as_bool(v: Any) -> int | None:
     """转 0/1；没上报返回 None（COALESCE 后保持库里原值）。
 
@@ -103,7 +143,9 @@ CREATE TABLE IF NOT EXISTS devices (
   running      INTEGER NOT NULL DEFAULT 0,
   disk_human   TEXT NOT NULL DEFAULT '',
   engine       TEXT NOT NULL DEFAULT '',
-  shell_enabled INTEGER NOT NULL DEFAULT 0
+  shell_enabled INTEGER NOT NULL DEFAULT 0,
+  core_base    TEXT NOT NULL DEFAULT '',
+  inventory    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
 
@@ -140,6 +182,10 @@ class DeviceStore:
             ("disk_human", "TEXT NOT NULL DEFAULT ''"),
             ("engine", "TEXT NOT NULL DEFAULT ''"),
             ("shell_enabled", "INTEGER NOT NULL DEFAULT 0"),
+            # 主控台要展示"这台有哪些浏览器、CDP 地址是什么"，
+            # 所以设备把清单随心跳上报，hub 原样存 JSON 文本（不解析、不改写）。
+            ("core_base", "TEXT NOT NULL DEFAULT ''"),
+            ("inventory", "TEXT NOT NULL DEFAULT ''"),
         ):
             try:
                 c.execute(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
@@ -214,11 +260,15 @@ class DeviceStore:
                     " profiles=COALESCE(?,profiles), running=COALESCE(?,running),"
                     " disk_human=COALESCE(NULLIF(?,''),disk_human),"
                     " engine=COALESCE(NULLIF(?,''),engine),"
-                    " shell_enabled=COALESCE(?,shell_enabled) WHERE device_id=?",
+                    " shell_enabled=COALESCE(?,shell_enabled),"
+                    " core_base=COALESCE(NULLIF(?,''),core_base),"
+                    " inventory=COALESCE(NULLIF(?,''),inventory) WHERE device_id=?",
                     (now, ip,
                      _as_int(st.get("profiles")), _as_int(st.get("running")),
                      str(st.get("disk_human") or ""), str(st.get("engine") or ""),
                      _as_bool(st.get("shell_enabled")),
+                     str(st.get("core_base") or ""),
+                     _dump_inventory(st.get("inventory")),
                      device_id),
                 )
                 c.commit()
@@ -376,4 +426,6 @@ class DeviceStore:
         d["last_seen_ago"] = max(0, int(now - float(d.get("last_seen") or 0)))
         # 库里存 0/1，出参给布尔 —— 面板直接显示"开/关"，不用再猜 0 和 1 的含义
         d["shell_enabled"] = bool(d.get("shell_enabled") or 0)
+        d["core_base"] = str(d.get("core_base") or "")
+        d["inventory"] = _load_inventory(d.get("inventory"))
         return d

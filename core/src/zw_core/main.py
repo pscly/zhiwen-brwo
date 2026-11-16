@@ -80,6 +80,27 @@ async def _lifespan(app: Any):
     try:
         from zw_core.services import shellagent
 
+        # 先注册成设备：服务器上直接跑的 core 没有客户端帮它注册，
+        # 不补这一步面板里根本看不到它（心跳会 403 DEVICE_UNKNOWN）。
+        dev_id = getattr(s, "device_id", "") or ""
+        if s.hub_url and dev_id:
+            reg = shellagent.ensure_registered(s.hub_url, dev_id, s.hub_token)
+            if reg.get("ok"):
+                logger.info("已在同步中心注册为设备 %s", dev_id[:24])
+            else:
+                logger.warning("设备注册失败（%s）：%s", reg.get("code", ""), reg.get("error", ""))
+
+        # 无客户端时的独立心跳：否则注册后 3 分钟就被判离线，
+        # 面板里一直是灰的，也没人上报 shell_enabled。
+        hb = shellagent.start_heartbeat(
+            hub_url=s.hub_url,
+            device_id=dev_id,
+            token=s.hub_token,
+            enabled=bool(s.shell_enabled),
+        )
+        if hb is not None:
+            logger.info("已启动独立心跳（每 %s 秒）", hb.interval)
+
         agent = shellagent.start_agent(
             hub_url=s.hub_url,
             device_id=getattr(s, "device_id", "") or "",

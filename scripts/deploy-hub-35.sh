@@ -92,7 +92,7 @@ for _ in $(seq 1 30); do
     echo
     echo "完成。"
     echo "  本机回环自检：$(ssh "$HOST" 'curl -fsS -m 3 http://127.0.0.1:8700/healthz 2>/dev/null || echo "(未绑回环，正常)"')"
-    echo "  面板：http://$HOST:8700/panel"
+    echo "  主控台：http://$HOST:8700/"
     echo "  面板账号：ssh $HOST 'grep ZW_PANEL_ $REMOTE_DIR/.env'"
     exit 0
   fi

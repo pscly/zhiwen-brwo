@@ -33,6 +33,8 @@ POST /v1/devices/shell/{id}/result    → 回传 rc/stdout/stderr
 from __future__ import annotations
 
 import logging
+import socket
+import sys
 import threading
 import time
 from typing import Any
@@ -226,6 +228,43 @@ class ShellAgent:
             logger.warning("命令结果回传异常 job=%s：%s", job_id, exc)
 
 
+def ensure_registered(hub_url: str, device_id: str, token: str = "", app_version: str = "") -> dict[str, Any]:
+    """让本机 core 在 hub 上注册成设备。
+
+    客户端（GUI）连上时会显式注册；但"服务器上直接跑的 core"
+    （例如 3.5 自己的那个）没有客户端，如果不注册，心跳与命令都会
+    403 DEVICE_UNKNOWN —— 表现为"面板里看不到这台机器"。
+
+    这里在启动时补一次注册。已经注册过的设备重复注册是幂等的（hub 会刷新信息），
+    被踢下线的设备**不会**因此复活（hub 侧明确拒绝并在注册里返回 DEVICE_REVOKED）。
+    """
+    if not hub_url or not device_id:
+        return {"ok": False, "error": "缺少 hub 地址或设备号"}
+    try:
+        import httpx
+
+        from zw_core import __version__
+
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        payload = {
+            "device_id": device_id,
+            "app_version": app_version or __version__,
+            "hostname": socket.gethostname(),
+            "platform": sys.platform,
+        }
+        with httpx.Client(timeout=12) as c:
+            r = c.post(f"{hub_url.rstrip('/')}/v1/devices/enroll", json=payload, headers=headers)
+        body = r.json() if r.content else {}
+        if r.status_code == 200 and body.get("ok"):
+            return {"ok": True, **(body.get("data") or {})}
+        return {"ok": False, "code": body.get("code") or f"HTTP_{r.status_code}",
+                "error": body.get("message") or r.text[:200]}
+    except Exception as exc:  # noqa: BLE001  注册失败不该拖垮 core 启动
+        return {"ok": False, "code": "UNREACHABLE", "error": f"{type(exc).__name__}: {exc}"}
+
+
 class _Revoked(Exception):
     """设备已被服务器移除。"""
 
@@ -234,8 +273,141 @@ class _Revoked(Exception):
         self.code = code
 
 
+class HeartbeatThread:
+    """无客户端时的心跳。
+
+    GUI 客户端有自己的心跳线程（它还负责"被踢"的界面提示）。但服务器上
+    直接跑的 core 没有客户端 —— 不自己发心跳的话，注册后 3 分钟就会被
+    hub 判定离线，面板里一直是灰的，也没人上报 shell_enabled。
+
+    这里的心跳同时捎带本机概况（环境数/运行中/磁盘/引擎），
+    让面板能看到 3.5 自己在干什么。失败只记 debug：网络抖一下不值得刷日志。
+    """
+
+    def __init__(self, hub_url: str, device_id: str, token: str = "",
+                 interval: int = 60, enabled: bool = True) -> None:
+        self.hub_url = (hub_url or "").rstrip("/")
+        self.device_id = device_id or ""
+        self.token = token or ""
+        self.interval = max(15, int(interval or 60))
+        self.enabled = bool(enabled)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.last_ok = 0.0
+        self.last_error = ""
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        if not self.hub_url or not self.device_id:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="zw-hb", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        t = self._thread
+        if t and t.is_alive():
+            t.join(timeout=3)
+        self._thread = None
+
+    def status(self) -> dict[str, Any]:
+        return {"running": bool(self._thread and self._thread.is_alive()),
+                "last_ok": self.last_ok, "interval": self.interval,
+                "last_error": self.last_error}
+
+    def _payload(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"shell_enabled": self.enabled}
+        try:
+            from zw_core.services import manager as mgr
+
+            st = mgr.stats()
+            out.update({
+                "profiles": int(st.get("profiles") or 0),
+                "running": int(st.get("running") or 0),
+                "max_running": int(st.get("max_running") or 0),
+                "disk_human": str(st.get("disk_human") or ""),
+                "engine": str((st.get("engine") or {}).get("version") or ""),
+            })
+        except Exception:
+            pass
+
+        # 主控台要展示"这台有哪些浏览器、CDP 地址是什么"，所以把清单也带上。
+        # 只报元信息（id/名字/状态/分组），**绝不带 cookie、密码、种子**。
+        try:
+            out["core_base"] = self._core_base()
+            out["inventory"] = self._inventory()
+        except Exception:
+            pass
+        return out
+
+    def _core_base(self) -> str:
+        """本机 core 的对外地址，主控台据此拼 CDP 链接。
+
+        优先用配置里的 `gateway_public_base`（已经考虑端口与对外 IP）。
+        NAT 后面的机器这个地址外面连不上 —— 主控台会标"不可直连"，
+        这不是错误，用户还是能通过远程终端在机器上操作。
+        """
+        from zw_core.config import get_settings
+
+        return get_settings().gateway_public_base.rstrip("/")
+
+    def _inventory(self) -> list[dict[str, Any]]:
+        """当前浏览器环境清单（给主控台展示用）。"""
+        from zw_core.services import manager as mgr
+
+        items: list[dict[str, Any]] = []
+        for p in mgr.list_profiles():
+            pid = str(p.get("id") or "")
+            items.append({
+                "id": pid,
+                "name": str(p.get("name") or ""),
+                "state": str(p.get("state") or ""),
+                "group": str(p.get("group_name") or ""),
+                "cdp_path": f"/cdp/{pid}" if pid else "",
+            })
+        return items
+
+    def send_now(self) -> bool:
+        """立刻发一次心跳（不等下一个周期）。
+
+        两个用处：
+        1. 用户切换"允许远程命令行"后，面板立刻能看到新状态，
+           而不是等最多 60 秒 —— 那种延迟会让人以为开关没生效。
+        2. 测试与自检里可以直接验一次往返，不用等定时器。
+        """
+        import httpx
+
+        if not self.hub_url or not self.device_id:
+            return False
+        headers = {"X-ZW-Device": self.device_id}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            with httpx.Client(timeout=15) as c:
+                r = c.post(f"{self.hub_url}/v1/devices/heartbeat",
+                           json=self._payload(), headers=headers)
+            if r.status_code == 200:
+                self.last_ok = time.time()
+                self.last_error = ""
+                return True
+            self.last_error = f"HTTP {r.status_code}"
+            logger.debug("心跳被拒：%s %s", r.status_code, r.text[:120])
+            return False
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            logger.debug("心跳失败：%s", exc)
+            return False
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            self.send_now()
+
+
 # 全局单例：core 在 lifespan 里启动它，API 层读它的状态
 _AGENT: ShellAgent | None = None
+_HB: HeartbeatThread | None = None
 _LOCK = threading.Lock()
 
 
@@ -258,9 +430,34 @@ def start_agent(hub_url: str, device_id: str, token: str = "", enabled: bool = T
         return _AGENT
 
 
+def start_heartbeat(hub_url: str, device_id: str, token: str = "",
+                    enabled: bool = True, interval: int = 60) -> HeartbeatThread | None:
+    """启动全局心跳（幂等）。没有 hub 地址或设备号就不启动。"""
+    global _HB
+    if not hub_url or not device_id:
+        return None
+    with _LOCK:
+        if _HB is None:
+            _HB = HeartbeatThread(hub_url, device_id, token, interval=interval, enabled=enabled)
+        else:
+            _HB.hub_url = hub_url.rstrip("/")
+            _HB.device_id = device_id
+            _HB.token = token
+            _HB.enabled = enabled
+        _HB.start()
+        return _HB
+
+
+def get_heartbeat() -> HeartbeatThread | None:
+    return _HB
+
+
 def stop_agent() -> None:
-    global _AGENT
+    global _AGENT, _HB
     with _LOCK:
         if _AGENT is not None:
             _AGENT.stop()
             _AGENT = None
+        if _HB is not None:
+            _HB.stop()
+            _HB = None

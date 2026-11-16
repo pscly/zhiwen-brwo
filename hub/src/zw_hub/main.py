@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Header, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from . import __version__
@@ -56,6 +56,8 @@ app = FastAPI(
 _store: Store | None = None
 _devices: DeviceStore | None = None
 _shell_queue: ShellQueue | None = None
+# 进程启动时刻，主控台用它算"服务器已运行多久"
+_STARTED_AT = time.time()
 _shell_queue_lock = threading.Lock()
 
 
@@ -247,12 +249,16 @@ def ai_manifest() -> dict[str, Any]:
                 "key_fp": "客户端主密码派生密钥的指纹（16 位 hex），hub 用它判断快照能否被某台机器解开",
                 "lease": "跨机互斥锁，防止两台机器同时使用同一个环境",
                 "shell_job": "远程命令任务：管理员投递 → 设备长轮询取走 → 设备回传结果（协议见 docs/13）",
+                "machine": "一台装了客户端的电脑（device）。机器上线会注册，心跳带上环境数与浏览器清单",
+                "browser": "机器上的一个浏览器环境（profile）。有 cdp_http / cdp_ws 就能远程接管",
             },
             "workflows": {
                 "推送": "PUT /v1/blobs/{pid}/{rev} → PUT /v1/latest/{pid}",
                 "拉取": "GET /v1/latest/{pid} → GET /v1/blobs/{pid}/{rev}",
                 "占用环境": "POST /v1/leases/{pid} → 定期 POST /v1/leases/{pid}/heartbeat → DELETE /v1/leases/{pid}?owner=",
                 "远程命令": "POST /v1/devices/{device_id}/shell → 设备 GET /v1/devices/shell/next → 设备 POST /v1/devices/shell/{job_id}/result",
+                "先看有什么": "GET /v1/console/overview → 拿到在线机器、每台的浏览器清单与 CDP 地址；再决定调 shell 还是连 CDP",
+                "接管某个浏览器": "从 overview 里取该浏览器的 cdp_ws，用 Playwright 的 connectOverCDP 连上去；core_base 不可达时改用远程终端在那台机器上操作",
             },
             "errors": {
                 "REVISION_EXISTS": "版本号已被占用，换下一个 revision 或先 GET 看最新",
@@ -264,7 +270,8 @@ def ai_manifest() -> dict[str, Any]:
                 "SHELL_QUEUE_FULL": "该设备排队中的命令到顶（默认 200 条），等它执行完再投",
                 "SHELL_JOB_NOT_FOUND": "没有这条命令，或它属于别的设备",
             },
-            "安全模型": "hub 只存 AEAD 密文；主密码不进 hub；传输为局域网 HTTP，完整性由密文自身保证",
+            "安全模型": "hub 只存 AEAD 密文；主密码不进 hub；传输为局域网 HTTP，完整性由密文自身保证。"
+                        "主控台与 /v1/console/* 需要面板会话或 Bearer 令牌；不要暴露到公网",
             "endpoints": [
                 {"method": "GET", "path": "/healthz", "desc": "存活"},
                 {"method": "GET", "path": "/readyz", "desc": "就绪 + 存储统计"},
@@ -288,6 +295,10 @@ def ai_manifest() -> dict[str, Any]:
                 {"method": "GET", "path": "/v1/devices/{device_id}/shell/{job_id}", "desc": "管理员：查命令状态（可长轮询等终态）"},
                 {"method": "GET", "path": "/v1/devices/{device_id}/shell/history", "desc": "管理员：命令历史"},
                 {"method": "POST", "path": "/v1/devices/{device_id}/shell/{job_id}/cancel", "desc": "管理员：取消还没下发的命令"},
+                # ── 主控台（机器 / 浏览器 / 令牌，契约见 docs/15）──
+                {"method": "GET", "path": "/v1/console/overview", "desc": "机器 + 浏览器 + 总数（AI 想知道有哪些机器/浏览器就调这个）"},
+                {"method": "GET", "path": "/v1/console/secrets", "desc": "令牌区（明文，敏感，仅管理员）"},
+                {"method": "GET", "path": "/", "desc": "主控台页面（人看；AI 用 /v1/console/overview）"},
             ],
         }
     )
@@ -561,12 +572,36 @@ def favicon() -> Response:
     return Response(content=svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
 
+@app.get("/", include_in_schema=False)
+def console_page() -> Response:
+    """主控台（见 docs/15-主控台契约.md）。
+
+    `/` 是唯一入口：未登录显示登录框，登录后是机器 / 浏览器 / 令牌 / 事件四个视图。
+    旧名 `panel.html` 留着只是兜底 —— 万一 console.html 没打进去，也别 500。
+    """
+    for name in ("console.html", "panel.html"):
+        html = Path(__file__).parent / "web" / name
+        if html.exists():
+            return HTMLResponse(html.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>知纹主控台</h1><p>页面文件缺失（web/console.html）。</p>", status_code=500)
+
+
+@app.head("/", include_in_schema=False)
+def console_page_head() -> Response:
+    """HEAD `/`：只回 200，不返回页面。
+
+    为什么单独写一条：FastAPI 的 `@app.get` **不会**自动支持 HEAD，
+    所以 HEAD `/` 原本是 405。而 3.5 上的服务导航页（u.pscly.cn）是用
+    `HEAD /__probe/http/8700` → nginx 反代到 `HEAD http://127.0.0.1:8700/`
+    来判断服务是否在线的 —— 405 会让那个状态点永远是灰的，看起来像挂了。
+    """
+    return Response(status_code=200)
+
+
 @app.get("/panel", include_in_schema=False)
 def panel_page() -> Response:
-    html = Path(__file__).parent / "web" / "panel.html"
-    if not html.exists():
-        return HTMLResponse("<h1>知纹管理面板</h1><p>面板文件缺失（web/panel.html）。</p>", status_code=500)
-    return HTMLResponse(html.read_text(encoding="utf-8"))
+    """旧地址：永久 302 到 `/`，老书签不能断（契约 §一）。"""
+    return RedirectResponse("/", status_code=302)
 
 
 @app.post("/panel/api/login", include_in_schema=False)
@@ -629,6 +664,125 @@ def panel_whoami(request: Request) -> dict[str, Any]:
     got = request.cookies.get(PANEL_COOKIE, "")
     logged = bool(got) and hmac.compare_digest(got, _panel_token())
     return ok({"logged_in": logged})
+
+
+# ══ 主控台接口（见 docs/15-主控台契约.md）══════════════════════
+@app.get("/v1/console/overview", summary="主控台首屏：机器 + 浏览器 + 总数")
+def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
+    """一次拉完主控台要展示的东西。
+
+    AI 也用它：`GET /v1/console/overview` 就知道有哪些机器在线、每台上有哪些
+    浏览器、CDP 地址是什么，再决定下一步调 shell 还是连 CDP。
+
+    `probe=true` 时会**尽力**探测每台设备的 `core_base` 是否可达
+    （300ms 超时，失败只标 false，不影响返回）。NAT 后面的机器探测必然失败，
+    这是预期结果，不是错误 —— 所以这个字段是 true/false/null 三态。
+    """
+    who = admin_auth(request)
+    s = get_settings()
+    now = time.time()
+    devs = devices().listing()
+
+    machine_rows: list[dict[str, Any]] = []
+    total_browsers = 0
+    total_running = 0
+    for d in devs:
+        inv = d.get("inventory") or []
+        base = str(d.get("core_base") or "")
+        reachable: bool | None = None
+        if probe and base:
+            reachable = _probe_core(base)
+        browsers = []
+        for it in inv:
+            path = str(it.get("cdp_path") or "")
+            http_url = (base.rstrip("/") + path) if (base and path) else ""
+            browsers.append({
+                "id": it.get("id", ""),
+                "name": it.get("name", "") or "（未命名）",
+                "state": it.get("state", ""),
+                "group": it.get("group", ""),
+                "cdp_http": http_url,
+                # ws 地址要连上 /json/version 才知道 uuid，这里给的是
+                # "浏览器级 ws 的入口前缀"，前端提示用户点开 http 拿真实 ws。
+                "cdp_ws": (http_url.replace("http://", "ws://").replace("https://", "wss://") + "/devtools/browser/") if http_url else "",
+            })
+        total_browsers += len(browsers)
+        total_running += int(d.get("running") or 0)
+        machine_rows.append({
+            "device_id": d.get("device_id", ""),
+            "label": d.get("label", ""),
+            "hostname": d.get("hostname", ""),
+            "platform": d.get("platform", ""),
+            "arch": d.get("arch", ""),
+            "app_version": d.get("app_version", ""),
+            "status": d.get("status", ""),
+            "online": bool(d.get("online")),
+            "last_seen_ago": d.get("last_seen_ago"),
+            "last_ip": d.get("last_ip", ""),
+            "shell_enabled": bool(d.get("shell_enabled")),
+            "profiles": int(d.get("profiles") or 0),
+            "running": int(d.get("running") or 0),
+            "max_running": int(d.get("max_running") or 0) or None,
+            "disk_human": d.get("disk_human", ""),
+            "engine": d.get("engine", ""),
+            "core_base": base,
+            "core_reachable": reachable,
+            "browsers": browsers,
+        })
+
+    st = devices().stats()
+    return ok({
+        "server": {
+            "version": __version__,
+            "uptime_seconds": int(now - _STARTED_AT),
+            "data_dir": str(s.data_dir),
+            "shell_enabled": bool(s.shell_enabled),
+            "token_required": bool(s.token),
+            "auto_approve": s.auto_approve,
+            "allowed_cidrs": list(s.allowed_cidrs),
+            "default_credentials": (s.panel_user == "admin" and s.panel_password == "1234"),
+            "operator": who,
+        },
+        "totals": {
+            "machines": st.get("total", 0),
+            "online": st.get("online", 0),
+            "revoked": st.get("revoked", 0),
+            "browsers": total_browsers,
+            "running": total_running,
+        },
+        "machines": machine_rows,
+        "events": devices().events(limit=50),
+        "shell": shell_queue().stats(),
+    })
+
+
+@app.get("/v1/console/secrets", summary="主控台令牌区（敏感）")
+def console_secrets(request: Request) -> dict[str, Any]:
+    """返回面板与令牌的**原文**，给主控台的令牌区用。
+
+    为什么真的返回原文：用户明确要求"能看到令牌"。这一层已经受
+    「面板密码 + 网段白名单」保护，而能登面板的人本来就能改服务器上的 .env ——
+    隐藏它只会让人去 SSH 里翻，不增加任何安全性。
+
+    但**必须**记住它的性质：响应里是明文密钥。
+    - 不进访问日志（下面的明文含 token，日志只记"有人调了这个接口"）
+    - 不允许跨域（没有 CORS 头，浏览器同源策略兜底）
+    """
+    who = admin_auth(request)
+    s = get_settings()
+    logger.info("主控台读取令牌区 by=%s ip=%s", who, _client_ip(request))
+    return ok({
+        "panel_user": s.panel_user,
+        "panel_password": s.panel_password,
+        "hub_token": s.token or "",
+        "hub_token_set": bool(s.token),
+        "allowed_cidrs": list(s.allowed_cidrs),
+        "auto_approve": s.auto_approve,
+        "shell_enabled": bool(s.shell_enabled),
+        # 同步密码是客户端侧的主密码派生，hub 从不持有
+        "sync_password_set": False,
+        "hint": "这些是服务器 .env 里的值，只在本机/局域网可用，别透到公网",
+    })
 
 
 @app.get("/panel/api/stats", dependencies=[PanelAuth], include_in_schema=False)
@@ -707,6 +861,24 @@ def _require_shell_enabled() -> None:
     """hub 端总开关。关掉后**所有**命令行接口都不干活（面板也不许绕过）。"""
     if not get_settings().shell_enabled:
         raise ShellError(403, "SHELL_DISABLED", "这台服务器关闭了远程命令行（ZW_SHELL_ENABLED=false）")
+
+
+def _probe_core(base: str, timeout: float = 0.3) -> bool:
+    """探一下设备的 core 是否可直连（只探 /healthz）。
+
+    **短超时是刻意的**：主控台一次要展示 N 台机器，每台最多等 300ms，
+    20 台也只有 6 秒上限（而且并发由前端控制）。探不到就是 false ——
+    NAT 后面的机器本来就连不上，这不是错误。
+    """
+    import urllib.error
+    import urllib.request
+
+    url = base.rstrip("/") + "/healthz"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:  # noqa: S310  只探本项目的 core
+            return 200 <= int(getattr(r, "status", 200)) < 300
+    except (urllib.error.URLError, ValueError, OSError, TimeoutError):
+        return False
 
 
 def admin_auth(request: Request) -> str:

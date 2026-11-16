@@ -447,7 +447,7 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         if not base:
             messagebox.showinfo(APP_NAME, "还没连上服务器。先在下面填服务器地址并连接。")
             return
-        url = base.rstrip("/") + "/panel"
+        url = base.rstrip("/") + "/"
         try:
             webbrowser.open(url)
             log(f"已在浏览器打开服务器面板：{url}", "ok")
@@ -534,7 +534,30 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         st = core.stats() if state.get("core_on") else None
         if not st:
             return {}
+        inv = []
+        try:
+            from zw_core.services import manager as mgr
+
+            for pr in mgr.list_profiles():
+                pid = str(pr.get("id") or "")
+                inv.append({
+                    "id": pid,
+                    "name": str(pr.get("name") or ""),
+                    "state": str(pr.get("state") or ""),
+                    "group": str(pr.get("group_name") or ""),
+                    "cdp_path": f"/cdp/{pid}" if pid else "",
+                })
+        except Exception:
+            inv = []
+        try:
+            from zw_core.config import get_settings
+
+            core_base = get_settings().gateway_public_base.rstrip("/")
+        except Exception:
+            core_base = ""
         return {
+            "core_base": core_base,
+            "inventory": inv,
             "profiles": int(st.get("profiles") or 0),
             "running": int(st.get("running") or 0),
             "max_running": int(st.get("max_running") or 0),

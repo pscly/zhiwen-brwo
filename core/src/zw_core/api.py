@@ -576,6 +576,12 @@ def build_app() -> FastAPI:
         if agent is not None:
             agent.set_enabled(bool(body.enabled))
 
+        # 立刻上报一次，别让面板等最多 60 秒才知道开关变了
+        hb = shellagent.get_heartbeat()
+        if hb is not None:
+            hb.enabled = bool(body.enabled)
+            hb.send_now()
+
         return ok({
             "enabled": bool(body.enabled),
             "persisted": persisted,
