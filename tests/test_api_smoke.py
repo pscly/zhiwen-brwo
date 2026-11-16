@@ -455,3 +455,21 @@ def test_timezone_validation_works_without_tzdata(client, monkeypatch):
         client.delete(f"/api/v1/profiles/tz-ok-{good or 'empty'}?purge=true", headers=H)
     r = client.post("/api/v1/profiles", headers=H, json={"name": "tz-bad", "fp_timezone": "Mars/Olympus"})
     assert r.status_code == 400 and r.json()["code"] == "INVALID_TIMEZONE"
+
+
+def test_purge_expired_tokens_returns_real_count(client):
+    """清理过期令牌要返回真实条数（SQLite 的 rowcount 对 DELETE 不可靠）。"""
+    from zw_core.db import get_db
+    from zw_core.services import manager as mgr
+
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "tok-count"}).json()["data"]
+    for _ in range(3):
+        mgr.issue_cdp_token(p["id"], ttl=60)
+    with get_db().conn() as c:
+        c.execute("UPDATE cdp_tokens SET expires_at=1.0 WHERE profile_id=?", (p["id"],))
+    n = mgr.purge_expired_tokens()
+    assert n >= 3, f"应清掉至少 3 条，实际 {n}"
+    with get_db().conn() as c:
+        left = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens WHERE profile_id=?", (p["id"],)).fetchone()["n"]
+    assert left == 0
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)

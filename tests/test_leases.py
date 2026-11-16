@@ -107,3 +107,34 @@ def test_reap_if_stale_ignores_other_host(pdir: Path):
 def test_owner_is_stable_within_process():
     assert leases.process_owner() == leases.process_owner()
     assert leases.process_owner().count(":") == 2
+
+
+def test_pid_alive_is_safe_on_all_platforms(monkeypatch):
+    """`_pid_alive` 必须跨平台安全。
+
+    Windows 上 `os.kill(pid, 0)` 会被转成 TerminateProcess，对任意 pid
+    抛 `OSError: [WinError 87]`。以前没捕获，`reap_if_stale` 直接崩，
+    租约逻辑在 Windows 上等于不可用（CI 在真 Windows 上抓到的）。
+    """
+    from zw_core.services import leases as L
+
+    assert L._pid_alive(0) is False
+    assert L._pid_alive(-1) is False
+    # 当前进程一定活着
+    assert L._pid_alive(os.getpid()) is True
+    # 一个几乎不可能存在的 pid：必须返回 False 而不是抛异常
+    assert L._pid_alive(999999999) is False
+
+
+def test_pid_alive_swallows_oserror(monkeypatch):
+    """即使 os.kill 抛奇怪的 OSError，也不能把调用方带崩。"""
+    from zw_core.services import leases as L
+
+    monkeypatch.setattr(L, "_IS_WIN", False)
+
+    def boom(pid, sig):
+        raise OSError(22, "模拟平台差异")
+
+    monkeypatch.setattr(L.os, "kill", boom)
+    # 保守策略：不确定就按"活着"处理，宁可不清租约
+    assert L._pid_alive(12345) is True

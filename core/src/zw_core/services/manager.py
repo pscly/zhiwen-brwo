@@ -726,10 +726,18 @@ def issue_cdp_token(profile_id: str, ttl: int | None = None, issued_to: str = ""
 
 
 def purge_expired_tokens() -> int:
-    """清理全库过期令牌。由健康巡检周期调用，返回删除行数。"""
+    """清理全库过期令牌。由健康巡检周期调用，返回删除行数。
+
+    先 COUNT 再 DELETE：SQLite 的 `cursor.rowcount` 对 DELETE 并不总是准
+    （驱动/平台的 sqlite3 版本差异会导致返回 0，CI 在 Windows 上就是这样），
+    而调用方需要这个数字来打日志，所以显式数一遍。
+    """
+    now = time.time()
     with get_db().conn() as c:
-        cur = c.execute("DELETE FROM cdp_tokens WHERE expires_at < ?", (time.time(),))
-        return cur.rowcount or 0
+        n = c.execute("SELECT COUNT(*) AS n FROM cdp_tokens WHERE expires_at < ?", (now,)).fetchone()["n"]
+        if n:
+            c.execute("DELETE FROM cdp_tokens WHERE expires_at < ?", (now,))
+        return int(n or 0)
 
 
 def token_stats() -> dict[str, Any]:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -16,9 +18,28 @@ from pathlib import Path
 from typing import Any
 
 
+_IS_WIN = sys.platform == "win32"
+
+
 def _pid_alive(pid: int) -> bool:
+    """判断进程是否存活。
+
+    Windows 上**不能**用 `os.kill(pid, 0)`：它会被转成 TerminateProcess 调用，
+    对任意 pid 直接抛 `OSError: [WinError 87] The parameter is incorrect`。
+    以前这个异常没被捕获，`reap_if_stale` 直接崩，租约逻辑在 Windows 上等于坏的。
+    """
     if pid <= 0:
         return False
+    if _IS_WIN:
+        # tasklist 是最稳的（无需权限，输出可解析）；ctypes 更快但要多写一层
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            )
+            return str(pid) in (out.stdout or "")
+        except (OSError, subprocess.SubprocessError):
+            return False
     try:
         os.kill(pid, 0)
         return True
@@ -26,6 +47,9 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True      # 存在但不属于我，算活着
+    except OSError:
+        # 其他平台差异也不要崩：保守认为"不知道"，按活着处理（宁可不清租约）
+        return True
 
 
 class LeaseBusy(Exception):
