@@ -27,6 +27,27 @@ ValueError: Unable to configure formatter 'default'
 本地复现方式（已写成测试）：把 `sys.stdout`/`sys.stderr` 都置 `None` 再启动
 `LocalCore`。修复前必抛那句 ValueError，修复后正常启动并响应 `/healthz`。
 
+### 修：Windows 上启动要卡满 20 秒
+
+CI 的 Windows job 把它抓出来了：日志里从「知纹核心启动」到
+「Application startup complete」**恰好 20 秒** —— 那正是某个子进程的超时值。
+
+根因是 `engine_version()` 用 `chrome --version` 探版本：
+Linux/macOS 的 Chrome 会把版本打到 stdout 然后退出，**Windows 的
+chrome.exe 忽略 `--version`**，它照常启动浏览器（开窗口、常驻进程），
+stdout 一直是空的 → `subprocess.run(timeout=20)` 一路等到超时。
+
+后果：Windows 上每次启动客户端都要白等 20 秒，看起来像"服务起不来"。
+
+修法：
+1. 先从**安装路径**里读版本（Chromium 发行包通常把版本放在目录名里，
+   如 `ungoogled-chromium-150.0.7871.186`、`chromium-1208`）—— 零成本、不启动进程；
+2. Windows 上只用 PowerShell 读 PE 的文件版本信息，绝不传 `--version`；
+3. 其它平台才用 `--version`，超时从 20 秒压到 5 秒。
+
+`LocalCore.start` 的就绪等待也从 20 秒放宽到 45 秒（Windows 冷启动要过杀软扫描），
+并且超时后不再是干巴巴一句"没起来"，而是列出三个最常见原因 + 日志路径。
+
 ### 自检新增一项：真的启动一次本机服务
 
 `--selftest` 原来只检查 `create_app()` 能构造，**不启动 uvicorn** ——
@@ -47,9 +68,13 @@ GUI 子程序），真起一次 uvicorn，访问 `/healthz`，再关掉。自检
 
 ### 测试
 
-222 → **226 项**。新增 `tests/test_no_console.py`（4 项）：
+222 → **230 项**。新增 `tests/test_no_console.py`（4 项）：
 无流时 `setup_logging` 不崩且仍写文件、`LocalCore` 确实传了 `log_config=None`、
 无流时能真启动并响应 `/healthz`、无流时统计接口可用。
+
+新增 `tests/test_engines_extra.py` 里 4 项盯住版本探测：
+路径能读出就不许起子进程、Windows 分支不许出现 `--version`、
+POSIX 超时必须 ≤5 秒。
 
 顺带修了一处测试间污染：`LocalCore.start(device_id=...)` 会写全局
 `ZW_DEVICE_ID`，不清理会让后续同步测试带着"未注册设备"去请求 hub

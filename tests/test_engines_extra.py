@@ -281,3 +281,90 @@ def test_idle_reclaim_never_touches_connected_profiles(tmp_path, monkeypatch):
 
     config.reset_settings()
     db.reset_db()
+
+
+# ── 版本探测必须"不启动进程" ──────────────────────────────
+def test_version_from_layout_reads_path_without_spawning(tmp_path):
+    """能从安装路径读到版本时，绝不要启动浏览器进程。
+
+    Windows 上 `chrome.exe --version` 会**打开浏览器**（不是打印版本），
+    于是 subprocess 一直等到超时 —— 实测 3.5 上每次启动都因此卡满 20 秒。
+    """
+    from zw_core.services.engines import _version_from_layout
+
+    p = tmp_path / "ungoogled-chromium-150.0.7871.186-1-x86_64" / "chrome"
+    assert _version_from_layout(p) == "150.0.7871.186"
+
+    p2 = tmp_path / "chromium-1208" / "chrome-linux64" / "chrome"
+    assert "1208" in _version_from_layout(p2)
+
+    p3 = tmp_path / "somewhere" / "chrome"
+    assert _version_from_layout(p3) == ""
+
+
+def test_engine_version_uses_layout_first(tmp_path, monkeypatch):
+    """有可解析的路径时，连 subprocess 都不该调用。"""
+    from zw_core.services import engines as E
+
+    bin_path = tmp_path / "chrome-149.0.7827.53-x64" / "chrome"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_bytes(b"x")
+
+    def boom(*a, **k):
+        raise AssertionError("不该启动子进程：版本应该从路径里读出来")
+
+    monkeypatch.setattr(E.subprocess, "run", boom)
+    assert E.engine_version(bin_path) == "149.0.7827.53"
+
+
+def test_engine_version_windows_never_calls_version_flag(tmp_path, monkeypatch):
+    """Windows 分支绝不能带 `--version`（那会打开浏览器并挂住）。
+
+    这里模拟 Windows：调用必须走 powershell 读文件版本，或直接放弃。
+    """
+    from zw_core.services import engines as E
+
+    bin_path = tmp_path / "chrome.exe"
+    bin_path.write_bytes(b"MZ")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *a, **k):
+        calls.append(list(cmd))
+
+        class R:
+            stdout = ""
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(E.subprocess, "run", fake_run)
+    monkeypatch.setattr(E.sys, "platform", "win32")
+    E.engine_version(bin_path)
+    assert calls, "Windows 上应该尝试 powershell 读版本"
+    for cmd in calls:
+        assert "--version" not in cmd, f"Windows 上不能传 --version：{cmd}"
+        assert cmd[0].lower().startswith("powershell"), f"应走 powershell：{cmd}"
+
+
+def test_engine_version_timeout_is_short_on_posix(tmp_path, monkeypatch):
+    """POSIX 分支的超时必须是短超时（5 秒），不能让启动卡 20 秒。"""
+    from zw_core.services import engines as E
+
+    bin_path = tmp_path / "chrome"
+    bin_path.write_bytes(b"x")
+    seen: dict = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+
+        class R:
+            stdout = "Google Chrome 1.2.3.4\n"
+            stderr = ""
+
+        return R()
+
+    monkeypatch.setattr(E.subprocess, "run", fake_run)
+    monkeypatch.setattr(E.sys, "platform", "linux")
+    assert E.engine_version(bin_path) == "Google Chrome 1.2.3.4"
+    assert seen.get("timeout", 99) <= 5, f"超时太长：{seen.get('timeout')}"

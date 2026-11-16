@@ -479,12 +479,22 @@ class LocalCore:
         except Exception as exc:
             self.error = f"{type(exc).__name__}: {exc}"
             return False
-        deadline = time.time() + 20
+        # 45 秒而不是 20：Windows 上冷启动要过杀软扫描，实测比 Linux 慢得多。
+        # 但更重要的是下面那句错误信息 —— 光说"没起来"用户没法自查。
+        deadline = time.time() + 45
         while time.time() < deadline:
             if self.is_running():
                 return True
             time.sleep(0.25)
-        self.error = self.error or "本地服务 20 秒内没起来"
+        if not self.error:
+            self.error = (
+                f"本地服务 45 秒内没起来（端口 {self.port}）。\n\n"
+                "常见原因：\n"
+                "1. 端口被别的程序占了 —— 换一个端口，或先关掉占用它的程序\n"
+                "2. 杀毒软件拦了本程序 —— 把它加入白名单\n"
+                "3. 数据目录没有写权限 —— 换一个可写目录（见配置目录）\n\n"
+                f"详细日志：{_log_hint()}"
+            )
         return False
 
     def stats(self) -> dict[str, Any] | None:
@@ -696,6 +706,19 @@ def run_cli() -> int:
     except KeyboardInterrupt:
         core.stop()
     return 0
+
+
+def _log_hint() -> str:
+    """告诉用户日志在哪 —— 出问题时这是唯一有用的线索。"""
+    try:
+        from zw_core.config import get_settings
+
+        return str(Path(get_settings().log_dir) / "zhiwen.log")
+    except Exception:
+        try:
+            return str(config_dir() / "zhiwen.log")
+        except Exception:
+            return "(见数据目录 logs/zhiwen.log)"
 
 
 def _report_selftest(lines: list[str], code: int, show_dialog: bool = True) -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -172,10 +173,66 @@ def _source_of(p: Path, s: Settings) -> str:
     return "系统安装"
 
 
+def _version_from_layout(bin_path: Path) -> str:
+    """从安装布局里"看"版本号，不启动进程。
+
+    Chromium 系发行包通常把版本放在路径里
+    （`chrome-linux64`、`ungoogled-chromium-150.0.7871.186-1-x86_64`、
+    `chromium-1208` 这类），能读到就用，读不到就算了。
+    """
+    text = str(bin_path)
+    m = re.search(r"(\d+\.\d+\.\d+\.\d+)", text)
+    if m:
+        return m.group(1)
+    m = re.search(r"chromium[_-]?(\d{3,4})", text, re.IGNORECASE)
+    if m:
+        return f"build {m.group(1)}"
+    return ""
+
+
 def engine_version(bin_path: Path) -> str:
+    """取浏览器版本。
+
+    ## Windows 上**绝不能**靠 `--version`
+
+    Linux/macOS 的 Chrome 会把版本打到 stdout 然后退出；
+    **Windows 的 chrome.exe 忽略 `--version`**：它照常启动浏览器（开窗口、
+    常驻进程），stdout 一直是空的。于是 `subprocess.run(timeout=20)` 一路
+    等到超时 —— 实测在 Windows 上每次启动都因此**卡满 20 秒**，
+    客户端"本机服务"看起来就是起不来。
+
+    所以顺序是：
+    1. 先从安装路径里读版本（不启动进程，零成本）；
+    2. Windows 上只用 PowerShell 读文件版本信息（很快，不启动浏览器）；
+    3. 其它平台才用 `--version`，且超时压到 5 秒。
+    """
+    from_layout = _version_from_layout(bin_path)
+    if from_layout:
+        return from_layout
+
+    if sys.platform == "win32":
+        # PowerShell 读 PE 的 ProductVersion，秒级返回，不会把浏览器拉起来
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"(Get-Item -LiteralPath '{bin_path}').VersionInfo.ProductVersion"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
+            )
+            ver = (out.stdout or "").strip().splitlines()
+            if ver and re.match(r"^[\d.]+$", ver[0].strip()):
+                return ver[0].strip()
+        except Exception:
+            pass
+        return "unknown"
+
     try:
-        out = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
-        return (out.stdout or out.stderr).strip().splitlines()[0][:80]
+        out = subprocess.run(
+            [str(bin_path), "--version"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+            stdin=subprocess.DEVNULL,
+        )
+        text = (out.stdout or out.stderr).strip().splitlines()
+        return text[0][:80] if text else "unknown"
     except Exception:
         return "unknown"
 
