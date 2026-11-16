@@ -45,11 +45,18 @@ def hub_url(tmp_path_factory):
         "ZW_LOG_LEVEL": "WARNING",
         "ZW_KEEP_REVISIONS": "5",
     }
+    # 千万不要用 stdout=subprocess.PIPE：uvicorn 的访问日志会持续写入，
+    # 管道缓冲区写满（Windows 上只有几十 KB）后子进程就阻塞在 write 上，
+    # 表现是"hub 起不来"或整个测试挂死。CI 在 Windows 上真的卡过 40 分钟。
+    # 用临时文件当 sink 就没有这个问题，失败时还能读出来看。
+    log_file = data / "hub-test.log"
+    log_fh = open(log_file, "wb")
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "zw_hub.main:app", "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=log_fh,
         stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
     )
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 25
@@ -62,7 +69,12 @@ def hub_url(tmp_path_factory):
             time.sleep(0.2)
     else:
         proc.terminate()
-        out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log_fh.close()
+        out = log_file.read_text(encoding="utf-8", errors="replace") if log_file.exists() else ""
         pytest.fail(f"hub 没起来：\n{out[-2000:]}")
     yield base, token
     proc.terminate()
@@ -70,6 +82,7 @@ def hub_url(tmp_path_factory):
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+    log_fh.close()
 
 
 @pytest.fixture(scope="module")
