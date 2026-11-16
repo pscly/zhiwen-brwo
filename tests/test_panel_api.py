@@ -234,3 +234,32 @@ def test_default_credentials_are_low_privilege_and_flagged(hub):
         s = Settings()
         assert s.panel_user == "admin"
         assert s.panel_password == "1234"
+
+
+def test_panel_login_respects_cidr_allowlist(hub, monkeypatch):
+    """配了网段白名单后，面板登录必须只在白名单内可用。
+
+    为什么这条重要：面板密码是给人记的短口令，一旦泄漏，
+    没有网段限制就等于把面板交出去。加上白名单后，
+    即使密码被知道，非白名单来源（比如从公网打进来）也进不来。
+    """
+    from zw_hub import config as hub_cfg
+
+    hub_cfg.reset_settings()
+    monkeypatch.setenv("ZW_ALLOWED_CIDRS", "10.99.0.0/24")   # 明显不包含 127.0.0.1
+    hub_cfg.reset_settings()
+    try:
+        r = hub.post("/panel/api/login", json={"username": "testadmin", "password": "test-panel-pass"})
+        assert r.status_code == 403, f"应被网段白名单拒绝，实际 {r.status_code}"
+        assert r.json()["code"] == "CIDR_FORBIDDEN"
+    finally:
+        monkeypatch.delenv("ZW_ALLOWED_CIDRS", raising=False)
+        hub_cfg.reset_settings()
+
+
+def test_panel_login_works_without_allowlist(hub):
+    """没配白名单时（默认）照常能登，别把人锁在外面。"""
+    hub_cfg = __import__("zw_hub.config", fromlist=["reset_settings"])
+    hub_cfg.reset_settings()
+    r = hub.post("/panel/api/login", json={"username": "testadmin", "password": "test-panel-pass"})
+    assert r.status_code == 200

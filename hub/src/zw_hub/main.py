@@ -526,7 +526,15 @@ def panel_page() -> Response:
 
 
 @app.post("/panel/api/login", include_in_schema=False)
-def panel_login(body: LoginBody, response: Response) -> dict[str, Any]:
+def panel_login(body: LoginBody, response: Response, request: Request = None) -> dict[str, Any]:  # type: ignore[assignment]
+    """面板登录。
+
+    这里也走 `_check_cidr`，而不是只在 `/v1/*` 上检查。
+    原因：面板密码是"人记的短口令"，一旦泄漏，LAN 之外的人本来可以直接登进来；
+    配上 `ZW_ALLOWED_CIDRS` 之后，即使密码被知道，非白名单来源也进不来。
+    """
+    if request is not None:
+        _check_cidr(request)
     s = get_settings()
     ok_user = hmac.compare_digest(body.username.strip(), s.panel_user)
     ok_pass = hmac.compare_digest(body.password, s.panel_password)
@@ -552,7 +560,8 @@ def panel_logout(response: Response) -> dict[str, Any]:
 
 
 @app.get("/panel/api/meta", dependencies=[PanelAuth], include_in_schema=False)
-def panel_meta() -> dict[str, Any]:
+def panel_meta(request: Request) -> dict[str, Any]:
+    _check_cidr(request)
     s = get_settings()
     # 仍然用出厂默认凭据时，面板顶部会挂一条提醒 —— 不拦操作，但要让人看见。
     # 默认值是 admin/1234，公开可查，只适合"先跑起来"。
