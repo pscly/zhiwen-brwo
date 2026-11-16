@@ -125,7 +125,7 @@ class Store:
         path = self._meta_path(valid_id(pid), rev)
         if not path.exists():
             raise HubError(404, "BLOB_NOT_FOUND", f"{pid} 的 v{rev} 不存在")
-        return BlobMeta(**json.loads(path.read_text()))
+        return BlobMeta(**json.loads(path.read_text(encoding="utf-8")))
 
     def list_revisions(self, pid: str) -> list[int]:
         d = self.blobs / valid_id(pid)
@@ -156,7 +156,7 @@ class Store:
         ptr = self.latest / f"{pid}.json"
         current: dict[str, Any] | None = None
         if ptr.exists():
-            current = json.loads(ptr.read_text())
+            current = json.loads(ptr.read_text(encoding="utf-8"))
             if current.get("revision", 0) >= rev and not force:
                 raise HubError(
                     409,
@@ -180,7 +180,7 @@ class Store:
         ptr = self.latest / f"{valid_id(pid)}.json"
         if not ptr.exists():
             raise HubError(404, "NO_LATEST", f"{pid} 还没有任何已发布的版本")
-        return json.loads(ptr.read_text())
+        return json.loads(ptr.read_text(encoding="utf-8"))
 
     # ── 租约 ──────────────────────────────────────────────
     def _lease_path(self, pid: str) -> Path:
@@ -191,7 +191,7 @@ class Store:
         now = time.time()
         path = self._lease_path(pid)
         if path.exists():
-            cur = json.loads(path.read_text())
+            cur = json.loads(path.read_text(encoding="utf-8"))
             alive = now - float(cur.get("heartbeat", 0)) < float(cur.get("ttl", 0))
             if alive and cur.get("owner") != owner:
                 raise HubError(
@@ -215,7 +215,7 @@ class Store:
         path = self._lease_path(pid)
         if not path.exists():
             raise HubError(404, "LEASE_NOT_FOUND", f"{pid} 没有租约")
-        cur = json.loads(path.read_text())
+        cur = json.loads(path.read_text(encoding="utf-8"))
         if cur.get("owner") != owner:
             raise HubError(409, "LEASE_OWNER_MISMATCH", f"{pid} 的租约属于 {cur.get('owner')}")
         cur["heartbeat"] = time.time()
@@ -226,7 +226,7 @@ class Store:
         path = self._lease_path(pid)
         if not path.exists():
             return
-        cur = json.loads(path.read_text())
+        cur = json.loads(path.read_text(encoding="utf-8"))
         if cur.get("owner") not in (owner, "*"):
             raise HubError(409, "LEASE_OWNER_MISMATCH", f"{pid} 的租约属于 {cur.get('owner')}")
         path.unlink()
@@ -235,7 +235,7 @@ class Store:
         path = self._lease_path(pid)
         if not path.exists():
             return None
-        cur = json.loads(path.read_text())
+        cur = json.loads(path.read_text(encoding="utf-8"))
         cur["alive"] = (time.time() - float(cur.get("heartbeat", 0))) < float(cur.get("ttl", 0))
         return cur
 

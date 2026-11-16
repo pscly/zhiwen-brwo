@@ -28,12 +28,15 @@ def fake_profile() -> dict:
 BASE_ARGS_MUST_HAVE = ["--no-first-run", "--no-default-browser-check", "--remote-allow-origins=*"]
 
 
-def test_cmdline_has_fingerprint_and_gateway_origin(fake_profile):
-    cmd = engines.build_cmdline(Path("/usr/bin/chrome"), Path("/tmp/udd"), 21001, fake_profile)
+def test_cmdline_has_fingerprint_and_gateway_origin(fake_profile, tmp_path):
+    # 用 tmp_path 而不是写死 "/tmp/udd"：在 Windows 上 Path("/tmp/udd")
+    # 会被 str() 成 "\tmp\udd"，写死的断言必然失败（CI 上真的因此挂过）。
+    udd = tmp_path / "udd"
+    cmd = engines.build_cmdline(Path("/usr/bin/chrome"), udd, 21001, fake_profile)
     joined = " ".join(cmd)
     assert "--fingerprint=123456" in joined
     assert "--remote-debugging-port=21001" in joined
-    assert "--user-data-dir=/tmp/udd" in joined
+    assert f"--user-data-dir={udd}" in joined
     assert "--proxy-server=http://127.0.0.1:7890" in joined
     assert "--lang=zh-CN" in joined
     assert "--window-size=1280,800" in joined

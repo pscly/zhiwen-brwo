@@ -174,7 +174,7 @@ def _source_of(p: Path, s: Settings) -> str:
 
 def engine_version(bin_path: Path) -> str:
     try:
-        out = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, timeout=20)
+        out = subprocess.run([str(bin_path), "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         return (out.stdout or out.stderr).strip().splitlines()[0][:80]
     except Exception:
         return "unknown"
@@ -435,7 +435,7 @@ def port_owner_pid(port: int) -> int:
         return 0
     if IS_WIN:
         try:
-            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=8)
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
             for line in (out.stdout or "").splitlines():
                 parts = line.split()
                 if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING":
@@ -447,7 +447,7 @@ def port_owner_pid(port: int) -> int:
     # POSIX：优先 ss（最快、输出稳定）
     for cmd in (["ss", "-ltnp"], ["/usr/sbin/ss", "-ltnp"], ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]):
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
         except (OSError, subprocess.SubprocessError):
             continue
         text = out.stdout or ""
@@ -477,7 +477,7 @@ def is_our_browser(pid: int, profiles_root: Path) -> bool:
             ps = f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
             )
             cmd = (out.stdout or "").strip()
         except Exception:
@@ -615,7 +615,7 @@ def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if IS_WIN:
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True)
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         return str(pid) in (out.stdout or "")
     try:
         os.kill(pid, 0)
@@ -748,7 +748,7 @@ def list_browser_processes(profiles_root: Path) -> list[dict[str, Any]]:
             )
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
             )
             data = json.loads(out.stdout or "[]")
             if isinstance(data, dict):

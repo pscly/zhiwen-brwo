@@ -67,12 +67,23 @@ def test_device_id_changes_after_deleting_config(home):
 
 
 def test_config_file_permissions(home):
+    """配置文件里有对接码，不该让同机其他用户读到。
+
+    Windows 上不能断言 POSIX 位：`os.chmod` 只影响只读标志，文件仍是 0o666，
+    真实权限由 ACL 决定（client._restrict_file 用 icacls 处理）。
+    所以在 Windows 上只验"文件存在且可读写"，POSIX 上才验 0600。
+    """
     cli_mod.ensure_device_id()
-    mode = cli_mod.config_path().stat().st_mode & 0o777
-    # 里面可能放对接码，不该让同机其他用户读到
-    assert mode in (0o600, 0o644), oct(mode)
+    p = cli_mod.config_path()
+    assert p.exists()
     if os.name == "posix":
+        mode = p.stat().st_mode & 0o777
         assert mode == 0o600, f"配置里有凭据，权限应为 0600，实际 {oct(mode)}"
+    else:
+        # Windows：至少要能读回来（icacls 授权当前用户完全控制）
+        import json
+
+        assert json.loads(p.read_text(encoding="utf-8"))["device_id"]
 
 
 # ── 探测与注册（用一个假服务器，不依赖网络）──────────────

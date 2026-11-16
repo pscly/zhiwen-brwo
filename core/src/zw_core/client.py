@@ -29,6 +29,7 @@ import os
 import platform
 import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -84,8 +85,35 @@ def save_config(cfg: dict[str, Any]) -> None:
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, p)
+    _restrict_file(p)
+
+
+def _restrict_file(p: Path) -> None:
+    """把配置文件限制成"只有当前用户可读"。
+
+    坑：`os.chmod(p, 0o600)` 在 Windows 上**几乎无效** —— Windows 的权限模型
+    不是 POSIX 位，chmod 只影响只读标志，文件实际仍是 0o666（所有用户可读）。
+    里头存着对接码，这在多人共用的机器上是真实泄漏。
+
+    正确做法是走 Windows ACL：用 icacls 移除继承并只授权当前用户。
+    失败时不让程序崩（只是记一笔），因为没装 icacls 的极端环境里
+    客户端仍然要能用。
+    """
+    if sys.platform == "win32":
+        user = os.environ.get("USERNAME", "")
+        if not user:
+            return
+        try:
+            # /inheritance:r 断开继承（否则 Everyone 仍能读）
+            subprocess.run(
+                ["icacls", str(p), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True, timeout=15, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return
     try:
-        os.chmod(p, 0o600)  # 里面有对接码（如果有）
+        os.chmod(p, 0o600)
     except OSError:
         pass
 

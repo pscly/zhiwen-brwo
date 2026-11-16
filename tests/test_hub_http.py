@@ -171,3 +171,29 @@ def test_signature_required_when_enabled(hub, monkeypatch):
     sig = hmac.new(b"sekrit", msg, hashlib.sha256).hexdigest()
     r = hub.get("/v1/meta", headers={**H, "X-ZW-Ts": ts, "X-ZW-Sign": sig})
     assert r.status_code == 200, r.text
+
+
+def test_chinese_note_survives_roundtrip(hub):
+    """中文备注必须在写盘→读回之后仍然正确。
+
+    Windows 上这里曾经崩过：`path.read_text()` 不指定编码时会用系统代码页
+    （中文 Windows 是 cp936、英文是 cp1252），读到 UTF-8 的中文就
+    UnicodeDecodeError。所有 read_text/write_text 都必须显式 utf-8。
+    """
+    r = hub.put(
+        "/v1/blobs/pid0009/1",
+        headers={**H, "X-ZW-Key-Fp": "fp", "X-ZW-Source-Node": "%E5%AE%A2%E5%8E%85",
+                 "X-ZW-Note": "%E4%B8%8B%E7%8F%AD%E5%89%8D%E6%8E%A8%E7%9A%84", "X-ZW-Encoded": "url"},
+        content=b"x",
+    )
+    assert r.status_code == 200, r.text
+    meta = hub.get("/v1/blobs/pid0009/1/meta", headers=H).json()["data"]
+    assert meta["note"] == "下班前推的"
+    assert meta["source_node"] == "客厅"
+
+
+def test_latest_pointer_with_chinese_fields(hub):
+    hub.put("/v1/blobs/pid0010/1", headers={**H, "X-ZW-Key-Fp": "fp", "X-ZW-Source-Node": "%E4%B8%BB%E6%9C%BA"}, content=b"y")
+    hub.put("/v1/latest/pid0010", headers=H, json={"revision": 1})
+    got = hub.get("/v1/latest/pid0010", headers=H).json()["data"]
+    assert got["revision"] == 1
