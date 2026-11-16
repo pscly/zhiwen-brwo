@@ -70,29 +70,41 @@ jobs:
           # 打包最常见的坑是"能构建、一跑就 ModuleNotFound"（比如 datas 里的
           # 控制台页面没打进去、uvicorn 的后端模块没被静态分析到）。
           # --selftest 把客户端真正用到的依赖逐项走一遍，且不需要图形界面。
+          #
+          # 跨平台注意：macOS **没有** timeout 命令（那是 GNU coreutils），
+          # 所以不能用 `timeout 120 ...`，否则 127 command not found。
           if [ "${{ runner.os }}" = "Windows" ]; then
             BIN="dist/知纹客户端.exe"
+            REPORT="$LOCALAPPDATA/zhiwen-client/selftest.txt"
           else
             BIN="dist/zhiwen-client"
+            REPORT="$HOME/.config/zhiwen-client/selftest.txt"
           fi
           ls -la "$BIN"
-          # Windows 打包成 GUI 子程序（console=False）后没有控制台，
-          # selftest 会把报告写进配置目录并在 Windows 上弹消息框 ——
-          # 在 CI 里弹框会一直挂着，所以这里设超时并用退出码判断。
-          # （超时会被判失败；正常情况它 1-2 秒就返回。）
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            timeout 120 "$BIN" --selftest || code=$?
-            # 弹框可能让进程超时（124）；此时改看报告文件是否全 OK
-            if [ "${code:-0}" = "124" ]; then
-              echo "selftest 超时（图形消息框阻塞），改为检查报告文件"
-              REPORT="$LOCALAPPDATA/zhiwen-client/selftest.txt"
-              cat "$REPORT" || true
-              grep -q "全部" "$REPORT"
-            else
-              exit "${code:-0}"
-            fi
+          chmod +x "$BIN" 2>/dev/null || true
+
+          # 后台跑 + 自己数秒，充当可移植的 timeout
+          rm -f "$REPORT"
+          "$BIN" --selftest > selftest.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 60); do
+            if ! kill -0 "$PID" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          if kill -0 "$PID" 2>/dev/null; then
+            echo "selftest 超时（GUI 消息框可能阻塞），杀掉后改看报告文件"
+            kill -9 "$PID" 2>/dev/null || true
+            cat "$REPORT" 2>/dev/null || true
+            grep -q "全部" "$REPORT"
           else
-            timeout 120 "$BIN" --selftest
+            wait "$PID"
+            CODE=$?
+            cat selftest.log 2>/dev/null || true
+            if [ "$CODE" != "0" ]; then
+              echo "selftest 退出码 $CODE"
+              cat "$REPORT" 2>/dev/null || true
+              exit "$CODE"
+            fi
           fi
 
       - name: 产物重命名
