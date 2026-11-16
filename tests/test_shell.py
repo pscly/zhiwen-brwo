@@ -14,6 +14,16 @@ import pytest
 from zw_core.services import shell as sh
 
 
+def _two(cmds: list[str]) -> str:
+    """把多条命令拼成当前平台能跑的写法。
+
+    `;` 是 POSIX shell 的分隔符，Windows 的 cmd 不认（会当成普通字符）。
+    这里统一用平台的连接符，避免"Linux 过、Windows 挂"。
+    """
+    joiner = " & " if sys.platform == "win32" else " && "
+    return joiner.join(cmds)
+
+
 def test_execute_captures_stdout_and_rc():
     r = sh.execute("echo hello", timeout=10)
     assert r.error == ""
@@ -28,7 +38,7 @@ def test_execute_captures_stderr_separately():
 
     合并会让错误信息淹在正常输出里，面板也没法分色显示。
     """
-    r = sh.execute("echo out; echo err 1>&2", timeout=10)
+    r = sh.execute(_two(["echo out", "echo err 1>&2"]), timeout=10)
     assert "out" in r.stdout
     assert "err" in r.stderr
     assert "err" not in r.stdout
@@ -70,8 +80,10 @@ def test_execute_timeout_kills_children():
 
 def test_chinese_output_is_not_mojibake():
     if sys.platform == "win32":
-        pytest.skip("Windows 走 cmd，输出编码由系统代码页决定，见 _decode 的多编码兜底")
-    r = sh.execute('printf "中文测试\\n"', timeout=10)
+        # cmd 的 echo 输出走系统代码页，_decode 会按 GBK/UTF-8 依次尝试
+        r = sh.execute("echo 中文测试", timeout=10)
+    else:
+        r = sh.execute('printf "中文测试\\n"', timeout=10)
     assert "中文测试" in r.stdout
 
 

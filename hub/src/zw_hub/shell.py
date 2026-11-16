@@ -446,13 +446,20 @@ class ShellQueue:
     def expire_stale(self, max_age: float = STALE_AFTER) -> int:
         """把超过 max_age 秒还没被取走的 queued 标成 expired。返回处理条数。"""
         try:
-            cutoff = time.time() - max(0.0, float(max_age))
+            age = float(max_age)
         except (TypeError, ValueError):
-            cutoff = time.time() - STALE_AFTER
+            age = STALE_AFTER
+        # age <= 0 的语义是"立刻作废所有排队中的"，用 `<=` 比较：
+        # Windows 上 time.time() 的粒度约 15ms，用 `<` 时"刚创建的任务"
+        # 会因为 created_at == now 而漏掉（CI 在 Windows 上就是这样挂的）。
+        expire_all = age <= 0
+        cutoff = time.time() - max(0.0, age)
         expired = 0
         with self._cond:
             for job in list(self._jobs.values()):
-                if job["status"] == QUEUED and float(job["created_at"]) < cutoff:
+                if job["status"] != QUEUED:
+                    continue
+                if expire_all or float(job["created_at"]) <= cutoff:
                     self._finish_locked(job, EXPIRED, error="SHELL_EXPIRED")
                     expired += 1
             if expired:

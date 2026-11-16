@@ -179,13 +179,19 @@ def test_agent_stops_polling_when_revoked(isolated):
 
 
 def test_agent_backoff_on_network_error(isolated):
-    """连不上 hub 时按退避重试，不要打爆对方。"""
+    """连不上 hub 时按退避重试，不要打爆对方。
+
+    不要赌"2 秒内一定有 last_error"：Windows 上线程调度与首次 DNS/连接超时
+    都更慢，固定 sleep 会让这条测试变成偶发失败（CI 真挂过）。改成轮询等待。
+    """
     ag = ShellAgent("http://127.0.0.1:1", "zwd_testdevice", wait=1)
     try:
         ag.start()
-        time.sleep(2.0)
-        assert ag.last_error, "应该记录到错误"
-        assert ag.executed == 0
+        deadline = time.time() + 10
+        while time.time() < deadline and not ag.last_error:
+            time.sleep(0.1)
+        assert ag.last_error, "10 秒内应该记录到一次连接错误"
+        assert ag.executed == 0, "连不上就不该有任何执行"
     finally:
         ag.stop()
 

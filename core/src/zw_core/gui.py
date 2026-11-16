@@ -385,6 +385,30 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
                               command=toggle_autostart)
     auto_chk.pack(side="left", padx=(14, 0))
 
+    def toggle_shell() -> None:
+        """远程命令行开关。默认开；关掉后服务器再也拉不到命令。"""
+        want = bool(state.get("shell_var").get())
+        try:
+            import httpx
+
+            with httpx.Client(timeout=5) as c:
+                r = c.post(
+                    f"http://127.0.0.1:{core.port}/api/v1/shell/enable",
+                    json={"enabled": want},
+                    headers={"Authorization": f"Bearer {os.environ.get('ZW_ADMIN_TOKEN', '')}"},
+                )
+            if r.status_code == 200:
+                log("远程命令行已" + ("开启" if want else "关闭（服务器无法再执行命令）"),
+                    "ok" if want else "warn")
+            else:
+                log(f"切换失败：HTTP {r.status_code}", "bad")
+                state["shell_var"].set(not want)
+        except Exception as exc:
+            # 本机服务还没起来是常见情况：此时只记住选择，连上后生效
+            log(f"开关已记录，连上后生效（{type(exc).__name__}）", "info")
+        cfg["shell_enabled"] = want
+        save_config(cfg)
+
     # 远程命令行开关：用户要求"默认开启，也能手动关闭"。
     # 默认 True；关掉后服务器侧拿不到命令，本机浏览器/控制台不受影响。
     state["shell_var"] = tk.BooleanVar(value=bool(cfg.get("shell_enabled", True)))
@@ -504,30 +528,6 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             root.after(5000, refresh_stats)
         except Exception:
             pass
-
-    def toggle_shell() -> None:
-        """远程命令行开关。默认开；关掉后服务器再也拉不到命令。"""
-        want = bool(state.get("shell_var").get())
-        try:
-            import httpx
-
-            with httpx.Client(timeout=5) as c:
-                r = c.post(
-                    f"http://127.0.0.1:{core.port}/api/v1/shell/enable",
-                    json={"enabled": want},
-                    headers={"Authorization": f"Bearer {os.environ.get('ZW_ADMIN_TOKEN', '')}"},
-                )
-            if r.status_code == 200:
-                log("远程命令行已" + ("开启" if want else "关闭（服务器无法再执行命令）"),
-                    "ok" if want else "warn")
-            else:
-                log(f"切换失败：HTTP {r.status_code}", "bad")
-                state["shell_var"].set(not want)
-        except Exception as exc:
-            # 本机服务还没起来是常见情况：此时只记住选择，连上后生效
-            log(f"开关已记录，连上后生效（{type(exc).__name__}）", "info")
-        cfg["shell_enabled"] = want
-        save_config(cfg)
 
     def local_summary() -> dict[str, Any]:
         """给服务器看的本机概况。取不到就返回空（心跳照常）。"""

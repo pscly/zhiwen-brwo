@@ -470,15 +470,29 @@ def test_history_survives_restart(tmp_path):
 
     path = tmp_path / "shell.db"
     q1 = ShellQueue(path, max_output=1024, queue_limit=10)
-    job = q1.submit(DEV_A, "echo 记住我")
-    assert q1.next_job(DEV_A, wait=1)["command"] == "echo 记住我"
-    q1.complete(job["id"], DEV_A, rc=0, stdout="ok")
+    try:
+        job = q1.submit(DEV_A, "echo 记住我")
+        assert q1.next_job(DEV_A, wait=1)["command"] == "echo 记住我"
+        q1.complete(job["id"], DEV_A, rc=0, stdout="ok")
+    finally:
+        q1.close()
 
     q2 = ShellQueue(path, max_output=1024, queue_limit=10)
-    got = q2.get(job["id"], DEV_A)
-    assert got["status"] == "done" and got["stdout"] == "ok"
-    assert [j["id"] for j in q2.history(DEV_A)] == [job["id"]]
-    assert q2.stats()["done"] == 1
+    try:
+        got = q2.get(job["id"], DEV_A)
+        assert got["status"] == "done" and got["stdout"] == "ok"
+        assert [j["id"] for j in q2.history(DEV_A)] == [job["id"]]
+        assert q2.stats()["done"] == 1
+        # 排队中的命令不落库：重启后就没了（这是刻意的，见 shell.py 顶部）
+        q2.submit(DEV_A, "这条别指望重启后还在")
+    finally:
+        q2.close()
+    q3 = ShellQueue(path, max_output=1024, queue_limit=10)
+    try:
+        assert q3.next_job(DEV_A, wait=0) is None
+        assert q3.stats()["queued"] == 0
+    finally:
+        q3.close()
 
 
 def test_fixed_paths_are_not_swallowed_by_wildcards(hub):
