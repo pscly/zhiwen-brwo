@@ -23,34 +23,56 @@ def home(tmp_path, monkeypatch):
 
 
 def test_autostart_roundtrip(home, monkeypatch, tmp_path):
-    """开→查→关→查 必须自洽。"""
-    # 把自启的落地位置指到临时目录，避免污染测试机
+    """开→查→关→查 必须自洽，且**按平台**落到正确位置。
+
+    之前这条只按 Linux 写（断言 XDG 的 .desktop 存在），
+    在 macOS CI 上必然失败 —— 因为那边写的是 LaunchAgents 的 plist。
+    """
     if sys.platform == "win32":
         pytest.skip("Windows 上会写真实注册表，靠 CI 真机验证")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+
+    if sys.platform == "darwin":
+        # macOS 用固定路径 ~/Library/LaunchAgents，改不了；用假的 HOME 隔离
+        fake_home = tmp_path / "machome"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        landed = fake_home / "Library" / "LaunchAgents" / "cc.pscly.zhiwen-client.plist"
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        landed = tmp_path / "xdg" / "autostart" / "zhiwen-client.desktop"
+
     assert C.autostart_enabled() is False
     ok, msg = C.set_autostart(True)
     assert ok, msg
     assert C.autostart_enabled() is True
-    desktop = tmp_path / "xdg" / "autostart" / "zhiwen-client.desktop"
-    assert desktop.exists()
-    body = desktop.read_text(encoding="utf-8")
-    assert "[Desktop Entry]" in body
-    # 断言的必须是**产品标记**，不能是"某个路径里恰好含 zhiwen"。
-    # 之前这里写 `"zhiwen" in body.lower()`，本地能过纯粹因为仓库目录叫
-    # zhiwen_brwo（sys.executable 里带了这个词），CI 上路径不同就失败。
-    assert "zw_core.client" in body or "zhiwen-client" in body.lower()
-    assert "Name=知纹客户端" in body
+    assert landed.exists(), f"自启文件没落到预期位置：{landed}"
+
+    body = landed.read_text(encoding="utf-8")
+    if sys.platform == "darwin":
+        assert "cc.pscly.zhiwen-client" in body
+        assert "RunAtLoad" in body
+    else:
+        assert "[Desktop Entry]" in body
+        # 断言的必须是**产品标记**，不能是"某个路径里恰好含 zhiwen"。
+        # 本地能过纯粹因为仓库目录叫 zhiwen_brwo，CI 上路径不同就会失败。
+        assert "zw_core.client" in body or "zhiwen-client" in body.lower()
+        assert "Name=知纹客户端" in body
+
     ok, msg = C.set_autostart(False)
     assert ok, msg
     assert C.autostart_enabled() is False
-    assert not desktop.exists()
+    assert not landed.exists()
 
 
 def test_autostart_idempotent(home, monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     if sys.platform == "win32":
         pytest.skip("Windows 走注册表")
+    if sys.platform == "darwin":
+        fake_home = tmp_path / "machome2"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     for _ in range(3):
         ok, _msg = C.set_autostart(True)
         assert ok
@@ -218,3 +240,33 @@ def test_heartbeat_status_reports_revoked(home):
     st = hb.status()
     assert st["revoked"] is True
     assert st["healthy"] is False, "被踢了不能再算健康"
+
+
+def test_macos_autostart_plist_branch(home, monkeypatch, tmp_path):
+    """macOS 分支生成 LaunchAgents plist。
+
+    在 Linux 上也能验：把 sys.platform 掰成 darwin、HOME 指到临时目录。
+    这样这条分支不必等 macOS CI 才知道对不对（它刚在 macOS CI 上挂过一次）。
+    """
+    if sys.platform == "win32":
+        pytest.skip("Windows 上 sys.platform 的猴子补丁会连带改坏 winreg 判断")
+    fake_home = tmp_path / "machome"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(C.sys, "platform", "darwin")
+
+    assert C.autostart_enabled() is False
+    ok, msg = C.set_autostart(True)
+    assert ok, msg
+    plist = fake_home / "Library" / "LaunchAgents" / "cc.pscly.zhiwen-client.plist"
+    assert plist.exists()
+    body = plist.read_text(encoding="utf-8")
+    assert "<?xml" in body
+    assert "cc.pscly.zhiwen-client" in body
+    assert "RunAtLoad" in body
+    assert "ProgramArguments" in body
+    assert C.autostart_enabled() is True
+
+    ok, msg = C.set_autostart(False)
+    assert ok, msg
+    assert not plist.exists()
