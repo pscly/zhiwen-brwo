@@ -108,7 +108,10 @@ a = Analysis(
 
 pyz = PYZ(a.pure)  # noqa: F821
 
-name = "知纹客户端" if sys.platform == "win32" else "zhiwen-client"
+# 产物名统一用 ASCII：中文文件名在 CI 的 artifact 传递、某些解压工具、
+# 以及命令行里都很容易出问题（实测 Upload-Artifact 会把中文截断成 "-Windows.exe"）。
+# 界面标题仍然是中文，用户看到的是"知纹 客户端"。
+name = "zhiwen-client"
 
 exe = EXE(  # noqa: F821
     pyz,

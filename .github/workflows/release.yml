@@ -27,7 +27,8 @@ jobs:
         include:
           - os: windows-latest
             label: Windows
-            artifact: 知纹客户端-Windows.exe
+            # 纯 ASCII：含中文的 artifact 名在多步传递中会被截断成 "-Windows.exe"
+            artifact: zhiwen-client-Windows-x64.exe
           - os: ubuntu-latest
             label: Linux-x86_64
             artifact: zhiwen-client-Linux-x86_64
@@ -77,7 +78,7 @@ jobs:
           # 跨平台注意：macOS **没有** timeout 命令（那是 GNU coreutils），
           # 所以不能用 `timeout 120 ...`，否则 127 command not found。
           if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN="dist/知纹客户端.exe"
+            BIN="dist/zhiwen-client.exe"
             REPORT="$LOCALAPPDATA/zhiwen-client/selftest.txt"
           else
             BIN="dist/zhiwen-client"
@@ -120,7 +121,7 @@ jobs:
           mkdir -p "$OUT"
           cd "${{ github.workspace }}"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "dist/知纹客户端.exe" "$OUT/${{ matrix.artifact }}"
+            cp "dist/zhiwen-client.exe" "$OUT/${{ matrix.artifact }}"
           elif [ "${{ runner.os }}" = "macOS" ]; then
             cd "${{ github.workspace }}/dist"
             ls -la
@@ -175,7 +176,7 @@ jobs:
 
           | 系统 | 文件 | 怎么用 |
           |---|---|---|
-          | Windows 10/11 | `知纹客户端-Windows.exe` | 双击运行。首次可能被 SmartScreen 提示，点「更多信息 → 仍要运行」 |
+          | Windows 10/11 | `zhiwen-client-Windows-x64.exe` | 双击运行。首次可能被 SmartScreen 提示，点「更多信息 → 仍要运行」 |
           | Linux x86_64 | `zhiwen-client-Linux-x86_64` | `chmod +x` 后直接运行 |
           | macOS | `zhiwen-client-macOS.zip` | 解压后右键「打开」（未签名） |
 
