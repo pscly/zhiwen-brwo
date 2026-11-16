@@ -1265,6 +1265,11 @@ function fillCard(card, dev){
   }
   r.revokeBtn.hidden = revoked;
   r.restoreBtn.hidden = !revoked;
+  // 待授权 / 已拒绝时给「允许」；待授权还给「拒绝」。踢下线对它们没意义。
+  r.approveBtn.hidden = !(pending || rejected);
+  r.rejectBtn.hidden = !pending;
+  if (!r.approveBtn.hidden) r.approveBtn.title = '允许这台电脑接入（允许后它的同步才会被接受）';
+  if (!r.rejectBtn.hidden) r.rejectBtn.title = '拒绝接入；记录保留，随时可以再允许';
 }
 
 function cmpDevices(a, b){
