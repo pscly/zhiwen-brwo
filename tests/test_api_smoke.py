@@ -436,3 +436,22 @@ def test_export_accepts_password_in_body(client, monkeypatch):
     assert r4.status_code == 200
 
     client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+def test_timezone_validation_works_without_tzdata(client, monkeypatch):
+    """时区校验不能依赖"机器上恰好装了 tzdata"。
+
+    Windows 上 Python 不自带时区数据库，若不装 tzdata，ZoneInfo 会抛
+    ZoneInfoNotFoundError —— 以前这会被当成"不认识的时区"，用户填
+    Asia/Shanghai 直接被拒（CI 在真 Windows 上就是这样挂的）。
+    现在要求：没有数据库时也认常见时区，只拒明显瞎填的。
+    """
+    from zw_core.services import manager as mgr
+
+    monkeypatch.setattr(mgr, "_TZ_AVAILABLE", False)
+    for good in ("Asia/Shanghai", "UTC", "America/Los_Angeles", ""):
+        r = client.post("/api/v1/profiles", headers=H, json={"name": f"tz-ok-{good or 'empty'}", "fp_timezone": good})
+        assert r.status_code == 200, f"{good} 应被接受：{r.text[:200]}"
+        client.delete(f"/api/v1/profiles/tz-ok-{good or 'empty'}?purge=true", headers=H)
+    r = client.post("/api/v1/profiles", headers=H, json={"name": "tz-bad", "fp_timezone": "Mars/Olympus"})
+    assert r.status_code == 400 and r.json()["code"] == "INVALID_TIMEZONE"

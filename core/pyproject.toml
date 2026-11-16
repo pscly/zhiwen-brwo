@@ -12,6 +12,10 @@ dependencies = [
   "argon2-cffi>=23.1,<24",
   "zstandard>=0.23,<0.24",
   "websockets>=13,<14",
+  # Windows 上 Python 没有系统时区数据库，ZoneInfo("Asia/Shanghai") 会抛
+  # ZoneInfoNotFoundError —— 用户填时区会被误判为"不认识的时区"。
+  # Linux/macOS 上这个包是空转（有系统库），装了无害。
+  "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

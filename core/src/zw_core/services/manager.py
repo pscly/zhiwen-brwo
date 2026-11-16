@@ -270,14 +270,52 @@ def _validate(payload: dict[str, Any]) -> None:
                 raise ProfileError("INVALID_URL", f"起始网址只接受 http/https/about/file/chrome，收到 {u}")
 
 
-def _tz_valid(tz: str) -> bool:
-    try:
-        from zoneinfo import ZoneInfo
+# 时区数据库是否可用，探一次就够（Windows 上不装 tzdata 时 ZoneInfo 会全挂）
+_TZ_AVAILABLE: bool | None = None
+# 已知的常见时区：数据库不可用时不至于把所有输入都拒掉
+_COMMON_TZ = {
+    "UTC", "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Taipei", "Asia/Tokyo",
+    "Asia/Seoul", "Asia/Singapore", "Asia/Bangkok", "Asia/Kolkata", "Asia/Dubai",
+    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Moscow",
+    "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+    "America/Sao_Paulo", "Australia/Sydney", "Pacific/Auckland",
+}
 
-        ZoneInfo(tz)
+
+def _tz_available() -> bool:
+    global _TZ_AVAILABLE
+    if _TZ_AVAILABLE is None:
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo("Asia/Shanghai")
+            _TZ_AVAILABLE = True
+        except Exception:
+            # 典型场景：Windows 上没装 tzdata。这时不该把所有时区输入都拒掉，
+            # 而是退回"常见时区白名单"（见 _tz_valid）。
+            _TZ_AVAILABLE = False
+    return _TZ_AVAILABLE
+
+
+def _tz_valid(tz: str) -> bool:
+    """校验时区。
+
+    两层：有 tzdata 就查真实数据库；没有（Windows 默认没装）就只认常见列表。
+    后者宽松，但比"整个功能不可用"好——而且启动时 `--timezone` 参数
+    仍然会由内核自己判断，填错了浏览器会忽略，不会导致环境起不来。
+    """
+    if not tz or not tz.strip():
         return True
-    except Exception:
-        return False
+    tz = tz.strip()
+    if _tz_available():
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(tz)
+            return True
+        except Exception:
+            return False
+    return tz in _COMMON_TZ
 
 
 def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:

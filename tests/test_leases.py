@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import shutil
 import tempfile
 import time
@@ -54,7 +55,7 @@ def test_other_process_blocks(pdir: Path):
     """别人持有且未过期 → 必须挡住。"""
     path = pdir / "lease.json"
     path.write_text(json.dumps({
-        "owner": f"{os.uname().nodename}:999999:deadbeef", "kind": "run",
+        "owner": f"{socket.gethostname()}:999999:deadbeef", "kind": "run",
         "ttl": 90, "acquired_at": time.time(), "heartbeat": time.time(),
     }))
     with pytest.raises(LeaseBusy) as exc:
@@ -74,7 +75,7 @@ def test_reap_if_stale_clears_dead_owner(pdir: Path):
     """持有者进程已经不在了 → 启动时应该自动清掉。"""
     path = pdir / "lease.json"
     path.write_text(json.dumps({
-        "owner": f"{os.uname().nodename}:999999:dead",   # 这个 pid 基本不可能存在
+        "owner": f"{socket.gethostname()}:999999:dead",   # 这个 pid 基本不可能存在
         "kind": "run", "ttl": 90,
         "acquired_at": time.time(), "heartbeat": time.time(),
     }))
@@ -86,7 +87,7 @@ def test_reap_if_stale_respects_live_owner(pdir: Path):
     """持有者是活着的进程 → 不动它。"""
     path = pdir / "lease.json"
     path.write_text(json.dumps({
-        "owner": f"{os.uname().nodename}:{os.getpid()}:x",  # 就是当前进程，但 owner 串不同
+        "owner": f"{socket.gethostname()}:{os.getpid()}:x",  # 就是当前进程，但 owner 串不同
         "kind": "run", "ttl": 90,
         "acquired_at": time.time(), "heartbeat": time.time(),
     }))
