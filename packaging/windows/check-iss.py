@@ -514,6 +514,51 @@ def check_ascii_paths(iss: IssScript, rep: Report) -> None:
                 "检查了 DefaultDirName / DefaultGroupName / Icons / Files / Dirs / UninstallDelete")
 
 
+def check_upgrade_keeps_ascii_dir(iss: IssScript, rep: Report) -> None:
+    """升级不能把中文目录带回来。
+
+    这条是最容易漏的：只改 DefaultDirName 没用 —— Inno 默认
+    `UsePreviousAppDir=yes`，升级时它从注册表读"上次装在哪"然后原样装回去，
+    于是从旧的中文目录升上来，路径还是中文。用户会以为修复没生效。
+
+    同时要求：安装时把旧的中文目录清掉，否则会留下一份孤儿文件
+    （卸载项指向新目录，旧文件再也删不掉）。
+
+    `[InstallDelete]` 里的中文路径是**故意**的（清理历史遗留），
+    所以 C36 不扫这一段；这里改成精确校验：只能是已知的那几个旧名字。
+    """
+    cid = "C37"
+    prev = iss.setup.get("UsePreviousAppDir", "").strip().lower()
+    prev_group = iss.setup.get("UsePreviousGroup", "").strip().lower()
+
+    problems: list[str] = []
+    if prev not in ("no", "false"):
+        problems.append(f"UsePreviousAppDir={prev or '(未设置=默认 yes)'}，升级会沿用旧目录")
+    if prev_group not in ("no", "false"):
+        problems.append(f"UsePreviousGroup={prev_group or '(未设置=默认 yes)'}，开始菜单组会沿用旧名字")
+
+    # 旧目录清理：允许出现的非 ASCII 名字（升级清理用，不是新建）
+    legacy_allowed = {
+        r"{autopf}\知纹客户端",
+        r"{group}\知纹客户端",
+        r"{autodesktop}\知纹客户端.lnk",
+    }
+    found = {e.get("name", "") for e in iss.entries.get("InstallDelete", [])}
+    missing = legacy_allowed - found
+    if missing:
+        problems.append("缺少旧目录清理：" + "; ".join(sorted(missing)))
+
+    unexpected = {n for n in found if not n.isascii() and n not in legacy_allowed}
+    if unexpected:
+        problems.append("InstallDelete 里出现了未知的中文路径：" + "; ".join(sorted(unexpected)))
+
+    if problems:
+        rep.fail(cid, "升级后仍落在纯英文目录，且清理了旧的中文目录", "；".join(problems))
+    else:
+        rep.add(cid, "升级后仍落在纯英文目录，且清理了旧的中文目录",
+                "UsePreviousAppDir=no、UsePreviousGroup=no，[InstallDelete] 清 3 个旧路径")
+
+
 def check_source_path(iss: IssScript, rep: Report, repo_root: Path) -> None:
     cid = "C13"
     files = iss.entries.get("Files", [])
@@ -855,6 +900,7 @@ CHECKS_HELP = [
     ("C08", "版本号格式合法；与 --version 不一致只告警（/D 会覆盖）"),
     ("C09", f"DefaultDirName={{autopf}}\\{APP_DIR_NAME}（纯英文路径）"),
     ("C36", "所有磁盘路径/文件名纯 ASCII（中文只能出现在显示名里）"),
+    ("C37", "升级不沿用旧目录（UsePreviousAppDir=no）且清理旧中文目录"),
     ("C10", f"OutputBaseFilename={OUTPUT_BASENAME} 且纯 ASCII"),
     ("C11", "OutputDir 指向仓库根 dist\\"),
     ("C12", "PrivilegesRequired 合法（lowest = 免管理员）"),
@@ -943,6 +989,7 @@ def main(argv: list[str] | None = None) -> int:
     check_source_path(iss, rep, repo_root)
     check_no_hardcoded_paths(iss, rep)
     check_ascii_paths(iss, rep)
+    check_upgrade_keeps_ascii_dir(iss, rep)
     check_icons(iss, rep)
     check_tasks(iss, rep)
     check_registry(iss, rep)

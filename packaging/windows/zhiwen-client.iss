@@ -72,6 +72,16 @@ DefaultDirName={autopf}\{#MyAppDirName}
 DefaultGroupName={#MyAppDirName}
 DisableProgramGroupPage=yes
 
+; ⚠ 升级时**不要**沿用上次的安装目录。
+; Inno 默认 UsePreviousAppDir=yes：它从注册表读上次装在哪，然后装回那里。
+; 于是从旧版本（中文目录 知纹客户端）升级上来时，目录名仍然是中文 ——
+; 用户看到的"装完还是中文路径"就是这么来的，光改 DefaultDirName 没用。
+; 这里强制每次都用 DefaultDirName，保证升级后落在纯英文路径。
+UsePreviousAppDir=no
+UsePreviousGroup=no
+; 同理：不要复用上次的语言/任务选择，避免旧状态把新行为带过去
+UsePreviousTasks=yes
+
 ; lowest = 默认按当前用户装、不弹 UAC；想全局装就运行 setup /ALLUSERS。
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=commandline
@@ -155,6 +165,14 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram}"; Flags: now
 ; 也可以重跑安装程序把 autostart 取消（[Code] 段会顺手清掉旧值）。
 ; 只写 HKCU：免管理员安装也能生效，且只影响当前用户。
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ZhiwenClient"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
+
+[InstallDelete]
+; 老版本（≤0.4.0）装在中文目录里。升级到本版本后安装位置变成 ZhiwenClient，
+; 旧目录如果留着就是一份孤儿文件（卸载项指向新目录，旧文件再也删不掉）。
+; 这里在安装前清掉它 —— 目录名是我们自己创建的，不会误删别人的东西。
+Type: filesandordirs; Name: "{autopf}\知纹客户端"
+Type: filesandordirs; Name: "{group}\知纹客户端"
+Type: files; Name: "{autodesktop}\知纹客户端.lnk"
 
 [UninstallDelete]
 ; 安装目录整体删（含运行期掉进来的日志、临时文件）

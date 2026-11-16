@@ -128,3 +128,49 @@ def test_selftest_warns_on_chinese_path(tmp_path, monkeypatch):
         assert "纯英文" in report
     finally:
         cfg.reset_settings()
+
+
+def test_upgrade_does_not_reuse_previous_dir():
+    """升级不能沿用上次的安装目录。
+
+    这是"改了 DefaultDirName 但路径还是中文"的真正原因：Inno 默认
+    UsePreviousAppDir=yes，会从注册表读上次装在哪，然后原样装回去。
+    只改默认目录名对**升级用户**完全无效。
+    """
+    text = ISS.read_text(encoding="utf-8")
+    lower = text.lower()
+    assert "usepreviousappdir=no" in lower, "必须显式关掉，否则升级会沿用旧目录"
+    assert "usepreviousgroup=no" in lower, "开始菜单组同理"
+
+
+def test_installer_cleans_legacy_chinese_dir():
+    """安装时要清掉老版本留在中文目录里的文件。
+
+    不清理的话，升级后会有两份文件：卸载项指向新目录，
+    旧目录里的文件再也删不掉（用户只会看到磁盘里莫名其妙多一个中文文件夹）。
+    """
+    text = ISS.read_text(encoding="utf-8")
+    assert "[InstallDelete]" in text
+    assert r'Type: filesandordirs; Name: "{autopf}\知纹客户端"' in text
+    assert r'Type: filesandordirs; Name: "{group}\知纹客户端"' in text
+
+
+def test_install_delete_only_targets_known_legacy_paths():
+    """[InstallDelete] 里的中文路径必须是已知的历史遗留，不能随手加。
+
+    这一段是 C36（纯 ASCII）的**精确例外**：它只做删除、不创建路径。
+    这里把例外限制成"只能是那几个旧名字"，防止以后有人往里塞新中文路径。
+    """
+    text = ISS.read_text(encoding="utf-8")
+    block = text.split("[InstallDelete]", 1)[1].split("[", 1)[0]
+    allowed = {
+        r'"{autopf}\知纹客户端"',
+        r'"{group}\知纹客户端"',
+        r'"{autodesktop}\知纹客户端.lnk"',
+    }
+    for line in block.splitlines():
+        line = line.strip()
+        if not line.startswith("Type:"):
+            continue
+        value = line.split("Name:", 1)[1].strip()
+        assert value in allowed, f"InstallDelete 出现了未预期的路径：{line}"
