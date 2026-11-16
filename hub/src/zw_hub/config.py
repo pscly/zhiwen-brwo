@@ -72,7 +72,10 @@ class Settings:
     panel_session_ttl: int = field(default_factory=lambda: _env_int("ZW_PANEL_SESSION_TTL", 7 * 24 * 3600))
     # 新设备是否自动放行。个人自用 = True（只填 IP 就能用）；
     # 想审核就设 false，新设备会停在 pending，需要在面板里点放行。
-    auto_approve: bool = field(default_factory=lambda: _env_bool("ZW_DEVICE_AUTO_APPROVE", True))
+    # 新设备是否需要管理员在控制台上手动允许。
+    # 默认 **False**：用户明确要求"装好之后去服务端一个一个点允许"。
+    # 想恢复"填 IP 就能用"就设 ZW_DEVICE_AUTO_APPROVE=true。
+    auto_approve: bool = field(default_factory=lambda: _env_bool("ZW_DEVICE_AUTO_APPROVE", False))
 
     # ── 远程命令行（hub 侧）──────────────────────────────
     # 总开关。关掉之后管理员侧的命令行接口一律 403 SHELL_DISABLED ——

@@ -159,7 +159,36 @@ def _build_style(tk: Any, ttk: Any) -> dict[str, Any]:
                     font=small, padding=(8, 5))
     style.map("Ghost.TButton", background=[("active", CARD)], foreground=[("active", INK)])
     style.configure("TCheckbutton", background=BG, foreground=INK, font=body)
-    return {"body": body, "small": small, "tiny": tiny, "title": title, "bold": bold, "big": big}
+
+    # ── 环境 / 日志面板用的样式 ──
+    # 这两块塞在 640 宽的 tab 里，默认按钮的 padding（11,7）太占地，
+    # 一行里放"名称 + 徽章 + 分组 + 启动 + 删除"会挤爆；所以单独一套小号样式。
+    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 2, 0, 0))
+    style.configure("TNotebook.Tab", background=BG, foreground=DIM, borderwidth=0,
+                    font=small, padding=(14, 5))
+    style.map("TNotebook.Tab",
+              background=[("selected", CARD)],
+              foreground=[("selected", INK), ("active", INK)])
+    style.configure("Tiny.TButton", background=CARD2, foreground=INK, borderwidth=0,
+                    font=tiny, padding=(9, 4))
+    style.map("Tiny.TButton",
+              background=[("active", "#2a3140"), ("disabled", "#1a1f27")],
+              foreground=[("disabled", "#5d6675")])
+    style.configure("TinyAccent.TButton", background=ACC, foreground="#ffffff", borderwidth=0,
+                    font=tiny, padding=(10, 4))
+    style.map("TinyAccent.TButton",
+              background=[("active", "#6fabff"), ("disabled", "#2b323e")],
+              foreground=[("disabled", "#707a89")])
+    style.configure("Danger.TButton", background="#3a1f24", foreground=BAD, borderwidth=0,
+                    font=tiny, padding=(9, 4))
+    style.map("Danger.TButton", background=[("active", "#4a262c")],
+              foreground=[("active", "#ff9a9a")])
+    # 日志面板里的勾选框落在卡片底色上，不能沿用 BG 底色的 TCheckbutton
+    style.configure("Card.TCheckbutton", background=CARD, foreground=DIM, font=small,
+                    indicatorbackground="#0b0e12", indicatorforeground=ACC)
+    style.map("Card.TCheckbutton", background=[("active", CARD)], foreground=[("active", INK)])
+    return {"body": body, "small": small, "tiny": tiny, "title": title, "bold": bold,
+            "big": big, "mono": MONO_FAMILY}
 
 
 def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更难读
@@ -172,14 +201,26 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         print(f"这台机器上的 Python 没有 tkinter（{exc}），改用命令行模式。")
         return run_cli()
 
+    # 环境列表与日志面板在 gui_profiles 里。它自己也会 import tkinter，
+    # 所以只能放在"确认 tkinter 可用"之后再导入 —— 否则没装 tkinter 的机器
+    # 连命令行兜底模式都进不去（导入期就炸了）。
+    from zw_core.gui_profiles import CoreApi, LogPanel, ProfilePanel, Theme
+
     cfg = load_config()
     core = LocalCore(port=int(cfg.get("core_port") or 8730))
 
     root = tk.Tk()
     tk._default_root = root
     root.title(f"{APP_NAME} · 客户端")
-    root.geometry("640x600")
-    root.minsize(580, 540)
+    # 高度按屏幕算：1366×768 的笔记本上 720 再加标题栏，底部按钮会被任务栏吃掉，
+    # 所以封顶在"屏幕高 - 110"。下限 600 保证环境列表至少能看到几行。
+    try:
+        screen_h = int(root.winfo_screenheight())
+    except Exception:
+        screen_h = 900
+    win_h = max(600, min(720, screen_h - 110))
+    root.geometry(f"640x{win_h}")
+    root.minsize(600, 600)
     root.configure(bg=BG)
 
     pick_mono_font(root)
@@ -225,6 +266,13 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         state["events"].append((stamp, text, level))
         del state["events"][:-200]          # 只留最近 200 条
         render_events()
+        # 同时写一份到 stdout：GUI 程序在 Windows 上没有控制台，这里不会打扰用户，
+        # 但从命令行启动、或排障时（`zw client > log.txt`）能看到完整时间线。
+        try:
+            if sys.stdout is not None:
+                print(f"[{stamp}] {text}", flush=True)
+        except (AttributeError, ValueError, OSError):
+            pass
 
     # ── 顶部栏 ──────────────────────────────────────────
     header = ttk.Frame(root, padding=(20, 14, 20, 8))
@@ -326,14 +374,73 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         ttk.Label(cell, textvariable=var, style="Big.TLabel").pack(anchor="w")
         ttk.Label(cell, text=label, style="CardDim.TLabel").pack(anchor="w")
 
-    # 事件流
+    # ── 环境 / 日志（两块本地面板）───────────────────────
+    # 为什么用 Notebook 而不是继续往下堆：640 宽的单栏里，环境列表与日志
+    # 都是"要多行才看得清"的东西，硬堆会让两块都只剩一条缝。
+    # 分 tab 之后每一块都能拿到完整的剩余高度。
+    tabs = ttk.Notebook(main)
+    tabs.pack(fill="both", expand=True, pady=(10, 0))
+
+    api = CoreApi(port=core.port)
+    theme = Theme(bg=BG, card=CARD, card2=CARD2, ink=INK, dim=DIM, faint=FAINT,
+                  acc=ACC, ok=OK, warn=WARN, bad=BAD, line=LINE)
+
+    def diag_context() -> dict[str, Any]:
+        """「复制诊断信息」要的那几个值（版本/设备号/服务地址/端口）。"""
+        return {
+            "version": __version__,
+            "device_id": state.get("device_id") or "",
+            "server": state.get("base") or "",
+            "core_port": core.port,
+        }
+
+    def core_ready() -> bool:
+        """自动刷新前的门槛：本机服务没起来就别去打接口。
+
+        本机 core 是"连上服务器之后才起"的，而 tick 从第 1.2 秒就开始跑；
+        没有这道判断，每次启动都会先记一条"连不上本机服务"，看着像故障。
+        用户手动点刷新/切 tab 时**不走**这个判断（那是他的明确意图）。
+        """
+        return bool(state.get("core_on"))
+
+    profiles_panel = ProfilePanel(tabs, api=api, theme=theme, fonts=fonts,
+                                  on_log=log, on_changed=lambda: refresh_stats(),
+                                  enabled=core_ready)
+    log_panel = LogPanel(tabs, api=api, theme=theme, fonts=fonts, on_log=log,
+                         context=diag_context, enabled=core_ready)
+    tabs.add(profiles_panel, text="环境")
+    tabs.add(log_panel, text="日志")
+
+    def on_tab_changed(_event: Any = None) -> None:
+        """切到哪个 tab 就刷哪个。
+
+        日志面板不必在后台每 5 秒拉一次事件 —— 用户看着「环境」时那一屏
+        事件拉回来也没人看，白占本机 CPU 与 core 的那条 SQL。
+        """
+        # 本机服务没起来就别刷：Notebook 第一次显示时 Tk 也会发这个事件，
+        # 而那时 core 还在启动中，刷了只会记一条假的"连不上本机服务"。
+        if not state.get("core_on"):
+            return
+        try:
+            current = tabs.index(tabs.select())
+        except Exception:
+            return
+        if current == tabs.index(profiles_panel):
+            profiles_panel.refresh(force=True)
+        else:
+            log_panel.refresh(force=True)
+
+    tabs.bind("<<NotebookTabChanged>>", on_tab_changed)
+
+    # 客户端自己事件流（连没连上、注册失败、环境操作的原因都在这里）。
+    # 高度固定 5 行：它是常驻的"最近发生了什么"，不该把列表区挤掉。
     ev_card = ttk.Frame(main, style="Card.TFrame", padding=(14, 10))
-    ev_card.pack(fill="both", expand=True, pady=(10, 0))
+    ev_card.pack(fill="x", pady=(10, 0))
     ttk.Label(ev_card, text="最近事件", style="CardDim.TLabel").pack(anchor="w", pady=(0, 6))
     ev_wrap = tk.Frame(ev_card, bg=CARD)
     ev_wrap.pack(fill="both", expand=True)
     ev_text = tk.Text(ev_wrap, bg="#0b0e12", fg=DIM, bd=0, highlightthickness=0,
-                      font=(MONO_FAMILY, 9), wrap="word", state="disabled", height=7)
+                      font=(MONO_FAMILY, 9), wrap="word", state="disabled", height=5)
     ev_scroll = tk.Scrollbar(ev_wrap, command=ev_text.yview, bd=0, width=8)
     ev_text.configure(yscrollcommand=ev_scroll.set)
     ev_scroll.pack(side="right", fill="y")
@@ -354,17 +461,30 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             pass
 
     # ── 底部按钮 ────────────────────────────────────────
-    footer = ttk.Frame(root, padding=(20, 10, 20, 16))
+    # 拆成两行：640 宽放不下「打开控制台 + 自检 + 服务器面板 + 两个开关 + 退出」，
+    # 原来「退出」会被挤到窗口外（截图里根本看不到），用户只能去关窗口。
+    # 第一行放动作按钮，第二行放两个开关；「退出」先 pack(side="right")，
+    # pack 是按顺序分配空间的，先要的永远拿得到位置。
+    footer = ttk.Frame(root, padding=(20, 10, 20, 14))
     footer.pack(fill="x", side="bottom")
-    open_btn = ttk.Button(footer, text="打开控制台", style="Accent.TButton", command=lambda: open_console())
+    quit_btn = ttk.Button(footer, text="退出", command=lambda: do_quit())
+    quit_btn.pack(side="right")
+
+    action_row = ttk.Frame(footer)
+    action_row.pack(fill="x")
+    open_btn = ttk.Button(action_row, text="打开控制台", style="Accent.TButton",
+                          command=lambda: open_console())
     open_btn.pack(side="left")
     # 没连上时控制台根本不存在，开启这个按钮等于给用户一个必然失败的入口
     open_btn.state(["disabled"])
-    self_btn = ttk.Button(footer, text="自检", command=lambda: run_selftest())
+    self_btn = ttk.Button(action_row, text="自检", command=lambda: run_selftest())
     self_btn.pack(side="left", padx=(8, 0))
-    panel_btn = ttk.Button(footer, text="服务器面板", command=lambda: open_panel())
+    panel_btn = ttk.Button(action_row, text="服务器面板", command=lambda: open_panel())
     panel_btn.pack(side="left", padx=(8, 0))
     panel_btn.state(["disabled"])
+
+    toggle_row = ttk.Frame(footer)
+    toggle_row.pack(fill="x", pady=(6, 0))
 
     # 开机自启开关：用户要求"需要，但必须能在界面里关掉"。
     # 勾选状态从真实系统状态读（不是从配置读），
@@ -381,9 +501,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             return
         log(msg, "ok")
 
-    auto_chk = ttk.Checkbutton(footer, text="开机自启", variable=autostart_var,
-                              command=toggle_autostart)
-    auto_chk.pack(side="left", padx=(14, 0))
+    auto_chk = ttk.Checkbutton(toggle_row, text="开机自启", variable=autostart_var,
+                               command=toggle_autostart)
+    auto_chk.pack(side="left")
 
     def toggle_shell() -> None:
         """远程命令行开关。默认开；关掉后服务器再也拉不到命令。"""
@@ -412,18 +532,21 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     # 远程命令行开关：用户要求"默认开启，也能手动关闭"。
     # 默认 True；关掉后服务器侧拿不到命令，本机浏览器/控制台不受影响。
     state["shell_var"] = tk.BooleanVar(value=bool(cfg.get("shell_enabled", True)))
-    shell_chk = ttk.Checkbutton(footer, text="允许远程命令行", variable=state["shell_var"],
+    shell_chk = ttk.Checkbutton(toggle_row, text="允许远程命令行", variable=state["shell_var"],
                                 command=toggle_shell)
     shell_chk.pack(side="left", padx=(14, 0))
-    quit_btn = ttk.Button(footer, text="退出", command=lambda: do_quit())
-    quit_btn.pack(side="right")
+
+    # pack 是**按顺序**分配空间的：body 带 expand=True，先 pack 就会把剩余空间
+    # 全吃光，底部栏被排到窗口下沿之外 —— 640×720 下整行按钮（含「退出」）
+    # 直接看不见。把 footer 提到 body 之前 pack，它才永远拿得到自己那一行。
+    footer.pack_configure(before=body)
 
     # ── 状态切换 ────────────────────────────────────────
     def set_phase(phase: str, text: str) -> None:
         state["phase"] = phase
         status_text.set(text)
         color = {"connected": OK, "revoked": BAD, "error": BAD,
-                 "connecting": WARN}.get(phase, FAINT)
+                 "connecting": WARN, "pending": WARN}.get(phase, FAINT)
         try:
             badge.configure(fg=color)
         except Exception:
@@ -489,7 +612,12 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             messagebox.showerror("自检异常", f"{type(exc).__name__}: {exc}")
 
     def refresh_stats() -> None:
-        """定时刷本机统计与心跳健康度。取不到就显示 —。"""
+        """刷本机统计与心跳健康度。取不到就显示 —。
+
+        **这里不再自己 after(5000, 自己)**：定时统一由下面的 `tick()` 驱动。
+        原来每加一块要刷新的东西就多挂一个定时器，三个互不同步的节拍
+        既费心又难收拾；一个循环按顺序刷，谁慢谁快都只影响自己。
+        """
         # 心跳指标：让用户一眼看出"和服务器还连着吗"，而不是等出问题才发现
         hb = state.get("heartbeat")
         if hb is None:
@@ -524,8 +652,23 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             disk_used.set(str(st.get("disk_human", "—")))
         except Exception:
             pass
+
+    def tick() -> None:
+        """统一的 5 秒刷新节拍：统计 + 环境列表 + 事件。
+
+        两块面板各自决定"这一轮要不要真的发请求"：
+        面板没显示、用户正在输入浮层里打字、或上一个操作还在飞 → 整轮跳过。
+        所以"自动刷新"永远不会打断用户输入，也不会在启动浏览器那几十秒里
+        半路把列表重排一遍（用户会以为点空了）。
+        """
+        for job in (refresh_stats, profiles_panel.autorefresh, log_panel.autorefresh):
+            try:
+                job()
+            except Exception:
+                # 单个刷新失败不该拖垮整个节拍（否则一次异常就再也不刷新了）
+                pass
         try:
-            root.after(5000, refresh_stats)
+            root.after(5000, tick)
         except Exception:
             pass
 
@@ -591,6 +734,8 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             pass
 
     def connect() -> None:
+        state["stop_watch"] = False
+        state["approval_thread"] = None
         raw = server_var.get().strip()
         base = normalize_server(raw)
         if not base:
@@ -624,7 +769,14 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         if not res.get("ok"):
             code = res.get("code", "")
             set_phase("error", "注册失败")
-            if code == "DEVICE_REVOKED":
+            if code == "DEVICE_REJECTED":
+                log("服务器拒绝了这台电脑的接入请求。联系管理员在控制台里点「允许」。", "bad")
+                messagebox.showwarning(
+                    "被服务器拒绝",
+                    "这台电脑的接入请求被拒绝了。\n\n"
+                    "请联系管理员在服务器控制台里点「允许」，然后点「重连」。",
+                )
+            elif code == "DEVICE_REVOKED":
                 on_revoked()
             elif code == "UNAUTHENTICATED":
                 log("对接码不正确。", "bad")
@@ -643,6 +795,12 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             "token_required": bool(info.get("token_required")),
         })
         save_config(cfg)
+
+        # 服务器要人工授权时，这里拿到的是 pending。
+        # **仍然启动本机服务**：用户明确要求"哪怕没有授权，也可以被远程终端操控"，
+        # 而远程终端依赖的正是本机 core（它会在后台去服务器拉命令）。
+        dev_status = str(((res.get("device") or {}).get("status")) or "active")
+        state["approved"] = dev_status != "pending"
 
         log("正在启动本机浏览器服务 …")
         if not core.start(device_id=state["device_id"], hub_url=base):
@@ -669,20 +827,70 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
                 pass
             log("远程命令行按上次的设置保持关闭", "warn")
         start_heartbeat(base, token_var.get().strip(), int(res.get("heartbeat_seconds") or 60))
-        set_phase("connected", "已连接")
         show_setup(False)
         conn_server.configure(text=base)
         conn_dev.configure(text=state["device_id"][:32] + "…")
         open_btn.state(["!disabled"])
         panel_btn.state(["!disabled"])
         log(f"已连接：{base}", "ok")
-        log(f"服务器管理面板：{base}/panel", "info")
+        log(f"服务器主控台：{base}/", "info")
+
+        if state.get("approved", True):
+            set_phase("connected", "已连接")
+        else:
+            set_phase("pending", "等待服务器授权")
+            log("这台电脑还没被服务器允许。远程终端现在就能用，除此之外等管理员点「允许」。", "warn")
+            start_approval_watch(base, token_var.get().strip())
+
         log(f"控制台 http://127.0.0.1:{core.port}", "ok")
         refresh_stats()
+        # 刚连上就刷一遍两块本地面板：用户接下来最可能看的就是环境列表，
+        # 不该让他先盯着空列表等 5 秒。
+        profiles_panel.refresh(force=True)
+        log_panel.refresh()
         try:
             webbrowser.open(f"http://127.0.0.1:{core.port}")
         except Exception:
             pass
+
+    def start_approval_watch(base: str, token: str) -> None:
+        """后台等服务器授权。
+
+        为什么要轮询而不是长连接：授权是一次性动作，3 秒一次的 enroll 足够快，
+        而且 enroll 是幂等的（已存在的设备只刷新 last_seen），不需要新接口。
+        批准后自动切换成"已连接"，用户什么都不用点。
+        """
+        if state.get("approval_thread"):
+            return
+
+        def worker() -> None:
+            while not state.get("stop_watch"):
+                try:
+                    from zw_core.client import enroll as _enroll
+
+                    r = _enroll(base, state["device_id"], token, app_version=__version__)
+                except Exception:
+                    r = {"ok": False}
+                if r.get("ok"):
+                    st = str(((r.get("device") or {}).get("status")) or "")
+                    if st == "active":
+                        state["approved"] = True
+                        root.after(0, lambda: (
+                            set_phase("connected", "已连接"),
+                            log("服务器已授权，可以正常使用了。", "ok"),
+                        ))
+                        return
+                    if st in ("rejected", "revoked"):
+                        root.after(0, lambda: (
+                            set_phase("error", "已被拒绝"),
+                            log("服务器拒绝/移除了这台电脑。", "bad"),
+                        ))
+                        return
+                time.sleep(3)
+
+        t = threading.Thread(target=worker, name="zw-approval", daemon=True)
+        state["approval_thread"] = t
+        t.start()
 
     def address_failed(detail: str) -> None:
         tips = ("检查这几件事：\n"
@@ -692,6 +900,8 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         messagebox.showerror(APP_NAME, f"连不上服务器。\n\n{detail}\n\n{tips}")
 
     def disconnect() -> None:
+        state["stop_watch"] = True
+        state["approval_thread"] = None
         hb = state.get("heartbeat")
         if hb is not None:
             hb.stop()
@@ -798,6 +1008,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         root.after(1200, start_tray)
 
     render_events()
+    # 统一的刷新节拍从这一刻开始跑（1.2 秒先让窗口画出来，别和首帧抢时间）。
+    # 它同时负责：本机统计、环境列表、事件面板。
+    root.after(1200, tick)
     try:
         root.mainloop()
     finally:

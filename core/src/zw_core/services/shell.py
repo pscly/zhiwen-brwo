@@ -20,6 +20,11 @@
   面板要分色显示。
 - **工作目录默认不落到系统根**：`ZW_SHELL_CWD` 为空时用用户主目录，
   而不是 `C:\\` 或 `/` —— 在根目录跑 `rm`/`del` 太容易出事。
+- **子进程一律不弹控制台窗口**：这个模块起的 `cmd.exe` / `sh` 是控制台程序，
+  而客户端是 `console=False` 的 GUI 程序，裸调 `subprocess` 会在用户桌面上
+  闪一堆黑框（"远程执行一条命令 = 弹一个 CMD 窗口"）。所以统一走
+  `services/proc.py` 的 `popen_hidden` / `run_hidden`：`CREATE_NO_WINDOW`
+  隐藏的是**窗口**，不是管道，`stdout/stderr=PIPE` 的读写完全不受影响。
 
 ## 为什么不支持交互式命令
 
@@ -40,6 +45,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from .proc import popen_hidden, run_hidden
 
 logger = logging.getLogger("zw.shell")
 
@@ -138,7 +145,8 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         return
     if sys.platform == "win32":
         try:
-            subprocess.run(
+            # taskkill 也是控制台程序：不隐藏就会在桌面上闪一下
+            run_hidden(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 capture_output=True, timeout=10,
             )
@@ -234,6 +242,7 @@ def execute(
         "stderr": subprocess.PIPE,
     }
     if sys.platform == "win32":
+        # 进程组那一位由 proc 那层位或保留，不会被 CREATE_NO_WINDOW 覆盖
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
         kwargs["start_new_session"] = True
@@ -244,7 +253,8 @@ def execute(
 
     proc: subprocess.Popen | None = None
     try:
-        proc = subprocess.Popen(argv, **kwargs)  # noqa: S603  这是本模块的核心职责
+        # popen_hidden：Windows 上不弹控制台窗口；管道读写与进程组语义都不变
+        proc = popen_hidden(argv, **kwargs)  # noqa: S603  这是本模块的核心职责
         try:
             out_b, err_b = proc.communicate(timeout=tmo)
             result.rc = proc.returncode if proc.returncode is not None else -1

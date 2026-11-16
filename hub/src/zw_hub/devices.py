@@ -41,7 +41,8 @@ from typing import Any
 # 设备状态
 STATUS_PENDING = "pending"     # 首次注册，等待放行（当前策略下自动放行为 active）
 STATUS_ACTIVE = "active"       # 正常可用
-STATUS_REVOKED = "revoked"     # 已踢下线
+STATUS_REVOKED = "revoked"     # 已踢下线（可恢复）
+STATUS_REJECTED = "rejected"    # 管理员拒绝了接入请求（可改成允许）
 
 # 多久没心跳算离线（秒）。心跳间隔默认 60，这里给 3 倍余量。
 ONLINE_WINDOW = 180
@@ -203,8 +204,12 @@ class DeviceStore:
         app_version: str = "",
         label: str = "",
         ip: str = "",
+        approve: bool = True,
     ) -> dict[str, Any]:
         """设备注册或首次心跳。返回该设备当前记录。
+
+        `approve=False` 时新设备落在 `pending`，等管理员在控制台上点「允许」。
+        已存在的设备**不改 status**（否则踢下线/拒绝都能靠重连绕过）。
 
         已存在的设备：刷新 last_seen 与上报的元信息，**但不改 status** ——
         否则被踢掉的设备只要重连一次就复活了，踢下线就没意义了。
@@ -222,11 +227,13 @@ class DeviceStore:
                         "INSERT INTO devices(device_id,label,hostname,platform,arch,app_version,status,"
                         "first_seen,last_seen,last_ip) VALUES(?,?,?,?,?,?,?,?,?,?)",
                         (did, label or hostname or did[:8], hostname, platform, arch, app_version,
-                         STATUS_ACTIVE, now, now, ip),
+                         STATUS_ACTIVE if approve else STATUS_PENDING, now, now, ip),
                     )
                     c.execute(
                         "INSERT INTO device_events(ts,device_id,action,detail) VALUES(?,?,?,?)",
-                        (now, did, "enroll", json.dumps({"hostname": hostname, "platform": platform, "ip": ip}, ensure_ascii=False)),
+                        (now, did, "enroll" if approve else "pending",
+                         json.dumps({"hostname": hostname, "platform": platform, "ip": ip,
+                                     "approved": bool(approve)}, ensure_ascii=False)),
                     )
                     c.commit()
                     row = c.execute("SELECT * FROM devices WHERE device_id=?", (did,)).fetchone()
@@ -280,7 +287,15 @@ class DeviceStore:
                 c.close()
 
     def require_active(self, device_id: str) -> dict[str, Any]:
-        """校验设备状态。被踢掉的设备在这里被拦住。"""
+        """校验设备**已授权可用**。数据面（同步）用这个。
+
+        `active` 以外的状态一律拒绝：
+        - pending  → 还没被管理员允许（403 DEVICE_PENDING）
+        - rejected → 被管理员拒绝（403 DEVICE_REJECTED）
+        - revoked  → 被踢下线（403 DEVICE_REVOKED）
+
+        注意：心跳与远程命令走的是 `require_known`，未授权也能用 —— 那是刻意的，
+        见 `require_known` 的注释。"""
         if not device_id:
             raise DeviceError(401, "DEVICE_REQUIRED", "缺少 X-ZW-Device 头（客户端应在首次启动时自动生成并带上）")
         with self._lock:
@@ -294,6 +309,36 @@ class DeviceStore:
                         403, "DEVICE_REVOKED",
                         "这台设备已被服务器端踢下线。请联系管理员，或删除本机配置文件重新注册（会作为新设备出现）",
                     )
+                if row["status"] == STATUS_REJECTED:
+                    raise DeviceError(403, "DEVICE_REJECTED",
+                                      "这台设备被服务器端拒绝了接入请求。请联系管理员在控制台里放行")
+                if row["status"] == STATUS_PENDING:
+                    raise DeviceError(403, "DEVICE_PENDING",
+                                      "这台设备还在等待服务器授权。让管理员在控制台里点「允许」后重试")
+                return self._to_dict(row, time.time())
+            finally:
+                c.close()
+
+    def require_known(self, device_id: str) -> dict[str, Any]:
+        """只校验"这台设备登记过、且没被踢/拒绝"，**不要求已授权**。
+
+        为什么单独一条：用户要求"哪怕没有授权，也要能被远程终端操控"。
+        所以心跳、注册、远程命令走这条；只有同步（真正的数据面）才要求 active。
+        """
+        if not device_id:
+            raise DeviceError(401, "DEVICE_REQUIRED", "缺少 X-ZW-Device 头（客户端应在首次启动时自动生成并带上）")
+        with self._lock:
+            c = self._conn()
+            try:
+                row = c.execute("SELECT * FROM devices WHERE device_id=?", (device_id,)).fetchone()
+                if row is None:
+                    raise DeviceError(404, "DEVICE_UNKNOWN", f"设备未注册：{device_id}（先调 POST /v1/devices/enroll）")
+                if row["status"] == STATUS_REVOKED:
+                    raise DeviceError(403, "DEVICE_REVOKED",
+                                      "这台设备已被服务器端踢下线。请联系管理员，或删除本机配置文件重新注册")
+                if row["status"] == STATUS_REJECTED:
+                    raise DeviceError(403, "DEVICE_REJECTED",
+                                      "这台设备被服务器端拒绝了接入请求。请联系管理员在控制台里放行")
                 return self._to_dict(row, time.time())
             finally:
                 c.close()
@@ -336,6 +381,39 @@ class DeviceStore:
                 return self._to_dict(c.execute("SELECT * FROM devices WHERE device_id=?", (device_id,)).fetchone(), now)
             finally:
                 c.close()
+
+    def approve(self, device_id: str, actor: str = "") -> dict[str, Any]:
+        """允许接入：pending / rejected → active。"""
+        now = time.time()
+        with self._lock:
+            c = self._conn()
+            try:
+                cur = c.execute("UPDATE devices SET status=? WHERE device_id=?", (STATUS_ACTIVE, device_id))
+                if cur.rowcount == 0:
+                    raise DeviceError(404, "DEVICE_UNKNOWN", f"设备不存在：{device_id}")
+                c.execute("INSERT INTO device_events(ts,device_id,action,detail) VALUES(?,?,?,?)",
+                          (now, device_id, "approve", json.dumps({"by": actor}, ensure_ascii=False)))
+                c.commit()
+            finally:
+                c.close()
+            return self.require_known(device_id)
+
+    def reject(self, device_id: str, actor: str = "", note: str = "") -> dict[str, Any]:
+        """拒绝接入。**不是删除**：记录留着，管理员随时可以改成允许。"""
+        now = time.time()
+        with self._lock:
+            c = self._conn()
+            try:
+                cur = c.execute("UPDATE devices SET status=?, note=? WHERE device_id=?",
+                                (STATUS_REJECTED, note, device_id))
+                if cur.rowcount == 0:
+                    raise DeviceError(404, "DEVICE_UNKNOWN", f"设备不存在：{device_id}")
+                c.execute("INSERT INTO device_events(ts,device_id,action,detail) VALUES(?,?,?,?)",
+                          (now, device_id, "reject", json.dumps({"by": actor, "note": note}, ensure_ascii=False)))
+                c.commit()
+            finally:
+                c.close()
+            return self.require_known(device_id) if False else self.get(device_id) or {}
 
     def restore(self, device_id: str, actor: str = "") -> dict[str, Any]:
         now = time.time()
@@ -405,14 +483,21 @@ class DeviceStore:
                 active = c.execute("SELECT COUNT(*) AS n FROM devices WHERE status='active'").fetchone()["n"]
                 revoked = c.execute("SELECT COUNT(*) AS n FROM devices WHERE status='revoked'").fetchone()["n"]
                 online = c.execute(
-                    "SELECT COUNT(*) AS n FROM devices WHERE status='active' AND last_seen > ?", (now - ONLINE_WINDOW,)
+                    "SELECT COUNT(*) AS n FROM devices WHERE status IN ('active','pending') AND last_seen > ?",
+                    (now - ONLINE_WINDOW,)
                 ).fetchone()["n"]
                 # 只聚合"在线且可用"的设备：离线设备上报的旧数字没意义
+                # 用"在线"而不是"已授权"来算：一台还在等授权的机器，
+                # 它上面的浏览器是真的在跑，把它们算成 0 反而误导。
+                # 只排除被踢/被拒绝的（那些本来就该看不见具体数字）。
                 agg = c.execute(
                     "SELECT COALESCE(SUM(profiles),0) AS p, COALESCE(SUM(running),0) AS r FROM devices "
-                    "WHERE status='active' AND last_seen > ?", (now - ONLINE_WINDOW,)
+                    "WHERE status NOT IN ('revoked','rejected') AND last_seen > ?", (now - ONLINE_WINDOW,)
                 ).fetchone()
+                pending = c.execute("SELECT COUNT(*) AS n FROM devices WHERE status='pending'").fetchone()["n"]
+                rejected = c.execute("SELECT COUNT(*) AS n FROM devices WHERE status='rejected'").fetchone()["n"]
                 return {"total": total, "active": active, "revoked": revoked, "online": online,
+                        "pending": pending, "rejected": rejected,
                         "total_profiles": agg["p"], "total_running": agg["r"],
                         "online_window_seconds": ONLINE_WINDOW}
             finally:

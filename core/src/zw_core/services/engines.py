@@ -33,6 +33,7 @@ from typing import Any
 import httpx
 
 from ..config import Settings
+from .proc import popen_hidden, run_hidden
 
 IS_WIN = sys.platform == "win32"
 
@@ -197,7 +198,7 @@ def engine_version(bin_path: Path) -> str:
 
     Linux/macOS 的 Chrome 会把版本打到 stdout 然后退出；
     **Windows 的 chrome.exe 忽略 `--version`**：它照常启动浏览器（开窗口、
-    常驻进程），stdout 一直是空的。于是 `subprocess.run(timeout=20)` 一路
+    常驻进程），stdout 一直是空的。于是那次带 `timeout=20` 的 run 一路
     等到超时 —— 实测在 Windows 上每次启动都因此**卡满 20 秒**，
     客户端"本机服务"看起来就是起不来。
 
@@ -212,8 +213,9 @@ def engine_version(bin_path: Path) -> str:
 
     if sys.platform == "win32":
         # PowerShell 读 PE 的 ProductVersion，秒级返回，不会把浏览器拉起来
+        # 走 run_hidden：Windows 上 powershell 是控制台程序，裸调会闪黑框
         try:
-            out = subprocess.run(
+            out = run_hidden(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
                  f"(Get-Item -LiteralPath '{bin_path}').VersionInfo.ProductVersion"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
@@ -226,7 +228,7 @@ def engine_version(bin_path: Path) -> str:
         return "unknown"
 
     try:
-        out = subprocess.run(
+        out = run_hidden(
             [str(bin_path), "--version"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             stdin=subprocess.DEVNULL,
@@ -447,7 +449,12 @@ def spawn(cmdline: list[str], log_path: Path, env: dict[str, str] | None = None)
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(cmdline, **kwargs)
+    # gui_child=True：浏览器自己是 GUI 程序、要显示自己的窗口，所以
+    # 只让 proc 那层加 CREATE_NO_WINDOW（对 GUI 子系统程序系统会忽略它），
+    # 不设 STARTUPINFO 的 SW_HIDE —— 否则 nCmdShow 被 Chrome 当成
+    # "首个窗口别显示"，用户会以为浏览器没起来。这里的 creationflags
+    # 与 CREATE_NO_WINDOW 由 proc 位或合并，进程组那一位不会被覆盖。
+    proc = popen_hidden(cmdline, gui_child=True, **kwargs)
     # 父进程这边的句柄要立刻关掉，否则 core 重启后日志文件一直被占着
     try:
         fh.close()
@@ -492,7 +499,7 @@ def port_owner_pid(port: int) -> int:
         return 0
     if IS_WIN:
         try:
-            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
+            out = run_hidden(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
             for line in (out.stdout or "").splitlines():
                 parts = line.split()
                 if len(parts) >= 5 and parts[1].endswith(f":{port}") and parts[3].upper() == "LISTENING":
@@ -504,7 +511,7 @@ def port_owner_pid(port: int) -> int:
     # POSIX：优先 ss（最快、输出稳定）
     for cmd in (["ss", "-ltnp"], ["/usr/sbin/ss", "-ltnp"], ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"]):
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
+            out = run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8)
         except (OSError, subprocess.SubprocessError):
             continue
         text = out.stdout or ""
@@ -532,7 +539,7 @@ def is_our_browser(pid: int, profiles_root: Path) -> bool:
     if IS_WIN:
         try:
             ps = f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
-            out = subprocess.run(
+            out = run_hidden(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
             )
@@ -646,12 +653,12 @@ def terminate(pid: int, grace: int = 6) -> str:
         try:
             os.kill(pid, signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
         except Exception:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T"], capture_output=True)
+            run_hidden(["taskkill", "/PID", str(pid), "/T"], capture_output=True)
         for _ in range(grace * 4):
             if not pid_alive(pid):
                 return "sigbreak"
             time.sleep(0.25)
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        run_hidden(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         return "taskkill"
     try:
         os.kill(pid, signal.SIGTERM)
@@ -672,7 +679,7 @@ def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if IS_WIN:
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        out = run_hidden(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace")
         return str(pid) in (out.stdout or "")
     try:
         os.kill(pid, 0)
@@ -803,7 +810,7 @@ def list_browser_processes(profiles_root: Path) -> list[dict[str, Any]]:
                 "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' OR Name='chromium.exe'\" "
                 "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
             )
-            out = subprocess.run(
+            out = run_hidden(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
             )

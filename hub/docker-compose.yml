@@ -7,7 +7,7 @@ name: zw-hub
 services:
   hub:
     build: .
-    image: zw-hub:0.5.0
+    image: zw-hub:0.6.0
     # 目标机器上可能没有外网（或很慢）。镜像由 deploy 脚本用
     # docker save/load 送过去，所以这里禁止 compose 去 registry 拉。
     pull_policy: never
@@ -37,7 +37,7 @@ services:
       ZW_PANEL_USER: ${ZW_PANEL_USER:-admin}
       ZW_PANEL_PASSWORD: ${ZW_PANEL_PASSWORD:-1234}
       # 新设备自动放行：客户端只填 IP 就能用
-      ZW_DEVICE_AUTO_APPROVE: ${ZW_DEVICE_AUTO_APPROVE:-true}
+      ZW_DEVICE_AUTO_APPROVE: ${ZW_DEVICE_AUTO_APPROVE:-false}
       # 来源网段白名单。**必须在这里透传**：只写进 .env 没用 ——
       # compose 的 environment 是一份显式清单，没列出来的变量不会进容器。
       # 这个坑真踩过：.env 里设了 192.168.3.0/24，容器里却读不到，

@@ -17,6 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .proc import run_hidden
+
 
 _IS_WIN = sys.platform == "win32"
 
@@ -31,9 +33,10 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if _IS_WIN:
-        # tasklist 是最稳的（无需权限，输出可解析）；ctypes 更快但要多写一层
+        # tasklist 是最稳的（无需权限，输出可解析）；ctypes 更快但要多写一层。
+        # 走 run_hidden：这是探活路径，每几秒一次，裸调会让桌面上不停闪黑框。
         try:
-            out = subprocess.run(
+            out = run_hidden(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
             )

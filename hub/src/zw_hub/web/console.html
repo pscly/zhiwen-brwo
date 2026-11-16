@@ -1100,9 +1100,11 @@ function renderKpis(){
   const browsers = (t.browsers != null) ? num(t.browsers) : machines.reduce((s, m) => s + m.browsers.length, 0);
   const running = (t.running != null) ? num(t.running) : machines.reduce((s, m) => s + m.running, 0);
   const total = (t.machines != null) ? num(t.machines) : machines.length;
+  const pending = num(t.pending || 0);
   const items = [
     ['机器', total, '在册设备（含离线、含已踢）'],
     ['在线', online, '180 秒内有心跳'],
+    ['待授权', pending, pending ? '等你点「允许」' : '没有待处理的设备'],
     ['浏览器', browsers, '已上报的环境数'],
     ['运行中', running, '正在跑的环境'],
   ];
@@ -1158,6 +1160,8 @@ function buildCard(dev){
     '<div class="mach-acts">',
     '  <button class="btn sm" type="button" data-act="term">终端</button>',
     '  <a class="btn sm" data-r="open" target="_blank" rel="noopener noreferrer">打开控制台</a>',
+    '  <button class="btn sm primary" type="button" data-act="approve" hidden>允许</button>',
+    '  <button class="btn sm warn" type="button" data-act="reject" hidden>拒绝</button>',
     '  <button class="btn sm danger" type="button" data-act="revoke">踢下线</button>',
     '  <button class="btn sm" type="button" data-act="restore" hidden>恢复</button>',
     '  <button class="btn sm" type="button" data-act="rename">改名</button>',
@@ -1181,6 +1185,8 @@ function buildCard(dev){
     open: root.querySelector('[data-r="open"]'),
     termhost: root.querySelector('[data-r="termhost"]'),
     termBtn: root.querySelector('[data-act="term"]'),
+    approveBtn: root.querySelector('[data-act="approve"]'),
+    rejectBtn: root.querySelector('[data-act="reject"]'),
     revokeBtn: root.querySelector('[data-act="revoke"]'),
     restoreBtn: root.querySelector('[data-act="restore"]'),
     copyBtn: root.querySelector('[data-act="copy-code"]'),
@@ -1200,15 +1206,26 @@ function fillCard(card, dev){
   r.sub.textContent = bits.join(' · ') || '未上报机型信息';
 
   const revoked = dev.status === 'revoked';
-  const online = dev.online && !revoked;
-  r.dot.className = 'pulse' + (revoked ? ' err' : online ? '' : ' off');
-  r.dot.title = revoked ? '已踢下线' : online ? '在线' : '离线';
+  const pending = dev.status === 'pending';
+  const rejected = dev.status === 'rejected';
+  const blocked = revoked || rejected;
+  const online = dev.online && !blocked;
+  r.dot.className = 'pulse' + (blocked ? ' err' : pending ? ' warn' : online ? '' : ' off');
+  r.dot.title = revoked ? '已踢下线' : rejected ? '已被拒绝' : pending ? '等待授权' : online ? '在线' : '离线';
 
   // 徽章是纯静态字符串，不含用户数据
   const bg = [];
   if (revoked) bg.push('<span class="badge bad">已踢下线</span>');
+  else if (rejected) bg.push('<span class="badge bad">已拒绝</span>');
+  else if (pending) bg.push('<span class="badge warn">等待授权</span>');
   else if (online) bg.push('<span class="badge ok">在线</span>');
   else bg.push('<span class="badge">离线</span>');
+  // 终端通道是否就绪：设备最近有没有来拉命令。用户抱怨"下发没反应"时，
+  // 这个徽章能立刻区分"设备没在拉"还是"命令本身有问题"。
+  if (dev.shell_enabled === true && dev.shell_polling === true)
+    bg.push('<span class="badge ok">终端就绪</span>');
+  else if (dev.shell_enabled === true && dev.shell_polling === false)
+    bg.push('<span class="badge warn" title="设备没有来拉取命令：可能是客户端版本太老、命令行开关被关，或本机服务没起来">终端未连接</span>');
   if (dev.shell_enabled === true) bg.push('<span class="badge ok">命令行开</span>');
   else if (dev.shell_enabled === false) bg.push('<span class="badge bad">命令行关</span>');
   if (dev.core_base && dev.core_reachable === false) bg.push('<span class="badge warn">控制台不可直连</span>');
@@ -2047,6 +2064,22 @@ $('#mach-list').addEventListener('click', async (ev) => {
     }
     if (act === 'copy-code'){ await copy(dev.device_id, '已复制机器码'); return; }
 
+    if (act === 'approve'){
+      await api('POST', '/panel/api/devices/' + enc(id) + '/approve', {});
+      toast(name + ' 已允许接入', 'ok');
+      await refresh({});
+      return;
+    }
+    if (act === 'reject'){
+      askConfirm('拒绝「' + name + '」？',
+        '拒绝后这台电脑的同步会被拒绝，但**远程终端仍然可用**（方便你在授权前先上去看看）。记录会保留，随时能改成允许。',
+        async () => {
+          await api('POST', '/panel/api/devices/' + enc(id) + '/reject', { note: '主控台手动拒绝' });
+          toast(name + ' 已拒绝', 'ok');
+          await refresh({});
+        }, '拒绝');
+      return;
+    }
     if (act === 'revoke'){
       askConfirm('把「' + name + '」踢下线？',
         '踢下线后这台电脑立即连不上服务器：心跳、同步、远程命令都会返回 403 DEVICE_REVOKED。随时可以点「恢复」放回来。',

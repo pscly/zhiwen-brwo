@@ -140,7 +140,8 @@ def test_panel_rename_and_delete(hub):
 def test_enroll_info_reports_no_token_required(hub):
     d = hub.get("/v1/enroll-info").json()["data"]
     assert d["token_required"] is False, "默认形态是不要对接码"
-    assert d["auto_approve"] is True
+    # 默认改成"要管理员手动允许"（用户要求：装好之后去服务器一台一台点允许）
+    assert d["auto_approve"] is False
     assert d["enroll_endpoint"] == "/v1/devices/enroll"
 
 

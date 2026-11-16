@@ -258,6 +258,7 @@ def ai_manifest() -> dict[str, Any]:
                 "占用环境": "POST /v1/leases/{pid} → 定期 POST /v1/leases/{pid}/heartbeat → DELETE /v1/leases/{pid}?owner=",
                 "远程命令": "POST /v1/devices/{device_id}/shell → 设备 GET /v1/devices/shell/next → 设备 POST /v1/devices/shell/{job_id}/result",
                 "先看有什么": "GET /v1/console/overview → 拿到在线机器、每台的浏览器清单与 CDP 地址；再决定调 shell 还是连 CDP",
+                "允许一台新机器接入": "控制台里点「允许」；接口是 POST /v1/console/machines/{device_id}/approve。未允许前它不能同步，但**远程终端可用**",
                 "接管某个浏览器": "从 overview 里取该浏览器的 cdp_ws，用 Playwright 的 connectOverCDP 连上去；core_base 不可达时改用远程终端在那台机器上操作",
             },
             "errors": {
@@ -269,6 +270,8 @@ def ai_manifest() -> dict[str, Any]:
                 "SHELL_DISABLED": "服务器端关掉了远程命令行（ZW_SHELL_ENABLED=false）",
                 "SHELL_QUEUE_FULL": "该设备排队中的命令到顶（默认 200 条），等它执行完再投",
                 "SHELL_JOB_NOT_FOUND": "没有这条命令，或它属于别的设备",
+                "DEVICE_PENDING": "设备已注册但管理员还没点「允许」。同步会被拒，心跳与远程终端仍可用",
+                "DEVICE_REJECTED": "管理员拒绝了这台设备的接入请求",
             },
             "安全模型": "hub 只存 AEAD 密文；主密码不进 hub；传输为局域网 HTTP，完整性由密文自身保证。"
                         "主控台与 /v1/console/* 需要面板会话或 Bearer 令牌；不要暴露到公网",
@@ -298,6 +301,8 @@ def ai_manifest() -> dict[str, Any]:
                 # ── 主控台（机器 / 浏览器 / 令牌，契约见 docs/15）──
                 {"method": "GET", "path": "/v1/console/overview", "desc": "机器 + 浏览器 + 总数（AI 想知道有哪些机器/浏览器就调这个）"},
                 {"method": "GET", "path": "/v1/console/secrets", "desc": "令牌区（明文，敏感，仅管理员）"},
+                {"method": "POST", "path": "/v1/console/machines/{device_id}/approve", "desc": "允许一台设备接入（pending/rejected → active）"},
+                {"method": "POST", "path": "/v1/console/machines/{device_id}/reject", "desc": "拒绝一台设备的接入请求（记录保留，可再允许）"},
                 {"method": "GET", "path": "/", "desc": "主控台页面（人看；AI 用 /v1/console/overview）"},
             ],
         }
@@ -503,6 +508,7 @@ def enroll(body: EnrollBody, request: Request) -> dict[str, Any]:
         app_version=body.app_version,
         label=body.label,
         ip=_client_ip(request),
+        approve=bool(get_settings().auto_approve),
     )
     if rec["status"] == "revoked":
         raise DeviceError(403, "DEVICE_REVOKED", "这台设备已被服务器端踢下线，请联系管理员恢复")
@@ -525,7 +531,9 @@ def device_heartbeat(
     """心跳。可捎带本机概况（profiles / running / disk_human / engine），
     让服务器面板能显示"这台机器上有几个环境在跑"，而不只是"在线"。"""
     dev_id = x_zw_device or request.headers.get("x-zw-device", "")
-    devices().require_active(dev_id)
+    # 用 require_known 而不是 require_active：未授权的设备也要能上报状态
+    # （控制台要显示"它在等授权"、并上报 shell_enabled 与浏览器清单）。
+    devices().require_known(dev_id)
     stats = body if isinstance(body, dict) else None
     rec = devices().touch(dev_id, ip=_client_ip(request), stats=stats)
     return ok({"device": rec, "server_time": time.time()})
@@ -727,6 +735,9 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
             "engine": d.get("engine", ""),
             "core_base": base,
             "core_reachable": reachable,
+            # 终端是否就绪：设备最近有没有来拉过命令
+            "shell_last_poll_ago": shell_poll_age(d.get("device_id", "")),
+            "shell_polling": _shell_polling(d.get("device_id", "")),
             "browsers": browsers,
         })
 
@@ -747,6 +758,8 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
             "machines": st.get("total", 0),
             "online": st.get("online", 0),
             "revoked": st.get("revoked", 0),
+            "pending": st.get("pending", 0),
+            "rejected": st.get("rejected", 0),
             "browsers": total_browsers,
             "running": total_running,
         },
@@ -754,6 +767,20 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
         "events": devices().events(limit=50),
         "shell": shell_queue().stats(),
     })
+
+
+@app.post("/v1/console/machines/{device_id}/approve", summary="允许一台设备接入")
+def console_approve(device_id: str, request: Request) -> dict[str, Any]:
+    who = admin_auth(request)
+    return ok({"device": devices().approve(device_id, actor=who)})
+
+
+@app.post("/v1/console/machines/{device_id}/reject", summary="拒绝一台设备的接入请求")
+def console_reject(device_id: str, request: Request,
+                   body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    who = admin_auth(request)
+    note = str((body or {}).get("note") or "")
+    return ok({"device": devices().reject(device_id, actor=who, note=note)})
 
 
 @app.get("/v1/console/secrets", summary="主控台令牌区（敏感）")
@@ -807,6 +834,25 @@ def panel_revoke(device_id: str, request: Request, body: dict[str, Any] | None =
     return ok(rec)
 
 
+@app.post("/panel/api/devices/{device_id}/approve", dependencies=[PanelAuth], include_in_schema=False)
+def panel_device_approve(device_id: str, request: Request) -> dict[str, Any]:
+    """允许这台设备接入（pending/rejected → active）。"""
+    who = get_settings().panel_user
+    rec = devices().approve(device_id, actor=who)
+    logger.info("面板允许设备接入 device=%s by=%s", device_id, who)
+    return ok({"device": rec})
+
+
+@app.post("/panel/api/devices/{device_id}/reject", dependencies=[PanelAuth], include_in_schema=False)
+def panel_device_reject(device_id: str, request: Request, body: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    """拒绝接入。记录保留，随时可以改成允许。"""
+    who = get_settings().panel_user
+    note = str((body or {}).get("note") or "")
+    rec = devices().reject(device_id, actor=who, note=note)
+    logger.info("面板拒绝设备接入 device=%s by=%s", device_id, who)
+    return ok({"device": rec})
+
+
 @app.post("/panel/api/devices/{device_id}/restore", dependencies=[PanelAuth], include_in_schema=False)
 def panel_restore(device_id: str, request: Request) -> dict[str, Any]:
     rec = devices().restore(device_id, actor=panel_auth(request))
@@ -855,6 +901,38 @@ def panel_events(limit: int = 100) -> dict[str, Any]:
 def _device_id_of(request: Request) -> str:
     """设备身份。与心跳一致：只认 `X-ZW-Device` 头。"""
     return (request.headers.get("x-zw-device") or "").strip()
+
+
+# device_id -> 最近一次拉命令的时间戳（内存）。重启后清空无妨。
+_SHELL_POLLS: dict[str, float] = {}
+_SHELL_POLL_LOCK = threading.Lock()
+
+
+def _mark_shell_poll(device_id: str) -> None:
+    with _SHELL_POLL_LOCK:
+        _SHELL_POLLS[device_id] = time.time()
+
+
+def shell_poll_age(device_id: str) -> float | None:
+    """这台设备距上次来拉命令过了多少秒；从没拉过返回 None。
+
+    这个数字是排障的核心：用户说"下发命令没反应"时，
+      - None 或很大 → 设备侧的命令行代理没在跑（客户端没连上/开关关了/版本太老）
+      - 很小       → 设备在拉，问题在别处（命令报错、被别的 job 挡住）
+    """
+    with _SHELL_POLL_LOCK:
+        ts = _SHELL_POLLS.get(device_id)
+    return None if ts is None else max(0.0, time.time() - ts)
+
+
+def _shell_polling(device_id: str, window: float = 90.0) -> bool:
+    """设备在最近 window 秒内拉过命令 = 终端通道是通的。
+
+    90 秒是因为设备的长轮询是 25 秒一轮、失败退避最长 30 秒，
+    留足冗余：真掉线 90 秒内一定能看出来。
+    """
+    age = shell_poll_age(device_id)
+    return age is not None and age < window
 
 
 def _require_shell_enabled() -> None:
@@ -916,7 +994,12 @@ def device_shell_next(request: Request, wait: float = 25.0) -> dict[str, Any]:
     """
     _require_shell_enabled()
     dev = _device_id_of(request)
-    devices().require_active(dev)          # 被踢的设备在这里 403 DEVICE_REVOKED
+    # 未授权（pending）也要能取命令 —— 用户明确要求"没有授权也能被远程终端操控"。
+    # 被踢/被拒绝的设备仍然 403（require_known 会拦住）。
+    devices().require_known(dev)
+    # 记录"这台设备最近一次来拉命令的时间"：控制台据此显示终端是否就绪，
+    # 用户抱怨"下发命令没反应"时，一眼能看出是"设备没在拉"还是"命令没投出去"。
+    _mark_shell_poll(dev)
     return ok({"job": shell_queue().next_job(dev, wait=wait)})
 
 
@@ -932,7 +1015,8 @@ def device_shell_result(
     拒收只会让那条 job 永远停在 running。开关的作用是"不许再下发"。
     """
     dev = _device_id_of(request)
-    devices().require_active(dev)
+    devices().require_known(dev)
+    _mark_shell_poll(dev)
     payload = body if isinstance(body, dict) else {}
     shell_queue().complete(
         job_id,
@@ -961,7 +1045,9 @@ def shell_submit(
     命令行里经常带密码，日志不该成为泄漏渠道（协议 §5.3）。
     """
     _require_shell_enabled()
-    devices().require_active(device_id)
+    # 未授权（pending）的设备也允许被投递命令 —— 与设备侧一致：
+    # "授权"管的是同步，不是"能不能被管理员操作"。
+    devices().require_known(device_id)
     payload = body if isinstance(body, dict) else {}
     job = shell_queue().submit(
         device_id,

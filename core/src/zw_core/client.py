@@ -104,8 +104,13 @@ def _restrict_file(p: Path) -> None:
         if not user:
             return
         try:
+            # 延迟导入：这个文件也会被 PyInstaller 当脚本直接执行，顶层只放标准库。
+            # icacls 是控制台程序，裸调会在 GUI 客户端上闪一个黑框，
+            # 所以走 services/proc.py 的统一入口。
+            from zw_core.services.proc import run_hidden
+
             # /inheritance:r 断开继承（否则 Everyone 仍能读）
-            subprocess.run(
+            run_hidden(
                 ["icacls", str(p), "/inheritance:r", "/grant:r", f"{user}:F"],
                 capture_output=True, timeout=15, check=False,
             )
@@ -310,6 +315,61 @@ def enroll(base: str, device_id: str, token: str = "", app_version: str = "") ->
             return {"ok": False, "code": code, "error": msg}
     except Exception as exc:
         return {"ok": False, "code": "UNREACHABLE", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def wait_for_approval(
+    base: str,
+    device_id: str,
+    token: str = "",
+    timeout: float = 0.0,
+    interval: float = 3.0,
+    on_tick: Any = None,
+) -> dict[str, Any]:
+    """等服务器授权。
+
+    用户要的流程是：客户端装好 → 显示"等待服务器授权" → 管理员在控制台上点允许
+    → 客户端**自动**继续，不用再操作。
+
+    做法就是周期性地重新调 `POST /v1/devices/enroll`（注册是幂等的，
+    已存在的设备只会刷新 last_seen，不改变 status），直到返回的 status 变成
+    `active`。`timeout=0` 表示一直等（默认），调用方一般传 0 由用户手动取消。
+
+    返回：
+      {"ok": True, "status": "active"|"pending"|"rejected"|"revoked", "device": {...}}
+      {"ok": False, "code": ..., "error": ...}
+    """
+    import time as _time
+
+    started = _time.time()
+    while True:
+        res = enroll(base, device_id, token, app_version=_app_version())
+        if not res.get("ok"):
+            code = res.get("code", "")
+            # 被拒绝/被踢是终态，继续轮询没有意义，直接把结论交给界面
+            if code in ("DEVICE_REJECTED", "DEVICE_REVOKED"):
+                return {"ok": True, "status": "rejected" if code == "DEVICE_REJECTED" else "revoked",
+                        "code": code, "error": res.get("error", "")}
+            return {"ok": False, "code": code, "error": res.get("error", "")}
+        status = str(((res.get("device") or {}).get("status")) or "active")
+        if callable(on_tick):
+            try:
+                on_tick(status)
+            except Exception:
+                pass
+        if status != "pending":
+            return {"ok": True, "status": status, "device": res.get("device") or {}}
+        if timeout and (_time.time() - started) >= timeout:
+            return {"ok": True, "status": "pending", "device": res.get("device") or {}}
+        _time.sleep(interval)
+
+
+def _app_version() -> str:
+    try:
+        from zw_core import __version__
+
+        return __version__
+    except Exception:
+        return ""
 
 
 def heartbeat(
