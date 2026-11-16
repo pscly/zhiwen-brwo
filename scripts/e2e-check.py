@@ -39,6 +39,13 @@ from urllib.parse import quote
 
 import httpx
 
+# Windows 默认控制台编码编不了中文与 ✅，先修一下再输出
+try:
+    for _s in (sys.stdout, sys.stderr):
+        _s.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+except (AttributeError, ValueError, OSError):
+    pass
+
 CORE = os.environ.get("ZW_CORE", "http://127.0.0.1:8730")
 TOKEN = os.environ.get("ZW_ADMIN_TOKEN", "")
 PW = os.environ.get("ZW_SYNC_PASSWORD", "")

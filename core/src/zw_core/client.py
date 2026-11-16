@@ -807,6 +807,9 @@ def selftest(show_dialog: bool = True) -> int:
 
 
 def main() -> int:
+    from zw_core.console import setup_console
+
+    setup_console()
     if "--selftest" in sys.argv:
         return selftest()
     return run_gui()

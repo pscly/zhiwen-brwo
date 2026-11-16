@@ -779,6 +779,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # 先修控制台编码：Windows 默认代码页编不了 ✅ 这类符号，
+    # `zw doctor` 会直接 UnicodeEncodeError 崩掉（用户在 Windows 上的第一条命令）。
+    from zw_core.console import setup_console
+
+    setup_console()
     parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, "cmd", None):

@@ -54,11 +54,37 @@
 | **部署脚本 `build \| tail` 丢退出码** | 管道让 `if` 永远为真，可能拿旧镜像重建。改为显式判断 |
 | **镜像在目标机上 build** | 3.5 连 PyPI 极慢（单次 7.4 秒），pip 常断流。改为**本机构建 + save/scp/load**，目标机 `pull_policy: never` 绝不联网 |
 
+### Windows 控制台编码（第三次踩同一个坑，这次从根上治）
+
+CLI / 客户端 / 自检脚本 / 安装脚本检查器都会打印中文与 ✅ ❌ ⚠️。
+Windows 默认控制台编码是系统代码页：中文系统 cp936（中文能显示但 ✅ 不行）、
+英文系统 cp1252（连中文都不行）。CI 上已因此挂过两次，
+而用户 Windows 上的**第一条命令** `zw doctor` 就会崩。
+
+新增 `zw_core/console.py::setup_console()`：把 stdout/stderr 强制 UTF-8，
+编不了的字符降级成 `?` 而不是抛异常。CLI、客户端、`e2e-check.py`、
+`check-iss.py` 全部接入；CI 两个 workflow 也设了
+`PYTHONIOENCODING=utf-8` / `PYTHONUTF8=1` 作为双保险。
+
+实测对照：不修的话 `print('✅')` 在 cp1252 下直接
+`UnicodeEncodeError: 'charmap' ...`；修了之后正常输出。
+
 ### 测试
 
-200 → **211 项**（新增 `test_client_extra.py` 12 项：自启往返/幂等/命令形状、
+200 → **222 项**（新增 `test_client_extra.py` 12 项：自启往返/幂等/命令形状、
 字体探测返回形状、gui 模块可导入、run_gui 委托、心跳带统计/不带统计；
-`test_panel_api.py` 新增 3 项：心跳携带统计、空心跳不清零、被踢设备带统计也拒）。
+`test_panel_api.py` 新增 3 项：心跳携带统计、空心跳不清零、被踢设备带统计也拒；
+`test_console_encoding.py` 7 项：非 UTF-8 流会被改、UTF-8 不动、force 覆盖、
+没有 reconfigure 的流不崩、stdout 为 None 不崩、CLI 入口先修编码）。
+
+另外修了两条**只在 CI 上才暴露**的测试缺陷：
+- 自启的 .desktop 断言写成 `"zhiwen" in body` —— 本机能过纯粹因为仓库目录叫
+  `zhiwen_brwo`（`sys.executable` 里带这个词），CI 路径不同就失败。
+  改为断言产品标记 `zw_core.client` 与 `Name=知纹客户端`。
+- 同一条测试只按 Linux 写（断言 XDG 的 .desktop），macOS 上写的是
+  LaunchAgents plist，必然失败。改为按平台选路径与断言，并新增
+  `test_macos_autostart_plist_branch` 用 monkeypatch 掰 `sys.platform`，
+  让 macOS 分支在 Linux 上也能验。
 
 ## 0.3.0 — 2026-11-16
 

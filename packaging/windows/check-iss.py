@@ -34,6 +34,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+# 这个脚本会往 stdout 打中文。Windows 默认控制台编码是系统代码页
+# （英文系统 cp1252、中文系统 cp936），直接 print 中文会
+# UnicodeEncodeError: 'charmap' codec can't encode characters —— CI 上真挂过。
+# 强制 UTF-8，并把不认识的字符降级成 ? 而不是崩。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError, OSError):
+        pass
+
 # ── 常量：本项目的硬约定，改这些等于改契约 ────────────────────────────────
 APP_NAME = "知纹客户端"
 APP_PUBLISHER = "pscly"
