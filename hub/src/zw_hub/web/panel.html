@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>知纹 · 服务器端管理</title>
 <style>
+  .banner{background:#4a2f0f;color:#ffd08a;border:1px solid #8a5a1a;border-radius:10px;
+    padding:10px 14px;margin:0 auto 14px;max-width:1100px;font-size:13px;line-height:1.6}
+  .banner code{background:#2a1c08;padding:1px 5px;border-radius:4px;font-size:12px}
   :root{
     --bg:#0b0d12; --ink:#e8ebf2; --ink-2:#a8b0c0; --ink-3:#6f7889;
     --line:rgba(255,255,255,.08); --line-2:rgba(255,255,255,.14);
@@ -110,6 +113,13 @@
 </style>
 </head>
 <body>
+
+<!-- 默认凭据提醒（仍在用 admin/1234 时显示） -->
+<div id="warnDefault" class="banner" hidden>
+  正在使用默认账号密码（admin / 1234），任何人都能登进来。改法：编辑服务器上的
+  <code>.env</code>，设置 <code>ZW_PANEL_USER</code> 与 <code>ZW_PANEL_PASSWORD</code>，
+  再执行 <code>docker compose up -d</code>。
+</div>
 
 <!-- 登录层 -->
 <div id="login">
@@ -413,6 +423,10 @@ document.getElementById('dlg-ok').addEventListener('click', async () => {
 async function boot(){
   try {
     const meta = await api('GET', '/panel/api/meta');
+    try {
+      const w = document.getElementById('warnDefault');
+      if (w) w.hidden = !meta.default_credentials;
+    } catch (_) {}
     document.getElementById('hub-ver').textContent = 'v' + (meta.version || '') + ' · ' + (meta.data_dir || '');
   } catch (_) { /* 无关紧要 */ }
   await loadAll();

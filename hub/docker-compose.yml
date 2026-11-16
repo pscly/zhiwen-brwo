@@ -34,8 +34,8 @@ services:
       ZW_LOG_LEVEL: "INFO"
       # 局域网内简单完整性校验：默认关闭，需要时设 true 并配 secret
       # 管理面板登录（可用 .env 覆盖）
-      ZW_PANEL_USER: ${ZW_PANEL_USER:-pscly}
-      ZW_PANEL_PASSWORD: ${ZW_PANEL_PASSWORD:-REDACTED_PANEL_PASSWORD}
+      ZW_PANEL_USER: ${ZW_PANEL_USER:-admin}
+      ZW_PANEL_PASSWORD: ${ZW_PANEL_PASSWORD:-1234}
       # 新设备自动放行：客户端只填 IP 就能用
       ZW_DEVICE_AUTO_APPROVE: ${ZW_DEVICE_AUTO_APPROVE:-true}
       ZW_REQUIRE_SIGNATURE: "false"

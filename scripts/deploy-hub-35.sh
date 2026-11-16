@@ -39,8 +39,9 @@ echo "==> 3/6 生成/保留配置"
 if ssh "$HOST" "test -f $REMOTE_DIR/.env"; then
   echo "    .env 已存在，沿用原配置"
   # 老 .env 缺的配置项补上（不改已有值）
-  ssh "$HOST" "grep -q '^ZW_PANEL_USER=' $REMOTE_DIR/.env || echo 'ZW_PANEL_USER=pscly' >> $REMOTE_DIR/.env"
-  ssh "$HOST" "grep -q '^ZW_PANEL_PASSWORD=' $REMOTE_DIR/.env || echo 'ZW_PANEL_PASSWORD=REDACTED_PANEL_PASSWORD' >> $REMOTE_DIR/.env"
+  # 只补"缺的键"，不覆盖已有值（已有的凭据是用户自己定的，不能动）
+  ssh "$HOST" "grep -q '^ZW_PANEL_USER=' $REMOTE_DIR/.env || echo 'ZW_PANEL_USER=admin' >> $REMOTE_DIR/.env"
+  ssh "$HOST" "grep -q '^ZW_PANEL_PASSWORD=' $REMOTE_DIR/.env || echo 'ZW_PANEL_PASSWORD=1234' >> $REMOTE_DIR/.env"
   ssh "$HOST" "grep -q '^ZW_DEVICE_AUTO_APPROVE=' $REMOTE_DIR/.env || echo 'ZW_DEVICE_AUTO_APPROVE=true' >> $REMOTE_DIR/.env"
 else
   PANEL_PW=$(python3 -c "import secrets;print(secrets.token_urlsafe(12))")
@@ -48,7 +49,7 @@ else
 # 可选：留空 = 客户端不要对接码，准入靠设备注册表（每台电脑都要注册、可踢）
 # 想更严就取消注释并填一串随机值：
 #ZW_HUB_TOKEN=换成足够长的随机串
-ZW_PANEL_USER=pscly
+ZW_PANEL_USER=admin
 ZW_PANEL_PASSWORD=$PANEL_PW
 ZW_DEVICE_AUTO_APPROVE=true
 ENVFILE

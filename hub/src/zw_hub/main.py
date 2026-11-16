@@ -554,8 +554,16 @@ def panel_logout(response: Response) -> dict[str, Any]:
 @app.get("/panel/api/meta", dependencies=[PanelAuth], include_in_schema=False)
 def panel_meta() -> dict[str, Any]:
     s = get_settings()
-    return ok({"version": __version__, "data_dir": str(s.data_dir), "auto_approve": s.auto_approve,
-               "token_required": bool(s.token), "user": s.panel_user})
+    # 仍然用出厂默认凭据时，面板顶部会挂一条提醒 —— 不拦操作，但要让人看见。
+    # 默认值是 admin/1234，公开可查，只适合"先跑起来"。
+    return ok({
+        "version": __version__,
+        "data_dir": str(s.data_dir),
+        "auto_approve": s.auto_approve,
+        "token_required": bool(s.token),
+        "user": s.panel_user,
+        "default_credentials": (s.panel_user == "admin" and s.panel_password == "1234"),
+    })
 
 
 @app.get("/panel/api/whoami", include_in_schema=False)

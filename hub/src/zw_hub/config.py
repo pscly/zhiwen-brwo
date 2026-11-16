@@ -64,8 +64,8 @@ class Settings:
     # ── 管理面板 ────────────────────────────────────────
     # 面板登录。默认值按"个人自用"给了固定的账号密码，但可用环境变量覆盖；
     # 部署脚本会把 ZW_PANEL_PASSWORD 随机化后写进 .env，避免真的用仓库里的默认值。
-    panel_user: str = field(default_factory=lambda: _env("ZW_PANEL_USER", "pscly"))
-    panel_password: str = field(default_factory=lambda: _env("ZW_PANEL_PASSWORD", "REDACTED_PANEL_PASSWORD"))
+    panel_user: str = field(default_factory=lambda: _env("ZW_PANEL_USER", "admin"))
+    panel_password: str = field(default_factory=lambda: _env("ZW_PANEL_PASSWORD", "1234"))
     # 面板会话密钥（签名 cookie 用）。留空则每次启动随机生成（重启后需重新登录）。
     panel_secret: str = field(default_factory=lambda: _env("ZW_PANEL_SECRET", ""))
     # 面板会话有效期（秒）

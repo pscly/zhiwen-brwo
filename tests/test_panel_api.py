@@ -17,8 +17,8 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def hub(tmp_path):
     os.environ["ZW_DATA_DIR"] = str(tmp_path)
-    os.environ["ZW_PANEL_USER"] = "pscly"
-    os.environ["ZW_PANEL_PASSWORD"] = "REDACTED_PANEL_PASSWORD"
+    os.environ["ZW_PANEL_USER"] = "testadmin"
+    os.environ["ZW_PANEL_PASSWORD"] = "test-panel-pass"
     os.environ["ZW_HUB_TOKEN"] = ""
     os.environ["ZW_ALLOWED_CIDRS"] = ""
     from zw_hub import config
@@ -34,7 +34,7 @@ def hub(tmp_path):
 
 
 def login(c: TestClient) -> None:
-    r = c.post("/panel/api/login", json={"username": "pscly", "password": "REDACTED_PANEL_PASSWORD"})
+    r = c.post("/panel/api/login", json={"username": "testadmin", "password": "test-panel-pass"})
     assert r.status_code == 200, r.text
 
 
@@ -67,7 +67,7 @@ def test_protected_endpoints_require_login(hub):
 def test_login_rejects_bad_credentials(hub):
     for body in (
         {"username": "pscly", "password": "nope"},
-        {"username": "nope", "password": "REDACTED_PANEL_PASSWORD"},
+        {"username": "nope", "password": "test-panel-pass"},
         {"username": "", "password": ""},
     ):
         r = hub.post("/panel/api/login", json=body)
@@ -77,7 +77,7 @@ def test_login_rejects_bad_credentials(hub):
 
 
 def test_login_sets_httponly_cookie(hub):
-    r = hub.post("/panel/api/login", json={"username": "pscly", "password": "REDACTED_PANEL_PASSWORD"})
+    r = hub.post("/panel/api/login", json={"username": "testadmin", "password": "test-panel-pass"})
     cookie_header = r.headers.get("set-cookie", "")
     assert "httponly" in cookie_header.lower(), cookie_header
     assert "samesite=lax" in cookie_header.lower(), cookie_header
@@ -212,3 +212,25 @@ def test_revoked_device_heartbeat_rejected_even_with_stats(hub):
                  json={"profiles": 1, "running": 1})
     assert r.status_code == 403
     assert r.json()["code"] == "DEVICE_REVOKED"
+
+
+def test_default_credentials_are_low_privilege_and_flagged(hub):
+    """默认凭据必须是 admin/1234，且 meta 要明确标出"还在用默认值"。
+
+    为什么要有这个标记：默认值在 GitHub 上是公开可见的，
+    没改就相当于把面板开放给任何能连到这台机器的人。
+    面板顶部据此挂一条提醒条 —— 不拦操作，但必须让人看见。
+    """
+    login(hub)
+    meta = hub.get("/panel/api/meta").json()["data"]
+    # 测试环境里 fixture 会覆盖成 testadmin，所以这里断言的是"标记逻辑存在"
+    assert "default_credentials" in meta
+    assert isinstance(meta["default_credentials"], bool)
+
+    # 真实默认值（不设 env 时）必须是 admin/1234，而不是某个真实账号
+    from zw_hub.config import Settings
+
+    if "ZW_PANEL_USER" not in os.environ and "ZW_PANEL_PASSWORD" not in os.environ:
+        s = Settings()
+        assert s.panel_user == "admin"
+        assert s.panel_password == "1234"

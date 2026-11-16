@@ -196,7 +196,7 @@ Windows 默认控制台编码是系统代码页：中文系统 cp936（中文能
 
 ### 新增：Web 管理面板（`/panel`）
 
-登录 `pscly` / `REDACTED_PANEL_PASSWORD`（可用 `ZW_PANEL_USER` / `ZW_PANEL_PASSWORD` 覆盖）。
+登录凭据由 `ZW_PANEL_USER` / `ZW_PANEL_PASSWORD` 决定（默认 `admin` / `1234`，上线前必改）。
 设备列表（在线/离线/已踢三态）、KPI、事件流、踢下线/恢复/改名/删除。
 会话 cookie 是带密钥的 HMAC（`httponly`、`samesite=lax`），不是用户名，伪造不了。
 

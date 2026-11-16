@@ -315,7 +315,7 @@ jobs:
 
           ## 服务器端
 
-          管理面板：`http://<你的服务器>:8700/panel`（默认登录 `pscly` / `REDACTED_PANEL_PASSWORD`，可用环境变量覆盖）
+          管理面板：`http://<你的服务器>:8700/panel`（默认 `admin` / `1234`，**务必**在 `.env` 里改掉：`ZW_PANEL_USER` / `ZW_PANEL_PASSWORD`）
 
           详见仓库里的 `docs/11-客户端与服务器端.md`。
           EOF
