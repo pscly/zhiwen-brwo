@@ -49,3 +49,9 @@ ui-console.png
 packaging/build/
 packaging/dist/
 *.spec.bak
+
+# Windows 保留设备名，任何平台都不该入库（git checkout 到 Windows 会直接失败）
+nul
+con
+aux
+prn
