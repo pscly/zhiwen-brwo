@@ -675,7 +675,7 @@ def run_cli() -> int:
     return 0
 
 
-def _report_selftest(lines: list[str], code: int) -> None:
+def _report_selftest(lines: list[str], code: int, show_dialog: bool = True) -> None:
     """把自检结果送到用户能看到的地方。
 
     打包成 Windows GUI 程序（console=False）后**没有控制台**：
@@ -696,7 +696,10 @@ def _report_selftest(lines: list[str], code: int) -> None:
             print(text, flush=True)
     except (AttributeError, ValueError, OSError):
         pass
-    if sys.platform == "win32":
+    # 弹窗只在「真的有人在看」时才弹：
+    # - 测试/CI 里必须不弹（否则进程永远等在那里，CI 直接卡死 —— 这真的发生过）
+    # - 非交互环境（有 CI 环境变量）也不弹
+    if show_dialog and sys.platform == "win32" and not _in_ci() and sys.stdout is None:
         try:
             import ctypes
 
@@ -707,7 +710,15 @@ def _report_selftest(lines: list[str], code: int) -> None:
             pass
 
 
-def selftest() -> int:
+def _in_ci() -> bool:
+    """是不是在 CI/无人值守环境里跑。用于避免弹需要人点的窗口。"""
+    for k in ("CI", "GITHUB_ACTIONS", "TF_BUILD", "BUILDKITE", "JENKINS_URL"):
+        if os.environ.get(k):
+            return True
+    return False
+
+
+def selftest(show_dialog: bool = True) -> int:
     """打包/部署后的自检：确认依赖都打进去了、核心功能可用。不依赖图形界面。
 
     这条是给 CI 与"下载后跑不起来"的排查用的：它把客户端真正会用到的东西
@@ -781,7 +792,7 @@ def selftest() -> int:
     lines.append("")
     code = 1 if failures else 0
     lines.append(f"有 {len(failures)} 项失败" if failures else f"全部 {len(checks)} 项通过")
-    _report_selftest(lines, code)
+    _report_selftest(lines, code, show_dialog=show_dialog)
     return code
 
 

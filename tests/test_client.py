@@ -197,8 +197,13 @@ def test_fingerprint_has_human_fields(home):
 
 # ── 自检入口 ──────────────────────────────────────────────
 def test_selftest_passes(capsys, home):
-    """--selftest 是给"下载后跑不起来"用的，它自己必须过。"""
-    code = cli_mod.selftest()
+    """--selftest 是给"下载后跑不起来"用的，它自己必须过。
+
+    注意 show_dialog=False：Windows 上 selftest 默认会弹 MessageBox，
+    测试里一弹就永远等人点确定 —— CI 在 Windows 上因此卡了 10 分钟
+    （pytest-timeout 抓到的栈就在 MessageBoxW 上）。
+    """
+    code = cli_mod.selftest(show_dialog=False)
     out = capsys.readouterr().out
     assert code == 0, out
     assert "全部" in out and "通过" in out
@@ -208,3 +213,34 @@ def json_load(p):
     import json
 
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_selftest_never_blocks_in_ci(home, monkeypatch):
+    """CI 环境下 selftest **绝不能**弹需要人点的窗口。
+
+    Windows 上默认会弹 MessageBox；CI 里没人点，进程就永远卡住 ——
+    pytest-timeout 抓到过这个栈（CI 白等 10 分钟）。
+    现在两道保险：显式 show_dialog=False，以及检测 CI 环境变量。
+    """
+    monkeypatch.setenv("CI", "true")
+    called = {"msgbox": False}
+
+    import ctypes
+
+    class FakeUser32:
+        def MessageBoxW(self, *a, **k):
+            called["msgbox"] = True
+            return 1
+
+    monkeypatch.setattr(ctypes, "windll", type("W", (), {"user32": FakeUser32()})(), raising=False)
+    cli_mod.selftest()          # 不传参数，靠 CI 检测
+    assert called["msgbox"] is False, "CI 里不该弹窗"
+
+
+def test_selftest_reports_to_file(home):
+    """结果要落盘，因为 Windows GUI 程序没有 stdout。"""
+    cli_mod.selftest(show_dialog=False)
+    report = home / "selftest.txt"
+    assert report.exists(), "selftest 结果必须写文件（GUI 程序看不到 stdout）"
+    text = report.read_text(encoding="utf-8")
+    assert "全部" in text and "通过" in text
