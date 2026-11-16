@@ -160,7 +160,8 @@ Chromium 的 `--proxy-server` **不支持用户名密码**：写成 `http://user
 | 管理面板登录/鉴权/设备操作 | ✅ 13 项 HTTP 测试 + 真实浏览器点通、console 零报错 |
 | 设备注册表（幂等/踢下线不可自愈/只影响单台） | ✅ 13 项单测 |
 | **Windows 实机整体跑通** | ⬜ **未验证**。代码路径已按 Windows 分支单测（`test_windows_parity.py`），但没在真 Windows 上跑过 |
-| **Windows exe 实机运行** | ⬜ **未验证**。CI 会在 `windows-latest` 上构建并做 PE 头/体积检查，但没在真 Windows 上双击过 |
+| Windows 安装包（Inno Setup） | ✅ CI 用 Inno Setup 6.7.1 编译成功（4.6 秒，25.9MB）；`check-iss.py` 35 项静态检查全过 |
+| **Windows exe / 安装包实机运行** | ⬜ **未验证**。CI 验证了能构建、能过自检、能编译出合规的安装程序，但没在真 Windows 上双击安装过 |
 | **Windows 安装包（Inno Setup）** | ⚠️ 半验证。`.iss` 的静态检查（`packaging/windows/check-iss.py`，34 项）在本地与 CI 都跑；ISCC 编译在 `windows-latest` 上跑；但**没在真 Windows 上装过、卸过** |
 | 指纹能否过 browserscan | ⬜ 未验证。无 GPU 的 Linux 上 WebGL 拿不到真实显卡，必须到有显卡的 Windows 上测 |
 | 指纹种子的一致性（同种子两次启动是否同指纹） | ⬜ 未验证。当前测试机上的 Chromium 不是 fingerprint-chromium，`--fingerprint` 被忽略 |
