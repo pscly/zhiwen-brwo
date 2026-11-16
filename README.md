@@ -17,7 +17,7 @@
 
 | 系统 | 文件 |
 |---|---|
-| Windows 10/11 | `知纹客户端-Windows.exe`（双击即用，不弹黑框） |
+| Windows 10/11 | `zhiwen-client-Windows-x64.exe`（双击即用，不弹黑框） |
 | Linux x86_64 | `zhiwen-client-Linux-x86_64`（`chmod +x` 后跑） |
 | macOS | `zhiwen-client-macOS.zip`（解压后右键打开） |
 
