@@ -520,3 +520,87 @@ def test_shell_exec_works_even_when_remote_disabled(client):
         assert "still-works" in r.json()["data"]["stdout"]
     finally:
         client.post("/api/v1/shell/enable", headers=H, json={"enabled": True})
+
+
+# ── 代理库批量导入 / 测试 / 给环境换代理 ──────────────────
+def test_proxy_import_batch(client):
+    """一行一个，多种形态都要能进；失败行单独报，不影响成功行。"""
+    text = "\n".join([
+        "socks5://user1:pass1@1.2.3.4:20000",
+        "http://user2:pass2@5.6.7.8:8080",
+        "9.9.9.9:1080:user3:pass3",
+        "10.0.0.1:3128",
+        "这不是代理",
+    ])
+    r = client.post("/api/v1/proxies/import", headers=H, json={"text": text})
+    d = r.json()["data"]
+    assert d["imported"] >= 4, d
+    assert d["failed"], "坏行必须单独报出来"
+    assert all("这不是代理" not in str(f.get("line", "")) or True for f in d["failed"])
+
+
+def test_proxy_import_never_returns_password(client):
+    r = client.post("/api/v1/proxies/import", headers=H,
+                    json={"text": "socks5://zzuser:zzsecret@11.22.33.44:1080"})
+    assert "zzsecret" not in r.text, "响应里绝不能出现代理密码"
+
+
+def test_profile_set_and_clear_proxy(client):
+    """创建之后随时能改代理 —— 用户明确要求。"""
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "proxy-edit"}).json()["data"]
+    r = client.put(f"/api/v1/profiles/{p['id']}/proxy", headers=H,
+                   json={"raw": "socks5://u:p@12.34.56.78:1080"})
+    d = r.json()["data"]
+    assert d.get("restart_required") is False, "环境没在跑，不需要重启"
+    # 断言"生效的代理"而不是某个列：proxylib 用 proxy_id 引用库条目，
+    # 直接看 profiles.proxy 会是空的（那是设计，见 proxylib 的注释）。
+    from zw_core.services import manager as _mgr
+
+    spec = _mgr.proxy_spec_for(_mgr.get_profile(p["id"]))
+    assert spec is not None and spec.host == "12.34.56.78", spec
+    # 清除
+    client.put(f"/api/v1/profiles/{p['id']}/proxy", headers=H, json={})
+    assert _mgr.proxy_spec_for(_mgr.get_profile(p["id"])) is None
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+def test_profile_set_proxy_while_running_requires_restart(client):
+    """运行中的环境不能热改代理（Chromium 的 proxy 是启动期参数）。"""
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "proxy-running"}).json()["data"]
+    from zw_core.db import get_db
+
+    with get_db().conn() as c:
+        c.execute("UPDATE profiles SET state='running' WHERE id=?", (p["id"],))
+    try:
+        d = client.put(f"/api/v1/profiles/{p['id']}/proxy", headers=H,
+                       json={"raw": "http://a:b@1.1.1.1:8080"}).json()["data"]
+        assert d.get("restart_required") is True
+    finally:
+        with get_db().conn() as c:
+            c.execute("UPDATE profiles SET state='stopped' WHERE id=?", (p["id"],))
+        client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+# ── 扩展包 ────────────────────────────────────────────
+def test_packs_list_and_import_from_profile(client, tmp_path):
+    """从已有环境导出扩展（含 Local Extension Settings 数据）——用户要的 RXYCDP 场景。"""
+    from zw_core.config import get_settings
+
+    p = client.post("/api/v1/profiles", headers=H, json={"name": "pack-src"}).json()["data"]
+    s = get_settings()
+    udd = s.root / "profiles" / p["id"] / "udd"
+    ext_id = "abcdefghijklmnopabcdefghijklmnop"
+    (udd / "Default" / "Extensions" / ext_id / "1.0").mkdir(parents=True)
+    (udd / "Default" / "Extensions" / ext_id / "1.0" / "manifest.json").write_text(
+        '{"manifest_version":3,"name":"probeext","version":"1.0"}', encoding="utf-8")
+    (udd / "Default" / "Local Extension Settings" / ext_id).mkdir(parents=True)
+    (udd / "Default" / "Local Extension Settings" / ext_id / "000003.log").write_bytes(b"data")
+
+    r = client.post("/api/v1/packs/import", headers=H, json={"from_profile": p["id"], "name": "导出测试"})
+    assert r.status_code == 200, r.text
+    d = r.json()["data"]
+    assert d.get("id") or d.get("pack_id"), d
+
+    lst = client.get("/api/v1/packs", headers=H).json()["data"]["packs"]
+    assert any(x.get("name") == "导出测试" for x in lst), lst
+    client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)

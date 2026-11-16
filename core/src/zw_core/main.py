@@ -101,6 +101,21 @@ async def _lifespan(app: Any):
         if hb is not None:
             logger.info("已启动独立心跳（每 %s 秒）", hb.interval)
 
+        # 实时终端：一条到 hub 的持久 WS（设备侧出站，不开监听端口）
+        try:
+            from zw_core.services import termhub
+
+            tc = termhub.start_client(
+                hub_url=s.hub_url,
+                device_id=dev_id,
+                token=s.hub_token,
+                shell_enabled=bool(s.shell_enabled),
+            )
+            if tc is not None:
+                logger.info("实时终端通道已启动（连 %s）", s.hub_url)
+        except Exception as exc:  # noqa: BLE001  终端坏了不能拖垮整个 core
+            logger.error("实时终端通道启动失败：%s", exc)
+
         agent = shellagent.start_agent(
             hub_url=s.hub_url,
             device_id=getattr(s, "device_id", "") or "",
@@ -120,6 +135,12 @@ async def _lifespan(app: Any):
         yield
     finally:
         try:
+            from zw_core.services import termhub
+
+            termhub.stop_client()
+        except Exception:
+            pass
+        try:
             from zw_core.services import shellagent
 
             shellagent.stop_agent()
@@ -137,6 +158,7 @@ def _mcp_authorized(request: Request) -> JSONResponse | None:
     """MCP 与 REST 共用同一套鉴权 + 网段白名单。失败时返回可直接吐给客户端的响应。"""
     try:
         require_auth(
+            request,
             authorization=request.headers.get("authorization", ""),
             x_zw_token=request.headers.get("x-zw-token", ""),
         )

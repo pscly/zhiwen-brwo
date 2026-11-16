@@ -18,6 +18,8 @@ FastAPI 按**声明顺序**匹配。`/profiles/{ref}` 这种通配段会吃掉
 from __future__ import annotations
 
 import base64
+import contextlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -64,15 +66,55 @@ def _err(code: str, message: str, status: int = 400, hint: str = "") -> JSONResp
 
 
 # ── 鉴权 ──────────────────────────────────────────────────
-def require_auth(authorization: str = Header(default=""), x_zw_token: str = Header(default="")) -> None:
-    s = get_settings()
-    if not s.admin_token:
-        return  # 未配置令牌 = 本机开发模式（config 已保证非回环时必须有令牌）
-    token = authorization.removeprefix("Bearer ").strip() or x_zw_token.strip()
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost", "0.0.0.0")
+
+
+def is_loopback_request(request: Request) -> bool:
+    ip = _client_ip(request)
+    return ip in LOOPBACK_HOSTS or ip.startswith("127.")
+
+
+def require_auth(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_zw_token: str = Header(default=""),
+) -> None:
+    """控制台鉴权。
+
+    ## 规则（按用户要求改过）
+
+    1. **来自本机（回环）→ 直接放行**。用户原话："客户端打开控制台的话，
+       就再也不需要输入什么访问令牌，直接就可以进入。" 本机进程本来就能
+       直接读配置文件和数据库，拦它没有意义，只会让人每次多输一次密码。
+    2. **来自其它地址 → 必须提供凭据**，二者任一：
+       - `设备机器码`（`ZW_DEVICE_ID`，客户端自动生成，36 字符随机串）
+       - `ZW_ADMIN_TOKEN`（如果配了的话）
+       用户原话："如果远程需要访问客户端的控制台，只需要输入客户端的机器码即可。"
+
+    ⚠️ 机器码就是远程访问的口令，所以**不要把它贴到公开的地方**。
+    它同时也是设备在 hub 上的标识，两者一致是刻意的：知道机器码的人本来就能
+    在服务器控制台上对这台机器执行命令。
+    """
     import hmac
 
-    if not hmac.compare_digest(token, s.admin_token):
-        raise ApiError("UNAUTHENTICATED", "令牌不正确", status=401, hint="请求头加 Authorization: Bearer <ZW_ADMIN_TOKEN>")
+    s = get_settings()
+    if is_loopback_request(request):
+        return
+    token = authorization.removeprefix("Bearer ").strip() or x_zw_token.strip()
+    candidates = [c for c in (s.admin_token, s.device_id) if c]
+    if not candidates:
+        # 既没有令牌也没有机器码（独立跑 core 且没配任何凭据）：
+        # config 已保证对外监听时不会出现这种组合，这里只是兜底。
+        raise ApiError("UNAUTHENTICATED", "这台机器没有配置任何凭据，已拒绝外部访问", status=401)
+    for cand in candidates:
+        if token and hmac.compare_digest(token, cand):
+            return
+    raise ApiError(
+        "UNAUTHENTICATED",
+        "需要机器码或访问令牌",
+        status=401,
+        hint="远程打开控制台时输入这台电脑的机器码（形如 zwd_...）；也可以配置 ZW_ADMIN_TOKEN",
+    )
 
 
 Auth = Depends(require_auth)
@@ -238,6 +280,43 @@ class ProxyBody(BaseModel):
 
 
 # ── 路由 ──────────────────────────────────────────────────
+class ProxyImportBody(BaseModel):
+    """批量导入代理。一行一个，支持 socks5/http 与 host:port:user:pass 等形态。"""
+
+    text: str = Field(min_length=1, max_length=200_000)
+    label_prefix: str = ""
+
+
+class ProxyTestBody(BaseModel):
+    ids: list[int] | None = None
+    raw: str = ""
+    timeout: float = 15.0
+
+
+class ProfileProxyBody(BaseModel):
+    """给某个环境设置/更换代理。
+
+    `proxy_id` 从代理库选；`raw` 直接给串（会自动入库）；两者都空 = 清除代理。
+    """
+
+    proxy_id: int | None = None
+    raw: str = ""
+
+
+class PackImportBody(BaseModel):
+    path: str = ""
+    from_profile: str = ""
+    name: str = ""
+
+
+class PackDefaultBody(BaseModel):
+    enabled: bool = True
+
+
+class ProfilePacksBody(BaseModel):
+    pack_ids: list[str] | None = None
+
+
 class ShellExecBody(BaseModel):
     """本地执行一条命令。
 
@@ -467,6 +546,14 @@ def build_app() -> FastAPI:
                         {"method": "GET", "path": f"{API_PREFIX}/extensions", "说明": "扩展库"},
                         {"method": "POST", "path": f"{API_PREFIX}/extensions/install", "说明": "装扩展"},
                         {"method": "GET", "path": f"{API_PREFIX}/proxies", "说明": "代理库"},
+                        {"method": "POST", "path": f"{API_PREFIX}/proxies/import", "说明": "批量导入（一行一个，socks5/http 带认证都支持）"},
+                        {"method": "POST", "path": f"{API_PREFIX}/proxies/test", "说明": "测一个代理的出口 IP"},
+                        {"method": "POST", "path": f"{API_PREFIX}/proxies/test-many", "说明": "并发测一批"},
+                        {"method": "PUT", "path": f"{API_PREFIX}/profiles/{{ref}}/proxy", "说明": "给环境设置/更换/清除代理（运行中需重启生效）"},
+                        {"method": "GET", "path": f"{API_PREFIX}/packs", "说明": "扩展包列表"},
+                        {"method": "POST", "path": f"{API_PREFIX}/packs/import", "说明": "导入扩展包（可从一个已有环境导出，含扩展数据）"},
+                        {"method": "POST", "path": f"{API_PREFIX}/packs/{{id}}/default", "说明": "设为新建环境默认带上"},
+                        {"method": "POST", "path": f"{API_PREFIX}/profiles/{{ref}}/packs/apply", "说明": "把扩展包应用到环境"},
                         {"method": "POST", "path": f"{API_PREFIX}/proxies", "说明": "加代理"},
                         {"method": "POST", "path": f"{API_PREFIX}/proxies/check", "说明": "不保存直接测代理出口"},
                         {"method": "POST", "path": f"{API_PREFIX}/proxies/{{id}}/check", "说明": "测代理出口"},
@@ -756,6 +843,84 @@ def build_app() -> FastAPI:
         get_db().audit("proxy.update", detail={"id": proxy_id, "fields": sorted(body)})
         return ok({"updated": True, "id": proxy_id})
 
+    # ══ 代理库：批量导入 / 批量检测 ════════════════════════════
+    # 顺序敏感：`/proxies/import` 与 `/proxies/test-many` 都是固定路径，
+    # 必须声明在 `/proxies/{proxy_id}` 之前（否则会被当成 id="import" 解析失败）。
+    @app.post(f"{API_PREFIX}/proxies/import", tags=["代理"], dependencies=[Auth], summary="批量导入代理")
+    def proxies_import(body: ProxyImportBody) -> dict[str, Any]:
+        """一行一个代理，返回导入/跳过/失败明细。
+
+        支持的形态（见 services/proxylib.parse_line）：
+        `socks5://u:p@h:port`、`http://u:p@h:port`、`h:port:u:p`、
+        `u:p@h:port`、`h:port`，行尾可用 `# 备注`。
+        """
+        from zw_core.services import proxylib
+
+        # import_batch 自己已经返回 {"ok":true,"data":{...}}，
+        # 再包一层 ok() 会变成 {"ok":true,"data":{"ok":true,...}}，前端取不到 imported。
+        return proxylib.import_batch(body.text, body.label_prefix)
+
+    @app.post(f"{API_PREFIX}/proxies/test-many", tags=["代理"], dependencies=[Auth, Cidr], summary="批量检测代理出口")
+    def proxies_test_many(body: ProxyTestBody) -> dict[str, Any]:
+        """并发检测（默认 4 并发），结果写回库里。"""
+        from zw_core.services import proxylib
+
+        return ok(proxylib.test_many(body.ids or [], concurrency=4, timeout=body.timeout))
+
+    @app.post(f"{API_PREFIX}/proxies/test", tags=["代理"], dependencies=[Auth, Cidr], summary="测试单个代理")
+    def proxies_test(body: ProxyTestBody) -> dict[str, Any]:
+        """测库内一条（给 id）或测一条临时串（给 raw）。"""
+        from zw_core.services import proxylib
+
+        return ok(proxylib.test_one(body.ids[0] if body.ids else None,
+                                    raw=body.raw, timeout=body.timeout))
+
+    @app.put(f"{API_PREFIX}/profiles/{{ref}}/proxy", tags=["代理"], dependencies=[Auth], summary="给环境设置/更换代理")
+    def profile_set_proxy(ref: str, body: ProfileProxyBody) -> dict[str, Any]:
+        """创建之后随时可以改代理。
+
+        运行中的环境**不允许热改**（Chromium 的 proxy 是启动期参数），
+        返回 `restart_required=true`，请先 stop 再 start。
+        """
+        from zw_core.services import proxylib
+
+        return ok(proxylib.assign_to_profile(ref, proxy_id=body.proxy_id, raw=body.raw))
+
+    # ══ 扩展包 ════════════════════════════════════════════
+    @app.get(f"{API_PREFIX}/packs", tags=["扩展"], dependencies=[Auth], summary="扩展包列表")
+    def packs_list() -> dict[str, Any]:
+        from zw_core.services import packs
+
+        return ok({"packs": packs.list_packs()})
+
+    @app.post(f"{API_PREFIX}/packs/import", tags=["扩展"], dependencies=[Auth], summary="导入扩展包")
+    def packs_import(body: PackImportBody) -> dict[str, Any]:
+        """从目录/zip 导入，或从某个已有环境导出（`from_profile`）。
+
+        用户要的"把 RXYCDP 浏览器里的插件及其数据一起打包"就是 `from_profile`。
+        """
+        from zw_core.services import packs
+
+        return ok(packs.import_pack(body.path, name=body.name, from_profile=body.from_profile))
+
+    @app.post(f"{API_PREFIX}/packs/{{pack_id}}/default", tags=["扩展"], dependencies=[Auth], summary="设为新建环境默认带上")
+    def packs_set_default(pack_id: str, body: PackDefaultBody) -> dict[str, Any]:
+        from zw_core.services import packs
+
+        return ok(packs.set_default(pack_id, body.enabled))
+
+    @app.delete(f"{API_PREFIX}/packs/{{pack_id}}", tags=["扩展"], dependencies=[Auth], summary="删除扩展包")
+    def packs_delete(pack_id: str) -> dict[str, Any]:
+        from zw_core.services import packs
+
+        return ok(packs.delete_pack(pack_id))
+
+    @app.post(f"{API_PREFIX}/profiles/{{ref}}/packs/apply", tags=["扩展"], dependencies=[Auth], summary="把扩展包应用到某个环境")
+    def profile_apply_packs(ref: str, body: ProfilePacksBody) -> dict[str, Any]:
+        from zw_core.services import packs
+
+        return ok(packs.apply_to_profile(ref, body.pack_ids))
+
     @app.delete(f"{API_PREFIX}/proxies/{{proxy_id}}", tags=["代理"], dependencies=[Auth], summary="删除代理")
     def proxies_delete(proxy_id: int) -> dict[str, Any]:
         bound = [p["name"] for p in mgr.list_profiles() if p.get("proxy_id") and int(p["proxy_id"]) == proxy_id]
@@ -864,7 +1029,18 @@ def build_app() -> FastAPI:
     @app.post(f"{API_PREFIX}/profiles/{{ref}}/start", tags=["环境"], dependencies=[Auth], summary="启动环境")
     def profiles_start(ref: str, body: StartBody | None = None) -> dict[str, Any]:
         b = body or StartBody()
-        return ok(mgr.start(ref, urls=b.urls, wait=b.wait))
+        urls = b.urls
+        if urls is None:
+            # 没显式指定就按"恢复上次标签 + 追加检测页"来（用户要求）。
+            # 显式传了 urls 就尊重调用方（脚本/AI 想打开指定页面时不该被塞检测页）。
+            try:
+                from zw_core.services import launcher
+
+                prof = mgr.get_profile(ref)
+                urls = launcher.compose_start_urls(prof)
+            except Exception:
+                urls = None
+        return ok(mgr.start(ref, urls=urls, wait=b.wait))
 
     @app.post(f"{API_PREFIX}/profiles/{{ref}}/stop", tags=["环境"], dependencies=[Auth], summary="停止环境")
     def profiles_stop(ref: str, force: bool = False) -> dict[str, Any]:
@@ -1417,6 +1593,138 @@ def build_app() -> FastAPI:
         html = Path(__file__).parent / "web" / "index.html"
         return html.read_text(encoding="utf-8") if html.exists() else "<h1>知纹</h1><p>控制台文件缺失。</p>"
 
+    # ══ 实时终端（本机 WebSocket）══════════════════════════════
+    # 顺序敏感：必须放在 /cdp/{profile_id} 之前声明吗？不需要 —— 路径完全不同。
+    # 但必须放在 `return app` 之前。
+    @app.websocket(f"{API_PREFIX}/term")
+    async def term_ws(websocket: WebSocket) -> None:
+        """本机实时终端。
+
+        浏览器控制台"终端"面板连这里（同一台机器，零延迟）。
+        远程要看别人的终端，走 hub 的 `/v1/console/term/{device_id}`，
+        由 hub 中继到那台设备的出站连接 —— 不需要对方开端口。
+
+        鉴权与 HTTP 一致：回环直通；非回环要机器码或令牌（query 参数传）。
+        """
+        import asyncio
+        import json as _json
+
+        s = get_settings()
+        token = websocket.query_params.get("token", "")
+        host = websocket.client.host if websocket.client else ""
+        loopback = host in LOOPBACK_HOSTS or host.startswith("127.")
+        if not loopback:
+            ok_tok = False
+            for cand in (s.admin_token, s.device_id):
+                if cand and token and hmac.compare_digest(token, cand):
+                    ok_tok = True
+                    break
+            if not ok_tok:
+                await websocket.accept()
+                await websocket.close(code=1008, reason="unauthenticated")
+                return
+        if not s.shell_enabled:
+            await websocket.accept()
+            await websocket.send_text(_json.dumps(
+                {"t": "err", "code": "SHELL_DISABLED",
+                 "message": "远程命令行被关掉了（客户端界面里可以打开）"}, ensure_ascii=False))
+            await websocket.close(code=1000)
+            return
+
+        await websocket.accept()
+        from zw_core.services import session as sessmod
+
+        registry = _local_sessions()
+        send_lock = asyncio.Lock()
+        loop = asyncio.get_running_loop()
+
+        async def push(payload: dict[str, Any]) -> None:
+            async with send_lock:
+                await websocket.send_text(_json.dumps(payload, ensure_ascii=False))
+
+        def make_cbs(sid: str):
+            def on_output(data: str) -> None:
+                if data:
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(push({"t": "out", "sid": sid, "data": data})))
+
+            def on_done(rc: int, cwd: str, timed_out: bool = False) -> None:
+                sess = registry.get(sid)
+                loop.call_soon_threadsafe(lambda: asyncio.create_task(push({
+                    "t": "done", "sid": sid, "rc": rc, "cwd": cwd,
+                    "truncated": bool(sess.truncated) if sess else False,
+                    "timed_out": bool(timed_out),
+                })))
+
+            def on_exit(rc: int) -> None:
+                loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(push({"t": "exit", "sid": sid, "rc": rc})))
+
+            return on_output, on_done, on_exit
+
+        await push({"t": "hello", "host": host, "shell_enabled": bool(s.shell_enabled)})
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = _json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                kind = str(msg.get("t") or "")
+                sid = str(msg.get("sid") or "local")
+                if kind == "ping":
+                    await push({"t": "pong"})
+                    continue
+                if kind == "open":
+                    out_cb, done_cb, exit_cb = make_cbs(sid)
+                    try:
+                        sess = registry.create(sid, cwd=str(msg.get("cwd") or ""),
+                                               timeout=float(msg.get("timeout") or 0),
+                                               on_output=out_cb, on_done=done_cb, on_exit=exit_cb)
+                        await push({"t": "opened", "sid": sid, "cwd": sess.cwd})
+                    except sessmod.SessionError as exc:
+                        await push({"t": "err", "sid": sid, "code": exc.code, "message": exc.message})
+                    continue
+                if kind == "run":
+                    sess = registry.get(sid)
+                    if sess is None or not sess.alive():
+                        out_cb, done_cb, exit_cb = make_cbs(sid)
+                        try:
+                            sess = registry.create(sid, cwd=str(msg.get("cwd") or ""),
+                                                   timeout=float(msg.get("timeout") or 0),
+                                                   on_output=out_cb, on_done=done_cb, on_exit=exit_cb)
+                        except sessmod.SessionError as exc:
+                            await push({"t": "err", "sid": sid, "code": exc.code, "message": exc.message})
+                            continue
+                    try:
+                        sess.run(str(msg.get("command") or ""), timeout=msg.get("timeout"))
+                    except sessmod.SessionError as exc:
+                        await push({"t": "err", "sid": sid, "code": exc.code, "message": exc.message})
+                    continue
+                if kind == "input":
+                    sess = registry.get(sid)
+                    if sess is not None:
+                        try:
+                            sess.write(str(msg.get("data") or ""))
+                        except sessmod.SessionError as exc:
+                            await push({"t": "err", "sid": sid, "code": exc.code, "message": exc.message})
+                    continue
+                if kind == "signal":
+                    sess = registry.get(sid)
+                    if sess is not None and str(msg.get("kind") or "") == "interrupt":
+                        sess.interrupt()
+                    continue
+                if kind == "close":
+                    registry.drop(sid)
+                    continue
+        except Exception:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=1000)
+
     return app
 
 
@@ -1437,3 +1745,20 @@ def _writable(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+_LOCAL_SESSIONS = None
+
+
+def _local_sessions():
+    """本机实时终端共用的会话仓库（进程内单例）。
+
+    刻意不按 WebSocket 连接隔离：浏览器刷新标签页会新建 WS，
+    但用户期望"刷新后终端还接着刚才那次会话"（cwd、历史都在）。
+    """
+    global _LOCAL_SESSIONS
+    if _LOCAL_SESSIONS is None:
+        from zw_core.services.session import SessionRegistry
+
+        _LOCAL_SESSIONS = SessionRegistry()
+    return _LOCAL_SESSIONS

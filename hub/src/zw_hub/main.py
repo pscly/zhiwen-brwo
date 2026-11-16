@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import hmac
 import ipaddress
 import json
@@ -35,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, Depends, FastAPI, Header, Request
+from fastapi import Body, Depends, FastAPI, Header, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
@@ -43,6 +44,7 @@ from . import __version__
 from .config import get_settings
 from .devices import DeviceError, DeviceStore
 from .shell import ShellError, ShellQueue
+from .termrelay import relay as term_relay
 from .store import HubError, Store
 
 logger = logging.getLogger("zw.hub")
@@ -1121,3 +1123,105 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+
+
+# ══ 实时终端（WebSocket 中继，协议见 core/services/termhub.py 顶部）══════
+# 顺序敏感：这两条都是固定前缀下的通配，放在 /v1/devices/* 的普通路由之后没关系
+# （WebSocket 与 HTTP 是不同的协议栈，不会互相吞）。
+@app.websocket("/v1/devices/ws")
+async def device_ws(websocket: WebSocket) -> None:
+    """设备（客户端）连上来的实时终端通道。
+
+    鉴权用 `X-ZW-Device`，与心跳/命令行一致；状态用 `require_known`，
+    所以**未授权（pending）的设备也能连** —— 与"未授权也能被远程终端操控"一致。
+    被踢/被拒绝的设备在握手阶段就被拒（close 1008）。
+    """
+    dev = (websocket.headers.get("x-zw-device") or "").strip()
+    await websocket.accept()
+    if not dev:
+        await websocket.close(code=1008, reason="device-required")
+        return
+    try:
+        _check_cidr(websocket)  # type: ignore[arg-type]
+    except HubError as exc:
+        await websocket.close(code=1008, reason=exc.code)
+        return
+    try:
+        devices().require_known(dev)
+    except DeviceError as exc:
+        await websocket.close(code=1008, reason=exc.code)
+        return
+
+    link = await term_relay().attach(dev, websocket)
+    logger.info("设备 %s 已建立实时终端通道", dev)
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            link.last_seen = time.time()
+            try:
+                msg = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("t") == "ping":
+                await link.send({"t": "pong"})
+                continue
+            if msg.get("t") == "hello":
+                link.shell_enabled = bool(msg.get("shell_enabled", True))
+            # 设备发来的业务消息（out/done/exit/err/opened）广播给管理员
+            link.fanout(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001  设备侧异常不该影响 hub 其它功能
+        logger.debug("设备 %s 的终端通道异常：%s", dev, exc)
+    finally:
+        await term_relay().detach(link)
+        logger.info("设备 %s 的实时终端通道已断开", dev)
+
+
+@app.websocket("/v1/console/term/{device_id}")
+async def console_term_ws(websocket: WebSocket, device_id: str) -> None:
+    """管理员（浏览器/CLI）接上去操作这台设备的终端。
+
+    鉴权：面板会话 cookie 或 `?token=<ZW_HUB_TOKEN>`。
+    设备不在线时给一条明确的 `device_offline` 然后正常关闭 ——
+    前端据此回退到 HTTP 队列，而不是报错卡死。
+    """
+    token = websocket.query_params.get("token", "")
+    cookie = websocket.cookies.get(PANEL_COOKIE, "")
+    s = get_settings()
+    authed = bool(cookie) and hmac.compare_digest(cookie, _panel_token())
+    if not authed and s.token and token and hmac.compare_digest(token, s.token):
+        authed = True
+    if not authed:
+        await websocket.accept()
+        await websocket.close(code=1008, reason="unauthenticated")
+        return
+    try:
+        _check_cidr(websocket)  # type: ignore[arg-type]
+    except HubError as exc:
+        await websocket.accept()
+        await websocket.close(code=1008, reason=exc.code)
+        return
+
+    await websocket.accept()
+    if not term_relay().online(device_id):
+        await websocket.send_text(json.dumps({
+            "t": "device_offline",
+            "device_id": device_id,
+            "message": "这台设备的实时通道没连上（客户端版本太老、命令行被关掉，或网络不通）",
+        }, ensure_ascii=False))
+        await websocket.close(code=1000)
+        return
+    await websocket.send_text(json.dumps({"t": "hello", "device_id": device_id}, ensure_ascii=False))
+    try:
+        res = await term_relay().relay(device_id, websocket)
+        logger.debug("管理员终端会话结束 device=%s reason=%s", device_id, res.get("reason"))
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("管理员终端会话异常 device=%s：%s", device_id, exc)
+    finally:
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1000)

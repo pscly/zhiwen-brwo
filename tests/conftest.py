@@ -36,6 +36,12 @@ _ZW_VARS = [
     "ZW_STOP_GRACE",
     "ZW_HEALTH_INTERVAL",
     "ZW_IDLE_TIMEOUT",
+    # 启动页与扩展包（0.6.x 新增）：不清理的话，开发机上开着 ZW_OPEN_DETECT_ON_START=false
+    # 会让"新环境要带检测页"那条用例莫名其妙失败
+    "ZW_RESTORE_TABS",
+    "ZW_OPEN_DETECT_ON_START",
+    "ZW_DETECT_URLS",
+    "ZW_DEFAULT_PACKS",
     "ZW_RESTART_MAX_ATTEMPTS",
     "ZW_RESTART_BACKOFF",
     "ZW_GATEWAY_ENABLED",

@@ -205,7 +205,14 @@ def proxy_spec_for(profile: dict[str, Any]) -> proxysvc.ProxySpec | None:
         with get_db().conn() as c:
             row = c.execute("SELECT * FROM proxies WHERE id=?", (int(profile["proxy_id"]),)).fetchone()
         if row:
-            auth = f"{row['username']}:{row['password']}@" if row["username"] else ""
+            # 凭据必须百分号编码：密码里出现 `/`、`#`、`@` 时直接拼串会被
+            # urlsplit 当成路径/锚点/主机名的一部分，结果就是"代理静默连不上"。
+            # 这是启动路径，出错时没有任何提示，所以宁可在源头转义。
+            from urllib.parse import quote
+
+            auth = ""
+            if row["username"]:
+                auth = f"{quote(str(row['username']), safe='')}:{quote(str(row['password']), safe='')}@"
             raw = f"{row['scheme']}://{auth}{row['host']}:{row['port']}"
     return proxysvc.parse_proxy(raw)
 
@@ -381,6 +388,39 @@ def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
     udd_path(pid).mkdir(parents=True, exist_ok=True)
     get_db().audit("profile.create", pid, detail={"name": name, "seed": seed})
     logger.info("创建环境 name=%s id=%s seed=%s", name, pid, seed)
+
+    # ── 建完环境的收尾钩子（本函数里**唯一**一处跨模块调用，别再加第二处）──
+    # 为什么必须放在最末尾：这两件事都要 udd 已存在——packs 要往
+    # `udd/Default/Local Extension Settings/` 写数据，launcher 只是读写数据库行。
+    # 为什么要在建环境时就把检测页写进 start_urls（而不是等 start 时拼）：
+    #   本函数是"新环境长什么样"的唯一入口，写在这里的 start_urls 会被
+    #   engines.build_cmdline 原样当成初始标签；start() 里没有钩子（改动范围受限），
+    #   所以"新建即带检测页"必须在这里落。
+    #   要"每次启动都恢复+补检测页"的完整语义，调用方（api/cli/gui）在 start 时把
+    #   `launcher.compose_start_urls(profile)` 当 urls 传进去即可，函数已备好。
+    # 为什么只在 profile_id 为空时做：带 profile_id 说明这次是"从同步包/导出包导入"，
+    #   那个环境自带它原本的扩展集合与标签，被本地默认值污染会让两台机器的环境
+    #   悄悄不一致（而用户以为导入的就是原来的样子）。
+    # 为什么整体吞异常：带包/带检测页是增值项，失败不该让"建环境"这个主流程失败。
+    if not profile_id:
+        try:
+            from . import packs as packsvc
+
+            packsvc.apply_default_packs(pid)
+        except Exception as exc:  # noqa: BLE001 —— 见上
+            logger.warning("应用默认扩展包失败（环境已创建，可稍后手动应用）：%s", exc)
+        try:
+            from . import launcher as launcher_svc
+
+            # 别叫 seed：上面刚用过这个变量名指指纹种子，重名会让后来读代码的人误解
+            seed_urls = [str(u) for u in (payload.get("start_urls") or []) if str(u).strip()]
+            urls = launcher_svc.compose_start_urls({"start_urls": seed_urls})
+            if urls:
+                _update(pid, start_urls=urls)
+                logger.info("环境 %s 的初始标签页：%s", name, urls)
+        except Exception as exc:  # noqa: BLE001 —— 见上
+            logger.warning("写入初始检测页失败（环境已创建）：%s", exc)
+
     return get_profile(pid)
 
 
@@ -507,8 +547,12 @@ def _prepare_launch(profile: dict[str, Any]) -> dict[str, Any]:
     spec = proxy_spec_for(row)
     if spec:
         row["proxy"] = spec.upstream
+        # 凭据只活在这个 spec 里：upstream 是脱敏后的地址，而带认证的代理需要
+        # 本机中继拿到用户名密码（见 engines._proxy_server_for）。
+        row["_proxy_spec"] = spec
         if spec.needs_auth:
-            # Chromium 的 --proxy-server 不支持认证，必须靠扩展应答挑战
+            # 老方案的扩展仍然准备着（ZW_PROXY_RELAY=false 时才真正依赖它）。
+            # 默认路径改走本地中继，因为 Chrome 149 已忽略 --load-extension。
             ext = proxysvc.ensure_auth_extension(spec)
             paths = [str(ext)] + paths
             row["_proxy_auth"] = True
@@ -616,6 +660,19 @@ def stop(ref: str, force: bool = False) -> dict[str, Any]:
     if p["state"] not in ("running", "starting", "crashed", "failed", "stopping"):
         return {"profile": p, "already_stopped": True}
 
+    # ── 记住当前标签页（本函数里唯一一处跨模块调用，别再加第二处）────────
+    # 必须在**关浏览器之前**抓：关掉之后 CDP 就没了，页面列表也就读不到了。
+    # 为什么不用 Chromium 的 Default/Sessions/*.bin：那是二进制私有格式，
+    # 解析它等于赌内核内部存储（详见 launcher.py 顶部注释）；走 CDP 拿到的是同一份
+    # 事实，而且是运行时真值。抓到的列表写进 profiles.start_urls，
+    # 下次启动由 build_cmdline 原样作为初始标签。
+    try:
+        from . import launcher as launcher_svc
+
+        launcher_svc.remember_open_tabs(p)
+    except Exception as exc:  # noqa: BLE001 —— 记不住标签页不该让停止失败
+        logger.warning("记住标签页失败（不影响停止）：%s", exc)
+
     from .. import gateway
 
     port = p.get("cdp_port") or 0
@@ -644,6 +701,15 @@ def stop(ref: str, force: bool = False) -> dict[str, Any]:
     # cdp_port 必须清掉：它是"这一次运行"的临时事实，留着会让控制台/CLI 显示一个
     # 属于别人的端口（端口很快会被下一个环境拿走），排错时极易被误导。
     _update(p["id"], state="stopped", pid=None, cdp_port=None, last_stop_at=time.time(), restart_count=0, last_error="")
+    # 释放该环境独占的本地代理中继端口：不清理的话，每开关一次环境就多留一个
+    # 监听端口，一天下来能积出几十个（端口是运行期资源，环境停了就该还回去）。
+    try:
+        from . import proxyrelay
+
+        keep = {s.key for p2 in list_profiles(state="running") if (s := proxy_spec_for(p2))}
+        proxyrelay.pool().cleanup(keep)
+    except Exception as exc:  # noqa: BLE001 —— 清理失败不该让"停止"失败
+        logger.warning("清理本地代理中继失败（不影响停止）：%s", exc)
     # 明确要释放，不能因为 owner 不匹配而失败
     LocalLease(profile_dir(p["id"])).force_release()
     if p.get("ephemeral"):

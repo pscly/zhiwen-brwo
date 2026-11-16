@@ -740,14 +740,15 @@ dialog.dlg[open]{animation:dpop .2s var(--ease)}
 <div class="login-layer" id="login">
   <div class="login-card" id="login-card">
     <div class="lm"></div>
-    <h2>需要访问令牌</h2>
-    <p>这个控制台要带上 <span class="mono">ZW_ADMIN_TOKEN</span> 才能和 core 通信。<br>输入后保存在本机 localStorage，不离开这台机器。</p>
+    <h2>从远程访问这台电脑</h2>
+    <p>本机打开这个控制台是免密码的；从别的机器访问需要输入<b>这台电脑的机器码</b>。<br>
+      机器码在客户端的「机器码」那一栏（形如 <span class="mono">zwd_…</span>），也可以问服务器控制台。</p>
     <form id="login-form" autocomplete="on" style="margin:0">
-      <input class="input" id="login-input" type="password" placeholder="粘贴令牌" autocomplete="current-password" spellcheck="false">
+      <input class="input" id="login-input" type="text" placeholder="粘贴机器码（zwd_...）" autocomplete="off" spellcheck="false">
       <button class="btn primary" id="login-btn" type="submit">进入控制台</button>
     </form>
     <div class="login-err" id="login-err"></div>
-    <div class="login-tip">令牌在服务端的 <span class="mono">.env</span> 里（<span class="mono">ZW_ADMIN_TOKEN</span>）。按 Enter 提交。</div>
+    <div class="login-tip">输入后只保存在本机 localStorage，不会发送到别处。若配置了 <span class="mono">ZW_ADMIN_TOKEN</span>，也可以填它。</div>
   </div>
 </div>
 <script>
@@ -954,7 +955,7 @@ async function api(method, path, body, opt) {
   if (resp.status === 401) {
     setToken('');
     showLogin('令牌无效或已过期，请重新输入');
-    throw new ZwError('UNAUTHENTICATED', '需要访问令牌', '在登录卡里输入 ZW_ADMIN_TOKEN', 401, false);
+    throw new ZwError('UNAUTHENTICATED', '需要机器码或访问令牌', '在登录卡里输入这台电脑的机器码（zwd_...）', 401, false);
   }
   const ct = resp.headers.get('content-type') || '';
   // 二进制端点（截图、导出包）不套 {ok,data}，直接返回 Response 交给调用方
@@ -2393,6 +2394,7 @@ function renderProxies() {
       <div class="grow"></div>
       <button class="btn sm" data-act="reload-view">刷新</button>
       <button class="btn sm primary" data-act="proxy-new">＋ 新增代理</button>
+      <button class="btn sm" data-act="proxy-import">批量导入</button>
     </div>
     <div class="table-wrap mb4">
       <table class="tbl"><thead><tr>
@@ -2404,6 +2406,66 @@ function renderProxies() {
 
     ${proxyInlineCheckCard()}
   </div>`;
+}
+
+/** 批量导入代理：一行一个。
+ *
+ * 支持的写法（后端 proxylib.parse_line 负责解析）：
+ *   socks5://user:pass@host:port     http://user:pass@host:port
+ *   host:port:user:pass              host:port
+ * 行尾可以跟 `# 备注` 当 label。失败行会单独列出来，不影响其它行。
+ */
+function proxyImportDialog() {
+  openDialog({
+    title: '批量导入代理',
+    sub: '一行一个；支持 socks5://user:pass@host:port、http://…、host:port:user:pass、host:port，行尾可写 # 备注',
+    wide: true,
+    body: `<textarea class="input mono" id="pi-text" rows="12" spellcheck="false"
+      style="width:100%;resize:vertical;line-height:1.6"
+      placeholder="socks5://user:pass@1.2.3.4:20000&#10;http://user:pass@5.6.7.8:8080&#10;9.9.9.9:1080:user:pass&#10;10.0.0.1:3128  # 直连无认证"></textarea>
+      <div class="hint mt2">密码不会回显，也不会写进日志。重复的代理会自动跳过。</div>
+      <div id="pi-result" class="mt3"></div>`,
+    footer: `<div class="grow"></div><button class="btn sm" data-act="dlg-close">关闭</button>
+      <button class="btn sm primary" id="pi-go">导入</button>`,
+    onMount(root) {
+      $('#pi-go', root).addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        const text = $('#pi-text', root).value || '';
+        if (!text.trim()) { toast('先粘贴至少一行代理', 'err'); return; }
+        btn.disabled = true;
+        btn.textContent = '导入中…';
+        try {
+          // 注意：这个端点直接返回 {ok, data}，不再套一层
+          const r = await fetch('/api/v1/proxies/import', {
+            method: 'POST',
+            headers: Object.assign({ 'Content-Type': 'application/json' }, S.token ? { Authorization: 'Bearer ' + S.token } : {}),
+            body: JSON.stringify({ text }),
+          });
+          const body = await r.json();
+          if (!body.ok) throw new Error(body.message || ('HTTP ' + r.status));
+          const d = body.data || {};
+          const failed = d.failed || [];
+          $('#pi-result', root).innerHTML =
+            `<div class="card"><b>导入完成</b>：成功 ${esc(d.imported || 0)} 条，
+              跳过重复 ${esc(d.skipped || 0)} 条，忽略空行/注释 ${esc(d.ignored || 0)} 条，
+              失败 ${esc(failed.length)} 条</div>` +
+            (failed.length
+              ? `<div class="card mt2"><b>失败明细</b><ul class="mt2">${failed.slice(0, 8).map((f) =>
+                  `<li class="mono">${esc(String(f.line || '').slice(0, 60))} → ${esc(f.error || '')}</li>`).join('')}</ul>
+                 ${failed.length > 8 ? `<div class="hint">还有 ${failed.length - 8} 条未显示</div>` : ''}</div>`
+              : '');
+          toast(`导入 ${d.imported || 0} 条代理`, 'ok');
+          reloadView('proxies');
+        } catch (e) {
+          $('#pi-result', root).innerHTML = `<div class="card bad">导入失败：${esc(e.message || '未知错误')}</div>`;
+          toast('导入失败', 'err');
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '导入';
+        }
+      });
+    },
+  });
 }
 
 function proxyForm(proxy) {
@@ -3537,6 +3599,7 @@ function onAct(act, node, ev) {
     }
 
     case 'proxy-new': { const f = proxyForm(null); openDialog(Object.assign({ wide: true }, f)); break; }
+    case 'proxy-import': { proxyImportDialog(); break; }
     case 'proxy-edit': {
       const x = ((S.proxies || {}).proxies || []).find((p) => p.id === id);
       if (x) { const f = proxyForm(x); openDialog(Object.assign({ wide: true }, f)); }

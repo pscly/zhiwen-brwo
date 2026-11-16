@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -55,10 +56,23 @@ __all__ = [
     "Theme",
     "ProfilePanel",
     "LogPanel",
+    "TextOverlay",
+    "ConfirmOverlay",
+    "NoticeOverlay",
+    "ChoiceOverlay",
+    "CreateProfileOverlay",
+    "ProxyOverlay",
+    "ImportProxiesOverlay",
+    "ProxyLibraryOverlay",
+    "PacksOverlay",
+    "PackApplyOverlay",
     "call_async",
     "data_root",
     "open_in_file_manager",
     "logs_dir",
+    "mask_proxy_text",
+    "proxy_display_for",
+    "format_probe",
 ]
 
 
@@ -104,6 +118,118 @@ def _clip(text: str, limit: int) -> str:
     """按字符数截断（中文一个字算一个，Tk 的 Label 不会自己省略）。"""
     text = str(text or "")
     return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
+
+
+# ── 代理串的脱敏与展示 ────────────────────────────────────
+def mask_proxy_text(raw: str) -> str:
+    """把一串代理里的密码换成 `***`，其余原样。
+
+    为什么自己实现（不 import `services.proxy` 的解析器）：面板只与 HTTP 接口
+    打交道，解析器的错误码/认证扩展是接口层的关注点；这里只需要保证"不管
+    用户粘进来多畸形的串，密码都不会被回显到界面上"。宁可显示得丑，不能漏密码。
+
+    覆盖两种常见形态：`scheme://user:pass@host:port` 与 `host:port:user:pass`。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if "@" in text:
+        head, _, tail = text.rpartition("@")
+        scheme = ""
+        cred = head
+        if "://" in head:
+            scheme, _, cred = head.partition("://")
+            scheme += "://"
+        if ":" in cred:
+            user, _, _pw = cred.partition(":")
+            return f"{scheme}{user}:***@{tail}"
+        # 只有用户名没有密码：用户名也遮掉大半（有人把 token 当用户名用）
+        return f"{scheme}{_clip(cred, 1)}***@{tail}"
+    parts = text.split(":")
+    if len(parts) == 4:            # host:port:user:pass
+        return f"{parts[0]}:{parts[1]}:{parts[2]}:***"
+    return text
+
+
+def proxy_upstream_of(row: dict[str, Any]) -> str:
+    """代理库一行 → 给人看的脱敏串（`socks5://user:***@1.2.3.4:20000`）。"""
+    scheme = str(row.get("scheme") or "").strip()
+    host = str(row.get("host") or "").strip()
+    port = row.get("port") or 0
+    user = str(row.get("username") or "").strip()
+    if user:
+        return f"{scheme}://{user}:***@{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+
+def proxy_display_for(profile: dict[str, Any], library: dict[int, dict[str, Any]]) -> str:
+    """这个环境实际用哪个代理（脱敏）。空串 = 没设代理。
+
+    为什么需要 `library`：`assign_to_profile()` 会把 `profiles.proxy` 置空、
+    只留 `proxy_id`（见 `services/proxylib.py` 顶部说明），所以光看环境行
+    是看不出代理地址的，必须按 id 关联代理库。
+    """
+    pid = profile.get("proxy_id")
+    if pid not in (None, "", 0):
+        try:
+            row = library.get(int(pid))
+        except (TypeError, ValueError):
+            row = None
+        if row is not None:
+            return proxy_upstream_of(row)
+        return f"代理 #{pid}（库里已没有这一条）"
+    raw = str(profile.get("proxy") or "").strip()
+    return mask_proxy_text(raw) if raw else ""
+
+
+def proxy_display_from_assign(data: dict[str, Any]) -> str:
+    """`PUT /profiles/{ref}/proxy` 的返回 → 脱敏串（清除时返回空串）。"""
+    if not isinstance(data, dict) or data.get("cleared"):
+        return ""
+    scheme = str(data.get("scheme") or "")
+    host = str(data.get("host") or "")
+    port = data.get("port") or 0
+    user = str(data.get("username") or "")
+    if user:
+        return f"{scheme}://{user}:***@{host}:{port}"
+    return f"{scheme}://{host}:{port}" if (scheme or host) else ""
+
+
+def format_probe(data: Any) -> tuple[str, bool]:
+    """把一次出口检测的结果压成一行字。返回 (文字, 是否算失败)。"""
+    if not isinstance(data, dict):
+        return "没有拿到检测结果", True
+    if data.get("ok"):
+        bits = [f"出口 IP {data.get('exit_ip') or '未知'}"]
+        country = str(data.get("country") or "").strip()
+        if country:
+            bits.append(country)
+        ms = int(data.get("latency_ms") or 0)
+        if ms:
+            bits.append(f"{ms} ms")
+        return " · ".join(bits), False
+    code = str(data.get("code") or "").strip()
+    err = str(data.get("error") or "出口检测没通过").strip()
+    return (f"检测失败：[{code}] {err}" if code else f"检测失败：{err}"), True
+
+
+def _unwrap_business(ok: bool, data: Any, err: dict[str, Any] | None
+                     ) -> tuple[bool, Any, dict[str, Any] | None]:
+    """把 `proxylib` / `packs` 的"业务失败"折成统一的失败三元组。
+
+    这两个服务层的失败是 **HTTP 200 + `data.ok=false`**（见 `proxylib.test_one`、
+    `assign_to_profile`），而 `CoreApi.call` 的 `ok` 只表示"接口调通了"。
+    不折这一下，界面上会出现"保存代理成功"但其实代理没绑上的假成功。
+    """
+    if not ok:
+        return ok, data, err
+    if isinstance(data, dict) and data.get("ok") is False:
+        return False, data, {
+            "code": str(data.get("code") or "FAILED"),
+            "message": str(data.get("error") or data.get("message") or "操作没有成功"),
+            "hint": str(data.get("hint") or ""),
+        }
+    return ok, data, err
 
 
 # ── 本机数据目录 ──────────────────────────────────────────
@@ -333,6 +459,78 @@ class CoreApi:
             params={"purge": "true" if purge else "false"}, timeout=60.0,
         )
 
+    # -- 代理 --
+    # 这一组里"业务失败"是 HTTP 200 + data.ok=false，所以统一过 _unwrap_business，
+    # 调用方只看 (ok, data, err) 三元组就够。
+    def list_proxies(self) -> tuple[bool, Any, dict[str, Any] | None]:
+        return self.call("GET", "/api/v1/proxies", timeout=8.0)
+
+    def import_proxies(self, text: str, label_prefix: str = "") -> tuple[bool, Any, dict[str, Any] | None]:
+        # 一次可能粘几百行、每行都要过一遍解析与唯一性检查，给足超时
+        return _unwrap_business(*self.call(
+            "POST", "/api/v1/proxies/import",
+            json_body={"text": text, "label_prefix": label_prefix}, timeout=120.0,
+        ))
+
+    def test_proxy_raw(self, raw: str) -> tuple[bool, Any, dict[str, Any] | None]:
+        # 出口检测要真的经代理抓一次页面；服务端单次超时 15s，这里留余量
+        return _unwrap_business(*self.call(
+            "POST", "/api/v1/proxies/test", json_body={"raw": raw}, timeout=90.0,
+        ))
+
+    def test_proxies(self, ids: list[int]) -> tuple[bool, Any, dict[str, Any] | None]:
+        # 服务端并发 4、单条 15s：代理多时整批按分钟算，超时给很宽
+        return self.call(
+            "POST", "/api/v1/proxies/test-many",
+            json_body={"ids": [int(i) for i in ids]}, timeout=600.0,
+        )
+
+    def set_profile_proxy(
+        self, ref: str, *, proxy_id: int | None = None, raw: str = ""
+    ) -> tuple[bool, Any, dict[str, Any] | None]:
+        """给环境设/换代理。`proxy_id` 与 `raw` 都空 = 清除代理。"""
+        body: dict[str, Any] = {}
+        if proxy_id is not None:
+            body["proxy_id"] = int(proxy_id)
+        text = (raw or "").strip()
+        if text:
+            body["raw"] = text
+        return _unwrap_business(*self.call(
+            "PUT", f"/api/v1/profiles/{quote(ref, safe='')}/proxy",
+            json_body=body, timeout=60.0,
+        ))
+
+    # -- 扩展包 --
+    def list_packs(self) -> tuple[bool, Any, dict[str, Any] | None]:
+        return self.call("GET", "/api/v1/packs", timeout=10.0)
+
+    def import_pack(self, *, path: str = "", from_profile: str = "",
+                    name: str = "") -> tuple[bool, Any, dict[str, Any] | None]:
+        # 从环境导入要复制扩展代码 + 本地存储（可能几十 MB），慢是正常的
+        return _unwrap_business(*self.call(
+            "POST", "/api/v1/packs/import",
+            json_body={"path": path, "from_profile": from_profile, "name": name},
+            timeout=600.0,
+        ))
+
+    def set_pack_default(self, pack_id: str, enabled: bool = True
+                         ) -> tuple[bool, Any, dict[str, Any] | None]:
+        return _unwrap_business(*self.call(
+            "POST", f"/api/v1/packs/{quote(pack_id, safe='')}/default",
+            json_body={"enabled": bool(enabled)}, timeout=30.0,
+        ))
+
+    def delete_pack(self, pack_id: str) -> tuple[bool, Any, dict[str, Any] | None]:
+        return _unwrap_business(*self.call(
+            "DELETE", f"/api/v1/packs/{quote(pack_id, safe='')}", timeout=60.0,
+        ))
+
+    def apply_packs(self, ref: str, pack_ids: list[str]) -> tuple[bool, Any, dict[str, Any] | None]:
+        return _unwrap_business(*self.call(
+            "POST", f"/api/v1/profiles/{quote(ref, safe='')}/packs/apply",
+            json_body={"pack_ids": list(pack_ids)}, timeout=600.0,
+        ))
+
     # -- 运维 --
     def stats(self) -> tuple[bool, Any, dict[str, Any] | None]:
         return self.call("GET", "/api/v1/stats", timeout=8.0)
@@ -408,24 +606,95 @@ class _Overlay:
             pass
 
 
+class _Placeholder:
+    """给 `tk.Entry` 加灰色占位符（提示示例），并在取值时把占位符当成空。
+
+    为什么这一格用 `tk.Entry` 而不是 `ttk.Entry`：ttk 的前景色由 style 决定，
+    `configure(foreground=...)` 直接抛 unknown option；占位符必须是灰色，
+    否则用户会把示例串当成真内容一起提交（"填了代理却报格式错"就是这么来的）。
+
+    为什么不用 `insert(0, text)` 硬塞：那样提交时拿到的就是示例文本。这里
+    用一个"是否处于占位状态"的标记，`value()` 在占位状态下返回空串。
+    """
+
+    def __init__(self, entry: tk.Entry, var: tk.StringVar, text: str, theme: Theme) -> None:
+        self.entry = entry
+        self.var = var
+        self.text = text
+        self.theme = theme
+        self.active = False
+        entry.bind("<FocusIn>", self._hide, add="+")
+        entry.bind("<FocusOut>", self._show, add="+")
+        if not var.get():
+            self._show()
+
+    def _show(self, _event: Any = None) -> None:
+        if self.var.get():
+            return
+        self.active = True
+        self.var.set(self.text)
+        try:
+            self.entry.configure(fg=self.theme.faint)
+        except Exception:
+            pass
+
+    def _hide(self, _event: Any = None) -> None:
+        if not self.active:
+            return
+        self.active = False
+        self.var.set("")
+        try:
+            self.entry.configure(fg=self.theme.ink)
+        except Exception:
+            pass
+
+    def value(self) -> str:
+        """真实内容（占位符状态下是空串）。"""
+        return "" if self.active else self.var.get()
+
+    def reset(self) -> None:
+        """清空并重新显示占位符（保存成功后用，避免用户以为还没写进去）。"""
+        self.active = False
+        self.var.set("")
+        self._show()
+
+
 class TextOverlay(_Overlay):
-    """自绘的名称输入浮层（替代 `simpledialog.askstring`）。"""
+    """自绘的名称输入浮层（替代 `simpledialog.askstring`）。
+
+    `fields` 的每一项是 `(key, 标签, 初始值)`，也可以给第 4 项当**占位符**：
+    `(key, 标签, "", "socks5://user:pass@1.2.3.4:20000（可留空）")`。
+    """
 
     def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
-                 title: str, subtitle: str, fields: list[tuple[str, str, str]],
+                 title: str, subtitle: str, fields: list[tuple[str, ...]],
                  submit_text: str, on_submit: Callable[[dict[str, str]], bool]) -> None:
         super().__init__(master, theme, fonts, title, subtitle)
         self.on_submit = on_submit
         self.vars: dict[str, tk.StringVar] = {}
-        self.entries: list[ttk.Entry] = []
+        self.entries: list[tk.Widget] = []
+        self._placeholders: dict[str, _Placeholder] = {}
+        self.result_label: tk.Label | None = None
         self.err_var = tk.StringVar(value="")
-        for idx, (key, label, initial) in enumerate(fields):
+        for idx, field in enumerate(fields):
+            key, label, initial = field[0], field[1], field[2]
+            placeholder = str(field[3]) if len(field) > 3 else ""
             tk.Label(self.body, text=label, bg=theme.card2, fg=theme.dim,
                      font=fonts["tiny"], anchor="w").pack(fill="x", pady=(6 if idx else 0, 2))
             var = tk.StringVar(value=initial)
             self.vars[key] = var
-            entry = ttk.Entry(self.body, textvariable=var, font=fonts["body"])
-            entry.pack(fill="x", ipady=5)
+            if placeholder:
+                entry: tk.Widget = tk.Entry(
+                    self.body, textvariable=var, bg=theme.field, fg=theme.ink,
+                    insertbackground=theme.ink, relief="flat", bd=0,
+                    highlightthickness=1, highlightbackground=theme.line,
+                    highlightcolor=theme.acc, font=fonts["body"],
+                )
+                entry.pack(fill="x", ipady=5)
+                self._placeholders[key] = _Placeholder(entry, var, placeholder, theme)
+            else:
+                entry = ttk.Entry(self.body, textvariable=var, font=fonts["body"])
+                entry.pack(fill="x", ipady=5)
             entry.bind("<Return>", lambda _e: self._submit())
             entry.bind("<Escape>", lambda _e: self.close())
             self.entries.append(entry)
@@ -437,6 +706,39 @@ class TextOverlay(_Overlay):
         ttk.Button(self.buttons, text=submit_text, style="TinyAccent.TButton",
                    command=self._submit).pack(side="right", padx=(0, 8))
 
+    def _values(self) -> dict[str, str]:
+        """提交用的真实值（占位符不算内容）。"""
+        out: dict[str, str] = {}
+        for key, var in self.vars.items():
+            ph = self._placeholders.get(key)
+            out[key] = ph.value() if ph is not None else var.get()
+        return out
+
+    def add_action_row(self, text: str, command: Callable[[], None]) -> tk.Label:
+        """在输入框下面插一行"动作按钮 + 结果文字"，返回结果 Label。
+
+        为什么用 `before=self.error_label`：结果行要永远在错误行**上面**
+        （先听到"出口 IP 是多少"，再看到"哪一步报错了"），而 Tk 的 pack
+        顺序由调用顺序决定，后加的控件默认落到底部。
+        """
+        row = tk.Frame(self.body, bg=self.theme.card2)
+        row.pack(fill="x", pady=(8, 0), before=self.error_label)
+        ttk.Button(row, text=text, style="Tiny.TButton",
+                   command=command).pack(side="left")
+        self.result_label = tk.Label(row, text="", bg=self.theme.card2, fg=self.theme.faint,
+                                     font=self.fonts["tiny"], anchor="w", justify="left",
+                                     wraplength=250)
+        self.result_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
+        return self.result_label
+
+    def set_result(self, msg: str, bad: bool = False) -> None:
+        if self.result_label is None:
+            return
+        try:
+            self.result_label.configure(text=msg, fg=self.theme.bad if bad else self.theme.ok)
+        except Exception:
+            pass
+
     def on_open(self) -> None:
         if self.entries:
             # 稍等一下再抢焦点：place 之后立刻 focus_set 在某些 WM 上会被主窗口抢回去
@@ -446,7 +748,7 @@ class TextOverlay(_Overlay):
                 pass
 
     def _submit(self) -> None:
-        values = {k: v.get() for k, v in self.vars.items()}
+        values = self._values()
         try:
             keep_open = bool(self.on_submit(values))
         except Exception as exc:  # noqa: BLE001
@@ -489,17 +791,836 @@ class ConfirmOverlay(_Overlay):
         self.on_confirm()
 
 
+class _ScrollList:
+    """Canvas + Frame 拼出来的可滚动竖排列表。
+
+    Tk 没有现成的"可滚动容器"。面板里的环境列表、代理库、扩展包列表要的是
+    同一个东西，所以抽一份出来：滚轮绑定、宽度跟随、清空重建都只实现一次。
+
+    为什么滚轮要递归绑到每个子控件：指针停在一行里的 Label 上时，滚轮事件
+    不会冒泡到 Canvas，只绑 Canvas 的话用户会以为"列表滚不动"。
+    """
+
+    def __init__(self, parent: tk.Misc, theme: Theme, *, height: int = 140,
+                 bg: str | None = None) -> None:
+        self.theme = theme
+        self.bg = bg or theme.card2
+        self.wrap = tk.Frame(parent, bg=self.bg)
+        self.canvas = tk.Canvas(self.wrap, bg=self.bg, bd=0, highlightthickness=0,
+                                height=height)
+        self.vsb = tk.Scrollbar(self.wrap, orient="vertical", command=self.canvas.yview,
+                                bd=0, width=8, troughcolor=self.bg, bg=theme.card,
+                                activebackground=theme.faint)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.vsb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=self.bg)
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+    def pack(self, **kwargs: Any) -> None:
+        self.wrap.pack(**kwargs)
+
+    def _on_inner_configure(self, _event: Any = None) -> None:
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_canvas_configure(self, event: Any) -> None:
+        # 内层宽度必须跟随画布：create_window 里的控件宽度默认是 0，
+        # 一行行会挤成一列（第一次做可滚动框架必踩的坑）
+        try:
+            self.canvas.itemconfigure(self._win, width=event.width)
+        except Exception:
+            pass
+
+    def clear(self) -> None:
+        for child in self.inner.winfo_children():
+            child.destroy()
+
+    def bind_wheel(self, widget: tk.Misc | None = None) -> None:
+        target = widget if widget is not None else self.inner
+        target.bind("<MouseWheel>", self._on_wheel, add="+")
+        target.bind("<Button-4>", lambda _e: self.canvas.yview_scroll(-2, "units"), add="+")
+        target.bind("<Button-5>", lambda _e: self.canvas.yview_scroll(2, "units"), add="+")
+        for child in target.winfo_children():
+            self.bind_wheel(child)
+
+    def _on_wheel(self, event: Any) -> None:
+        delta = 1 if getattr(event, "delta", 0) > 0 else -1
+        try:
+            self.canvas.yview_scroll(-delta * 2, "units")
+        except Exception:
+            pass
+
+
+class NoticeOverlay(_Overlay):
+    """纯提示浮层（替代 `messagebox.showinfo/showwarning`）。
+
+    只用于"必须有回执"的事：比如"环境建好了但代理没设上"。普通的成功/失败
+    仍然走事件流 + 状态行 —— 弹窗打断成本很高，别滥用。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 title: str, message: str, *, danger: bool = False,
+                 close_text: str = "知道了") -> None:
+        super().__init__(master, theme, fonts, title)
+        self.err_var = tk.StringVar(value="")
+        tk.Label(self.body, text=message, bg=theme.card2,
+                 fg=theme.bad if danger else theme.ink, font=fonts["small"],
+                 anchor="w", justify="left", wraplength=330).pack(fill="x")
+        ttk.Button(self.buttons, text=close_text, style="TinyAccent.TButton",
+                   command=self.close).pack(side="right")
+
+
+class ChoiceOverlay(_Overlay):
+    """从一组条目里挑一个（`multi=True` 时多选）。
+
+    为什么不用 `Listbox`：条目要带副标题（分组、扩展数），Listbox 只能一行
+    纯文本；而这里的条目常常是"点一下就开始干活"，用按钮最直接。
+
+    `options` 每项：`{"value": ..., "label": "...", "sub": "...", "checked": bool}`。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 title: str, subtitle: str, options: list[dict[str, Any]],
+                 on_pick: Callable[[list[str]], None], *, multi: bool = False,
+                 empty_hint: str = "没有可选项", confirm_text: str = "应用") -> None:
+        super().__init__(master, theme, fonts, title, subtitle)
+        self.on_pick = on_pick
+        self.multi = multi
+        self.vars: dict[str, tk.BooleanVar] = {}
+        self.err_var = tk.StringVar(value="")
+        self.list = _ScrollList(self.body, theme, height=170)
+        self.list.pack(fill="both", expand=True)
+        if not options:
+            tk.Label(self.list.inner, text=empty_hint, bg=theme.card2, fg=theme.faint,
+                     font=fonts["tiny"], anchor="w", justify="left",
+                     wraplength=300).pack(fill="x", padx=6, pady=8)
+        for opt in options:
+            value = str(opt.get("value"))
+            line = tk.Frame(self.list.inner, bg=theme.card2)
+            line.pack(fill="x", pady=(0, 3))
+            box = tk.Frame(line, bg=theme.card2, padx=6, pady=3)
+            box.pack(side="left", fill="x", expand=True)
+            if multi:
+                var = tk.BooleanVar(value=bool(opt.get("checked")))
+                self.vars[value] = var
+                ttk.Checkbutton(box, text="", variable=var,
+                                style="Card.TCheckbutton").pack(side="left")
+            else:
+                ttk.Button(box, text=_clip(str(opt.get("label") or value), 22),
+                           style="Tiny.TButton",
+                           command=lambda v=value: self._pick(v)).pack(side="left")
+            text_box = tk.Frame(box, bg=theme.card2)
+            text_box.pack(side="left", padx=(6, 0), fill="x", expand=True)
+            if multi:
+                tk.Label(text_box, text=_clip(str(opt.get("label") or value), 24),
+                         bg=theme.card2, fg=theme.ink, font=fonts["small"],
+                         anchor="w").pack(fill="x")
+            sub = str(opt.get("sub") or "")
+            if sub:
+                tk.Label(text_box, text=_clip(sub, 40), bg=theme.card2, fg=theme.faint,
+                         font=fonts["tiny"], anchor="w").pack(fill="x")
+        self.list.bind_wheel()
+        ttk.Button(self.buttons, text="取消", style="Tiny.TButton",
+                   command=self.close).pack(side="right")
+        if multi:
+            ttk.Button(self.buttons, text=confirm_text, style="TinyAccent.TButton",
+                       command=self._confirm).pack(side="right", padx=(0, 8))
+        self.after_idle(self.list._on_inner_configure, None)
+
+    def _pick(self, value: str) -> None:
+        self.close()
+        try:
+            self.on_pick([value])
+        except Exception:
+            pass
+
+    def _confirm(self) -> None:
+        picked = [key for key, var in self.vars.items() if var.get()]
+        if not picked:
+            self.error("一个都没选")
+            return
+        self.close()
+        try:
+            self.on_pick(picked)
+        except Exception:
+            pass
+
+
+class CreateProfileOverlay(TextOverlay):
+    """新建环境：名称 / 分组 / **可选代理**，并且能先把代理测一遍。
+
+    为什么在这里就放代理：用户拿到代理的第一件事就是"配一个新环境试一下"。
+    逼他先建一个不带代理的环境、再去列表里改一遍，等于同一个动作做两次。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 *, api: CoreApi, on_submit: Callable[[dict[str, str]], bool]) -> None:
+        super().__init__(
+            master, theme, fonts,
+            title="新建环境",
+            subtitle=("名称必填，最多 64 个字；分组与代理可以留空。\n"
+                      "代理填错不要紧：先点「测试这个代理」看到出口 IP 再创建。"),
+            fields=[
+                ("name", "名称", ""),
+                ("group", "分组（可选）", ""),
+                ("proxy", "代理（可选）", "",
+                 "socks5://user:pass@1.2.3.4:20000（可留空）"),
+            ],
+            submit_text="创建",
+            on_submit=on_submit,
+        )
+        self.api = api
+        self.add_action_row("测试这个代理", self._test)
+
+    def _test(self) -> None:
+        raw = (self._values().get("proxy") or "").strip()
+        if not raw:
+            self.set_result("先把代理串填进上面的输入框", bad=True)
+            return
+        self.set_result("正在检测出口 …")
+        call_async(self.card, lambda: self.api.test_proxy_raw(raw), self._on_test)
+
+    def _on_test(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        if not self.is_open():
+            return
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            self.set_result(f"测试失败：[{code}] {msg}", bad=True)
+            return
+        msg, bad = format_probe(data)
+        self.set_result(msg, bad=bad)
+
+
+class ProxyOverlay(_Overlay):
+    """给一个环境改代理：看当前值、粘新的、先测一遍、清除。
+
+    为什么单独一个浮层而不是行内编辑：一行只有三十来像素高，代理串往往
+    上百字符（带认证），行内编辑一碰就错；浮层里还能同时摆"当前是什么"、
+    "测一遍"和"清除"。
+
+    网络动作由 `ProfilePanel` 执行（它管忙碌标记、事件流、刷新），本类只负责
+    显示与收集输入：`mark_saved()` / `mark_failed()` 由面板回调。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 *, api: CoreApi, profile: dict[str, Any],
+                 library: dict[int, dict[str, Any]]) -> None:
+        pid = str(profile.get("id") or "")
+        super().__init__(master, theme, fonts, "环境代理",
+                         f"{profile.get('name') or ''}（{pid}）")
+        self.api = api
+        self.theme = theme
+        self.vars: dict[str, tk.StringVar] = {}
+        self.on_save: Callable[[str], None] | None = None
+        self.on_clear: Callable[[], None] | None = None
+        state = str(profile.get("state") or "stopped")
+
+        tk.Label(self.body, text="当前代理", bg=theme.card2, fg=theme.dim,
+                 font=fonts["tiny"], anchor="w").pack(fill="x")
+        current = proxy_display_for(profile, library) or "未设置"
+        self.current_label = tk.Label(self.body, text=current, bg=theme.card2, fg=theme.ink,
+                                      font=fonts["small"], anchor="w", justify="left",
+                                      wraplength=320)
+        self.current_label.pack(fill="x")
+        hint = ("改完必须重启这个环境才生效（代理是浏览器的启动参数，不能热改）。"
+                if state in ("running", "starting") else
+                "环境当前没在运行，保存后下次启动就走新代理。")
+        tk.Label(self.body, text=hint, bg=theme.card2, fg=theme.faint, font=fonts["tiny"],
+                 anchor="w", justify="left", wraplength=320).pack(fill="x", pady=(2, 8))
+
+        tk.Label(self.body, text="新代理（粘贴整串，会自动入代理库）", bg=theme.card2,
+                 fg=theme.dim, font=fonts["tiny"], anchor="w").pack(fill="x", pady=(0, 2))
+        var = tk.StringVar(value="")
+        self.vars["proxy"] = var
+        self.entry = tk.Entry(self.body, textvariable=var, bg=theme.field, fg=theme.ink,
+                              insertbackground=theme.ink, relief="flat", bd=0,
+                              highlightthickness=1, highlightbackground=theme.line,
+                              highlightcolor=theme.acc, font=fonts["body"])
+        self.entry.pack(fill="x", ipady=5)
+        self.entry.bind("<Return>", lambda _e: self._save())
+        self.entry.bind("<Escape>", lambda _e: self.close())
+        self._placeholder = _Placeholder(self.entry, var,
+                                        "socks5://user:pass@1.2.3.4:20000", theme)
+
+        row = tk.Frame(self.body, bg=theme.card2)
+        row.pack(fill="x", pady=(8, 0))
+        ttk.Button(row, text="测试", style="Tiny.TButton",
+                   command=self._test).pack(side="left")
+        self.result_var = tk.StringVar(value="")
+        self.result_label = tk.Label(row, textvariable=self.result_var, bg=theme.card2,
+                                     fg=theme.faint, font=fonts["tiny"], anchor="w",
+                                     justify="left", wraplength=250)
+        self.result_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
+        self.error_label = tk.Label(self.body, text="", bg=theme.card2, fg=theme.bad,
+                                    font=fonts["tiny"], anchor="w", justify="left",
+                                    wraplength=320)
+        self.error_label.pack(fill="x", pady=(6, 0))
+
+        ttk.Button(self.buttons, text="取消", style="Tiny.TButton",
+                   command=self.close).pack(side="right")
+        self.save_btn = ttk.Button(self.buttons, text="保存", style="TinyAccent.TButton",
+                                  command=self._save)
+        self.save_btn.pack(side="right", padx=(0, 8))
+        ttk.Button(self.buttons, text="清除代理", style="Danger.TButton",
+                   command=self._clear).pack(side="right", padx=(0, 6))
+
+    # -- 面板回调用 --
+    def note(self, msg: str, kind: str = "dim") -> None:
+        colors = {"dim": self.theme.faint, "ok": self.theme.ok,
+                  "warn": self.theme.warn, "bad": self.theme.bad}
+        try:
+            self.result_var.set(msg)
+            self.result_label.configure(fg=colors.get(kind, self.theme.faint))
+        except Exception:
+            pass
+
+    def _busy_ui(self, busy: bool) -> None:
+        try:
+            self.save_btn.state(["disabled"] if busy else ["!disabled"])
+        except Exception:
+            pass
+
+    def mark_saved(self, display: str, *, restart: bool = False, hint: str = "") -> None:
+        """保存成功：更新「当前代理」，清空输入框，并说清楚什么时候生效。"""
+        self._busy_ui(False)
+        try:
+            self.current_label.configure(text=display or "未设置")
+        except Exception:
+            pass
+        self._placeholder.reset()
+        msg = ("已保存，重启这个环境后生效" if restart else "已保存，下次启动就走这个代理")
+        if hint:
+            msg += f"（{hint}）"
+        self.note(msg, "warn" if restart else "ok")
+
+    def mark_failed(self, msg: str) -> None:
+        self._busy_ui(False)
+        self.note(msg, "bad")
+        self.error(msg)
+
+    # -- 动作 --
+    def _save(self) -> None:
+        raw = (self._placeholder.value() or "").strip()
+        if not raw:
+            self.error("代理串是空的：要清空代理请点「清除代理」")
+            return
+        self.error("")
+        self._busy_ui(True)
+        self.note("正在保存 …")
+        if self.on_save is not None:
+            self.on_save(raw)
+
+    def _clear(self) -> None:
+        self.error("")
+        self._busy_ui(True)
+        self.note("正在清除 …")
+        if self.on_clear is not None:
+            self.on_clear()
+
+    def _test(self) -> None:
+        raw = (self._placeholder.value() or "").strip()
+        if not raw:
+            self.note("先在输入框里粘一个代理串，再点测试", "bad")
+            return
+        self.note("正在检测出口 …")
+        call_async(self.card, lambda: self.api.test_proxy_raw(raw), self._on_test)
+
+    def _on_test(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        if not self.is_open():
+            return
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            self.note(f"测试失败：[{code}] {msg}", "bad")
+            return
+        msg, bad = format_probe(data)
+        self.note(msg, "bad" if bad else "ok")
+
+
+class ImportProxiesOverlay(_Overlay):
+    """批量导入代理：整段粘贴，一行一个。"""
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 on_import: Callable[[str], None]) -> None:
+        super().__init__(
+            master, theme, fonts, "导入代理",
+            "一行一个，直接整段粘进来。支持 socks5://u:p@h:p、http://…、h:p、h:p:u:p；\n"
+            "行尾可写 # 备注。重复的会自动跳过，坏行只跳过它自己。",
+        )
+        self.on_import = on_import
+        self.err_var = tk.StringVar(value="")
+        box = tk.Frame(self.body, bg=theme.field, highlightthickness=1,
+                       highlightbackground=theme.line)
+        box.pack(fill="both", expand=True)
+        self.text = tk.Text(box, height=9, bg=theme.field, fg=theme.ink, bd=0,
+                            highlightthickness=0, insertbackground=theme.ink,
+                            font=(fonts.get("mono") or "TkFixedFont", 9), wrap="none")
+        vsb = tk.Scrollbar(box, command=self.text.yview, bd=0, width=8,
+                           troughcolor=theme.field, bg=theme.card2)
+        self.text.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
+        self.result_var = tk.StringVar(value="")
+        self.result_label = tk.Label(self.body, textvariable=self.result_var, bg=theme.card2,
+                                     fg=theme.faint, font=fonts["tiny"], anchor="w",
+                                     justify="left", wraplength=320)
+        self.result_label.pack(fill="x", pady=(8, 0))
+        ttk.Button(self.buttons, text="取消", style="Tiny.TButton",
+                   command=self.close).pack(side="right")
+        ttk.Button(self.buttons, text="导入", style="TinyAccent.TButton",
+                   command=self._submit).pack(side="right", padx=(0, 8))
+        self.text.bind("<Escape>", lambda _e: self.close())
+
+    def note(self, msg: str, bad: bool = False) -> None:
+        try:
+            self.result_var.set(msg)
+            self.result_label.configure(fg=self.theme.bad if bad else self.theme.faint)
+        except Exception:
+            pass
+
+    def on_open(self) -> None:
+        try:
+            self.text.focus_set()
+        except Exception:
+            pass
+
+    def _submit(self) -> None:
+        text = self.text.get("1.0", "end")
+        self.note("正在导入 …")
+        self.on_import(text)
+
+
+class ProxyLibraryOverlay(_Overlay):
+    """代理库：全部代理的脱敏串、出口 IP、上次检测时间，可单条测 / 批量测。
+
+    这个浮层自己发请求（只读 + 检测，不改环境状态），面板只负责打开它并
+    把结果写进事件流，避免把面板的状态机搅乱。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 *, api: CoreApi, on_log: Callable[[str, str], None],
+                 on_changed: Callable[[], None]) -> None:
+        super().__init__(master, theme, fonts, "代理库",
+                         "密码只进库、不回显；这里显示的是脱敏串。")
+        self.api = api
+        self.on_log = on_log
+        self.on_changed = on_changed
+        self._rows: list[dict[str, Any]] = []
+        self._inflight = False
+        self.err_var = tk.StringVar(value="")
+        self.list = _ScrollList(self.body, theme, height=200)
+        self.list.pack(fill="both", expand=True)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(self.body, textvariable=self.status_var, bg=theme.card2,
+                                     fg=theme.faint, font=fonts["tiny"], anchor="w",
+                                     justify="left", wraplength=320)
+        self.status_label.pack(fill="x", pady=(6, 0))
+        ttk.Button(self.buttons, text="关闭", style="Tiny.TButton",
+                   command=self.close).pack(side="right")
+        ttk.Button(self.buttons, text="批量检测", style="TinyAccent.TButton",
+                   command=self._test_many).pack(side="right", padx=(0, 8))
+        ttk.Button(self.buttons, text="刷新", style="Tiny.TButton",
+                   command=self.reload).pack(side="right", padx=(0, 6))
+
+    def set_status(self, msg: str, bad: bool = False) -> None:
+        try:
+            self.status_var.set(msg)
+            self.status_label.configure(fg=self.theme.bad if bad else self.theme.faint)
+        except Exception:
+            pass
+
+    # -- 数据 --
+    def reload(self) -> None:
+        if self._inflight:
+            return
+        self._inflight = True
+        self.set_status("正在读取代理库 …")
+        call_async(self.card, self.api.list_proxies, self._on_list)
+
+    def _on_list(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        self._inflight = False
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            self.set_status(f"读不到代理库：[{code}] {msg}", bad=True)
+            self.on_log(f"代理库读取失败：[{code}] {msg}", "bad")
+            return
+        self._rows = list((data or {}).get("proxies") or [])
+        self.render()
+        ok_n = sum(1 for r in self._rows if r.get("last_ok") == 1)
+        self.set_status(f"共 {len(self._rows)} 条代理 · 最近检测可用 {ok_n} 条")
+
+    def render(self) -> None:
+        theme, fonts = self.theme, self.fonts
+        self.list.clear()
+        if not self._rows:
+            tk.Label(self.list.inner,
+                     text="代理库还是空的。用「导入代理」整段粘贴，或在新建环境时填一个。",
+                     bg=theme.card2, fg=theme.faint, font=fonts["tiny"], anchor="w",
+                     justify="left", wraplength=300).pack(fill="x", padx=8, pady=8)
+        for row in self._rows:
+            pid = int(row.get("id") or 0)
+            card = tk.Frame(self.list.inner, bg=theme.card2)
+            card.pack(fill="x", pady=(0, 4))
+            line = tk.Frame(card, bg=theme.card2, padx=8, pady=4)
+            line.pack(fill="x")
+            tk.Label(line, text=_clip(str(row.get("label") or f"#{pid}"), 14), bg=theme.card2,
+                     fg=theme.ink, font=fonts["bold"], anchor="w").pack(side="left")
+            tk.Label(line, text=_clip(proxy_upstream_of(row), 30), bg=theme.card2,
+                     fg=theme.dim, font=fonts["tiny"], anchor="w").pack(side="left", padx=(8, 0))
+            ttk.Button(line, text="测", style="Tiny.TButton",
+                       command=lambda p=pid: self._test_one(p)).pack(side="right")
+            used = [str(x) for x in (row.get("used_by") or [])]
+            meta = self._meta_text(row)
+            if used:
+                meta += " · 被 " + "、".join(used[:2]) + ("…" if len(used) > 2 else "") + " 使用"
+            tk.Label(card, text=_clip(meta, 70), bg=theme.card2, fg=theme.faint,
+                     font=fonts["tiny"], anchor="w").pack(fill="x", padx=8, pady=(0, 3))
+        self.list.bind_wheel()
+        self.after_idle(self.list._on_inner_configure, None)
+
+    @staticmethod
+    def _meta_text(row: dict[str, Any]) -> str:
+        ip = str(row.get("last_exit_ip") or "").strip() or "—"
+        when = row.get("last_check")
+        checked = _fmt_ts(when) if when else "从未检测"
+        if row.get("last_ok") == 1:
+            state = "可用"
+        elif row.get("last_ok") == 0:
+            state = "不可用"
+        else:
+            state = "未检测"
+        return f"出口 {ip} · {checked} · {state}"
+
+    # -- 检测 --
+    def _test_one(self, proxy_id: int) -> None:
+        self.set_status(f"正在检测 #{proxy_id} …")
+        call_async(self.card,
+                   lambda: self.api.test_proxies([proxy_id]),
+                   lambda res: self._after_many(res, [proxy_id]))
+
+    def _test_many(self) -> None:
+        ids = [int(r.get("id") or 0) for r in self._rows if r.get("id")]
+        if not ids:
+            self.set_status("库里还没有代理，先导入", bad=True)
+            return
+        self.set_status(f"正在检测 {len(ids)} 条代理 …（并发 4，可能几十秒）")
+        self.on_log(f"开始批量检测 {len(ids)} 条代理", "info")
+        call_async(self.card, lambda: self.api.test_proxies(ids),
+                   lambda res: self._after_many(res, ids))
+
+    def _after_many(self, res: tuple[bool, Any, dict[str, Any] | None],
+                    ids: list[int]) -> None:
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            self.set_status(f"检测失败：[{code}] {msg}", bad=True)
+            self.on_log(f"代理检测失败：[{code}] {msg}", "bad")
+            return
+        d = data or {}
+        total = int(d.get("total") or 0)
+        ok_n = int(d.get("ok_count") or 0)
+        fail_n = int(d.get("fail_count") or 0)
+        summary = f"检测完成：共 {total} 条，可用 {ok_n} 条，不可用 {fail_n} 条"
+        self.set_status(summary, bad=bool(fail_n))
+        self.on_log(summary, "warn" if fail_n else "ok")
+        self.on_changed()
+        self.reload()
+
+
+class PacksOverlay(_Overlay):
+    """扩展包管理：列表 / 设为默认 / 从环境导入 / 删除。
+
+    「从环境导入」就是用户要的那件事：把已经装好插件的环境（比如 RXYCDP
+    那个浏览器）连数据一起打包；勾上「默认」以后，新建环境会自动带上。
+
+    为什么这里也自己发请求：这些动作只动"包"，不动环境状态机；面板只负责
+    打开它、把结果写进事件流，两边不互相踩。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 *, api: CoreApi, on_log: Callable[[str, str], None],
+                 on_changed: Callable[[], None],
+                 profiles_provider: Callable[[], list[dict[str, Any]]]) -> None:
+        super().__init__(
+            master, theme, fonts, "扩展包",
+            "从环境导入 = 把这个环境里的插件连同本地数据一起打包。\n"
+            "勾了「默认」的包，新建环境时会自动带上。",
+        )
+        self.api = api
+        self.on_log = on_log
+        self.on_changed = on_changed
+        self.profiles_provider = profiles_provider
+        self._packs: list[dict[str, Any]] = []
+        self._default_vars: dict[str, tk.BooleanVar] = {}
+        self._inflight = False
+        self.err_var = tk.StringVar(value="")
+        self.list = _ScrollList(self.body, theme, height=200)
+        self.list.pack(fill="both", expand=True)
+        self.status_var = tk.StringVar(value="")
+        self.status_label = tk.Label(self.body, textvariable=self.status_var, bg=theme.card2,
+                                     fg=theme.faint, font=fonts["tiny"], anchor="w",
+                                     justify="left", wraplength=320)
+        self.status_label.pack(fill="x", pady=(6, 0))
+        ttk.Button(self.buttons, text="关闭", style="Tiny.TButton",
+                   command=self.close).pack(side="right")
+        ttk.Button(self.buttons, text="从环境导入", style="TinyAccent.TButton",
+                   command=self.ask_import_from).pack(side="right", padx=(0, 8))
+        ttk.Button(self.buttons, text="刷新", style="Tiny.TButton",
+                   command=lambda: self.reload(force=True)).pack(side="right", padx=(0, 6))
+
+    def set_status(self, msg: str, bad: bool = False) -> None:
+        try:
+            self.status_var.set(msg)
+            self.status_label.configure(fg=self.theme.bad if bad else self.theme.faint)
+        except Exception:
+            pass
+
+    # -- 数据 --
+    def reload(self, force: bool = False) -> None:
+        if self._inflight and not force:
+            return
+        self._inflight = True
+        self.set_status("正在读取扩展包 …")
+        call_async(self.card, self.api.list_packs, self._on_list)
+
+    def _on_list(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        self._inflight = False
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            self.set_status(f"读不到扩展包：[{code}] {msg}", bad=True)
+            self.on_log(f"扩展包读取失败：[{code}] {msg}", "bad")
+            return
+        self._packs = list((data or {}).get("packs") or [])
+        self.render()
+        defaults = sum(1 for p in self._packs if p.get("is_default"))
+        self.set_status(f"共 {len(self._packs)} 个扩展包 · 默认带上 {defaults} 个")
+
+    def render(self) -> None:
+        theme, fonts = self.theme, self.fonts
+        self.list.clear()
+        self._default_vars.clear()
+        if not self._packs:
+            tk.Label(self.list.inner,
+                     text=("还没有扩展包。点「从环境导入」，选一个已经装好插件的环境"
+                           "（例如 RXYCDP 那个），就能把插件连数据一起打包。"),
+                     bg=theme.card2, fg=theme.faint, font=fonts["tiny"], anchor="w",
+                     justify="left", wraplength=300).pack(fill="x", padx=8, pady=8)
+        for pack in self._packs:
+            self._render_row(pack)
+        self.list.bind_wheel()
+        self.after_idle(self.list._on_inner_configure, None)
+
+    def _render_row(self, pack: dict[str, Any]) -> None:
+        theme, fonts = self.theme, self.fonts
+        pack_id = str(pack.get("id") or "")
+        card = tk.Frame(self.list.inner, bg=theme.card2)
+        card.pack(fill="x", pady=(0, 4))
+        line = tk.Frame(card, bg=theme.card2, padx=8, pady=4)
+        line.pack(fill="x")
+        tk.Label(line, text=_clip(str(pack.get("name") or pack_id), 18), bg=theme.card2,
+                 fg=theme.ink, font=fonts["bold"], anchor="w").pack(side="left")
+        counts = f"{int(pack.get('extension_count') or 0)} 个扩展"
+        with_data = int(pack.get("with_data") or 0)
+        if with_data:
+            counts += f"（{with_data} 个带数据）"
+        tk.Label(line, text=f"{counts} · {pack.get('size_human') or '0 B'}",
+                 bg=theme.card2, fg=theme.dim, font=fonts["tiny"],
+                 anchor="w").pack(side="left", padx=(8, 0))
+        ttk.Button(line, text="删除", style="Danger.TButton",
+                   command=lambda p=pack: self.ask_delete(p)).pack(side="right")
+        var = tk.BooleanVar(value=bool(pack.get("is_default")))
+        self._default_vars[pack_id] = var
+        ttk.Checkbutton(line, text="默认", variable=var, style="Card.TCheckbutton",
+                        command=lambda: self._toggle_default(pack_id, bool(var.get()))
+                        ).pack(side="right", padx=(0, 8))
+        tk.Label(card, text=_clip(self._source_text(pack), 70), bg=theme.card2,
+                 fg=theme.faint, font=fonts["tiny"], anchor="w").pack(fill="x", padx=8, pady=(0, 3))
+
+    @staticmethod
+    def _source_text(pack: dict[str, Any]) -> str:
+        kind = str(pack.get("source") or "").strip()
+        prof = str(pack.get("source_profile") or "").strip()
+        if kind == "profile":
+            return f"来源：环境 {prof or '（未知）'}"
+        if kind:
+            return f"来源：{kind}"
+        return f"来源：{pack.get('path') or '—'}"
+
+    # -- 动作 --
+    def _toggle_default(self, pack_id: str, enabled: bool) -> None:
+        self.set_status(("正在把包设为默认 …" if enabled else "正在取消默认 …"))
+        call_async(self.card, lambda: self.api.set_pack_default(pack_id, enabled),
+                   lambda res: self._after_default(res, pack_id, enabled))
+
+    def _after_default(self, res: tuple[bool, Any, dict[str, Any] | None],
+                       pack_id: str, enabled: bool) -> None:
+        ok, data, err = res
+        name = str((data or {}).get("name") or pack_id)
+        if ok:
+            self.set_status(f"「{name}」{'已设为' if enabled else '已取消'}默认"
+                            + ("（新建环境会自动带上）" if enabled else ""))
+            self.on_log(f"扩展包「{name}」默认带上={enabled}", "ok")
+            self.on_changed()
+            self.reload(force=True)
+            return
+        code = str((err or {}).get("code") or "")
+        msg = str((err or {}).get("message") or "")
+        self.set_status(f"设置默认失败：[{code}] {msg}", bad=True)
+        self.on_log(f"扩展包默认设置失败：{name} [{code}] {msg}", "bad")
+        # 勾选框要回到真实状态，否则界面在骗人
+        var = self._default_vars.get(pack_id)
+        if var is not None:
+            try:
+                var.set(not enabled)
+            except Exception:
+                pass
+
+    def ask_import_from(self) -> None:
+        profiles = list(self.profiles_provider() or [])
+        options = []
+        for p in profiles:
+            sub_bits = [str(p.get("group_name") or "").strip(),
+                        str(p.get("state") or "").strip()]
+            options.append({
+                "value": str(p.get("id") or p.get("name") or ""),
+                "label": str(p.get("name") or ""),
+                "sub": " · ".join([b for b in sub_bits if b]),
+            })
+        ov = ChoiceOverlay(
+            self.card, self.theme, self.fonts, "从环境导入扩展包",
+            "把选中的环境里的插件（连本地数据）打包成一个扩展包。\n"
+            "建议用那个已经装好全部插件的环境（例如 RXYCDP）。",
+            options, on_pick=lambda picked: self._import_from(picked[0]),
+            empty_hint="这台机器上还没有环境。先建一个、把插件装好，再回来打包。",
+        )
+        ov.open()
+
+    def _import_from(self, ref: str) -> None:
+        if self._inflight:
+            self.set_status("上一个操作还没完成，稍等一下", bad=True)
+            return
+        name = ref
+        for p in self.profiles_provider() or []:
+            if ref in (str(p.get("id") or ""), str(p.get("name") or "")):
+                name = str(p.get("name") or ref)
+                break
+        self._inflight = True
+        self.set_status(f"正在把「{name}」的插件打包 …（插件多、带数据时要几十秒）")
+        self.on_log(f"开始从环境「{name}」导入扩展包", "info")
+        call_async(self.card, lambda: self.api.import_pack(from_profile=ref),
+                   self._on_imported)
+
+    def _on_imported(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        self._inflight = False
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            hint = str((err or {}).get("hint") or "")
+            extra = f"（{hint}）" if hint else ""
+            self.set_status(f"导入失败：[{code}] {msg}{extra}", bad=True)
+            self.on_log(f"从环境导入扩展包失败：[{code}] {msg}{extra}", "bad")
+            return
+        d = data or {}
+        exts = list(d.get("extensions") or [])
+        pack_name = str(d.get("name") or d.get("id") or "扩展包")
+        msg = f"已导入「{pack_name}」：{len(exts)} 个扩展，{d.get('size_human') or '—'}"
+        self.set_status(msg)
+        self.on_log(msg, "ok")
+        self.on_changed()
+        self.reload(force=True)
+
+    def ask_delete(self, pack: dict[str, Any]) -> None:
+        pack_id = str(pack.get("id") or "")
+        name = str(pack.get("name") or pack_id)
+        ov = ConfirmOverlay(
+            self.card, self.theme, self.fonts, "删除扩展包",
+            (f"确定删除「{name}」吗？\n\n"
+             "已经应用到环境里的扩展不会被删掉（包只是出厂模板），"
+             "但这份包本身会从库里消失。"),
+            "删除", on_confirm=lambda: self._delete(pack_id, name),
+        )
+        ov.open()
+
+    def _delete(self, pack_id: str, name: str) -> None:
+        self.set_status(f"正在删除扩展包「{name}」…")
+        call_async(self.card, lambda: self.api.delete_pack(pack_id),
+                   lambda res: self._after_delete(res, name))
+
+    def _after_delete(self, res: tuple[bool, Any, dict[str, Any] | None], name: str) -> None:
+        ok, data, err = res
+        if ok:
+            self.set_status(f"已删除扩展包「{name}」")
+            self.on_log(f"已删除扩展包「{name}」", "ok")
+            self.on_changed()
+            self.reload(force=True)
+            return
+        code = str((err or {}).get("code") or "")
+        msg = str((err or {}).get("message") or "")
+        self.set_status(f"删除失败：[{code}] {msg}", bad=True)
+        self.on_log(f"删除扩展包失败：{name} [{code}] {msg}", "bad")
+
+
+class PackApplyOverlay(ChoiceOverlay):
+    """给某个环境挑要应用的扩展包（多选）。
+
+    多选是有意的：用户经常"一次把这几个包都装上"，单选就得来回点好几次。
+    """
+
+    def __init__(self, master: tk.Misc, theme: Theme, fonts: dict[str, Any],
+                 *, profile_name: str, packs: list[dict[str, Any]],
+                 on_apply: Callable[[list[str]], None]) -> None:
+        options = []
+        for pack in packs:
+            sub_bits = [
+                f"{int(pack.get('extension_count') or 0)} 个扩展",
+                str(pack.get("size_human") or ""),
+            ]
+            if pack.get("is_default"):
+                sub_bits.append("默认")
+            options.append({
+                "value": str(pack.get("id") or ""),
+                "label": str(pack.get("name") or pack.get("id") or ""),
+                "sub": " · ".join([b for b in sub_bits if b]),
+                # 默认包预先勾上：那本来就是"新环境该有的样子"
+                "checked": bool(pack.get("is_default")),
+            })
+        super().__init__(
+            master, theme, fonts, "应用扩展包",
+            f"选要装进「{profile_name}」的包（插件代码 + 本地数据一起装）。\n"
+            "环境正在运行时，扩展要等下次启动才加载。",
+            options, on_pick=lambda picked: on_apply(picked), multi=True,
+            empty_hint="还没有扩展包，先去「扩展包」里从环境导入一份。",
+            confirm_text="应用",
+        )
+
+
 # ── 环境面板 ──────────────────────────────────────────────
 class ProfilePanel(tk.Frame):
-    """本机环境列表：列出 / 新建 / 启动 / 停止 / 删除。
+    """本机环境列表：列出 / 新建 / 启动 / 停止 / 删除 / 改代理 / 应用扩展包。
 
-    数据只走 `GET /api/v1/profiles`；操作结果（成功或失败原因）都会写进
+    数据只走 `GET /api/v1/profiles`（外加一次 `GET /api/v1/proxies` 用来把
+    `proxy_id` 还原成脱敏地址）；操作结果（成功或失败原因）都会写进
     客户端底部的事件流，并同时显示在自己那行状态文字里 —— 用户不该为了
     知道"为什么没建成"去别处找。
     """
 
     ROW_LIMIT_NAME = 18
     ROW_LIMIT_GROUP = 8
+    ROW_LIMIT_PROXY = 22
 
     def __init__(self, master: tk.Misc, *, api: CoreApi, theme: Theme,
                  fonts: dict[str, Any], on_log: Callable[[str, str], None],
@@ -516,9 +1637,12 @@ class ProfilePanel(tk.Frame):
         self.enabled = enabled
 
         self._profiles: list[dict[str, Any]] = []
+        # 代理库（id → 一条代理）。环境行只存 `proxy_id`，地址要按 id 关联出来，
+        # 否则界面上永远显示"未设代理"（见 services/proxylib.py 顶部说明）。
+        self._library: dict[int, dict[str, Any]] = {}
         self._signature: tuple[Any, ...] | None = None
         self._inflight = False
-        self._busy = 0                     # 正在飞的操作数（启停/删除/新建）
+        self._busy = 0                     # 正在飞的操作数（启停/删除/新建/改代理）
         self._last_error = ""              # 同一个错误只报一次，别每 5 秒刷屏
         self._overlay: _Overlay | None = None
         self.status_var = tk.StringVar(value="")
@@ -540,6 +1664,14 @@ class ProfilePanel(tk.Frame):
                    command=self.ask_create).pack(side="right")
         ttk.Button(head, text="刷新", style="Tiny.TButton",
                    command=lambda: self.refresh(force=True)).pack(side="right", padx=(0, 6))
+        # 三个"库"入口放在刷新左边：它们都是低频操作，但一旦要用就是"必须先有
+        # 代理/包才能继续"的硬前置，藏进二级菜单只会让人找不到。
+        ttk.Button(head, text="代理库", style="Tiny.TButton",
+                   command=self.ask_proxy_library).pack(side="right", padx=(6, 0))
+        ttk.Button(head, text="导入代理", style="Tiny.TButton",
+                   command=self.ask_import_proxies).pack(side="right", padx=(6, 0))
+        ttk.Button(head, text="扩展包", style="Tiny.TButton",
+                   command=self.ask_packs).pack(side="right", padx=(6, 0))
 
         # 可滚动列表：Tk 没有"可滚动框架"，标准做法是 Canvas 里放一个 Frame
         wrap = tk.Frame(self, bg=theme.card)
@@ -628,7 +1760,7 @@ class ProfilePanel(tk.Frame):
         self.refresh()
 
     def refresh(self, force: bool = False) -> None:
-        """拉一次环境列表。
+        """拉一次环境列表（顺带拉代理库，用来把 proxy_id 还原成地址）。
 
         `force=True` 用于"用户主动点了刷新/刚做完一个操作"，
         这时忽略浮层与忙碌状态（否则点完按钮列表不动，像卡住了）。
@@ -638,7 +1770,24 @@ class ProfilePanel(tk.Frame):
         if not force and (self._typing() or self._busy):
             return                                    # 不打断输入 / 不在操作中途重排
         self._inflight = True
-        call_async(self, self.api.list_profiles, self._on_list)
+        call_async(self, self._fetch_snapshot, self._on_list)
+
+    def _fetch_snapshot(self) -> tuple[bool, Any, dict[str, Any] | None]:
+        """后台线程里一次性取回「环境 + 代理库」。
+
+        为什么合到一个请求里：两者要拼起来才能算出"这一行用的哪个代理"，
+        分两次回来会有"环境是新的、代理库是旧的"那一帧，行上的代理串会闪。
+        代理库读失败不算致命：环境列表照常显示，只是不显示代理地址。
+        """
+        ok, data, err = self.api.list_profiles()
+        if not ok:
+            return ok, data, err
+        ok2, data2, _err2 = self.api.list_proxies()
+        proxies = list((data2 or {}).get("proxies") or []) if ok2 else []
+        return True, {
+            "profiles": list((data or {}).get("profiles") or []),
+            "proxies": proxies,
+        }, None
 
     def _on_list(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
         self._inflight = False
@@ -654,12 +1803,20 @@ class ProfilePanel(tk.Frame):
             return
         self._last_error = ""
         profiles = list((data or {}).get("profiles") or [])
+        library: dict[int, dict[str, Any]] = {}
+        for row in (data or {}).get("proxies") or []:
+            try:
+                library[int(row.get("id"))] = dict(row)
+            except (TypeError, ValueError):
+                continue
         self._profiles = profiles
+        self._library = library
         running = sum(1 for p in profiles if str(p.get("state") or "") == "running")
         self.count_var.set(f"{len(profiles)} 个 · 运行中 {running}")
         signature = tuple(
             (str(p.get("id")), str(p.get("name")), str(p.get("state") or ""),
-             str(p.get("group_name") or ""), str(p.get("last_error") or ""))
+             str(p.get("group_name") or ""), str(p.get("last_error") or ""),
+             str(p.get("proxy_id") or ""), str(p.get("proxy") or ""))
             for p in profiles
         )
         if signature != self._signature:
@@ -716,27 +1873,42 @@ class ProfilePanel(tk.Frame):
         if group:
             tk.Label(line, text=_clip(group, self.ROW_LIMIT_GROUP), bg=theme.card2,
                      fg=theme.faint, font=fonts["tiny"], anchor="w").pack(side="left", padx=(7, 0))
+        # 代理串直接摆在行上：用户改完代理最爱问的就是"这个环境到底走哪个出口"，
+        # 藏在浮层里等于每次都要多点一下。没有就写"未设代理"，别留空白让人猜。
+        proxy_text = proxy_display_for(p, self._library)
+        tk.Label(line, text=_clip(proxy_text, self.ROW_LIMIT_PROXY) if proxy_text else "未设代理",
+                 bg=theme.card2, fg=theme.dim if proxy_text else theme.faint,
+                 font=fonts["tiny"], anchor="w").pack(side="left", padx=(7, 0))
 
         ttk.Button(line, text="删除", style="Danger.TButton",
                    command=lambda: self.ask_delete(pid, name)).pack(side="right")
         stop_like = state in ("running", "starting")
         ttk.Button(line, text="停止" if stop_like else "启动", style="Tiny.TButton",
                    command=lambda: self.toggle(pid, name, state)).pack(side="right", padx=(0, 6))
+        ttk.Button(line, text="代理", style="Tiny.TButton",
+                   command=lambda: self.ask_proxy(pid, name)).pack(side="right", padx=(0, 6))
+        ttk.Button(line, text="应用包", style="Tiny.TButton",
+                   command=lambda: self.ask_apply_packs(pid, name)).pack(side="right", padx=(0, 6))
+
+    # -- 浮层统一入口 --
+    def _open_overlay(self, ov: _Overlay) -> None:
+        """打开一个新的自绘浮层（同一时刻只留一个）。
+
+        为什么必须走这一个入口：自动刷新的"别打断用户"判断只看 `self._typing()`
+        （= `self._overlay` 是否打开）。任何绕过这里直接 `ov.open()` 的浮层，
+        都会让 5 秒 tick 在用户打字时重建控件、把光标踢走。
+        """
+        old = self._overlay
+        if old is not None and old.is_open():
+            old.close()
+        self._overlay = ov
+        ov.open()
 
     # -- 操作：新建 --
     def ask_create(self) -> None:
-        if self._overlay is not None and self._overlay.is_open():
-            self._overlay.close()
-        ov = TextOverlay(
-            self, self.theme, self.fonts,
-            title="新建环境",
-            subtitle="名称必填，最多 64 个字；分组可以留空。\n环境建好后点「启动」才会真的开浏览器。",
-            fields=[("name", "名称", ""), ("group", "分组（可选）", "")],
-            submit_text="创建",
-            on_submit=self._do_create,
-        )
-        self._overlay = ov
-        ov.open()
+        ov = CreateProfileOverlay(self, self.theme, self.fonts, api=self.api,
+                                  on_submit=self._do_create)
+        self._open_overlay(ov)
 
     def _do_create(self, values: dict[str, str]) -> bool:
         """提交新建。**总是返回 True（浮层先留着），等服务器回话再决定关不关**。
@@ -754,6 +1926,7 @@ class ProfilePanel(tk.Frame):
 
         name = (values.get("name") or "").strip()
         group = (values.get("group") or "").strip()
+        proxy_text = (values.get("proxy") or "").strip()
         if not name:
             return fail("名称不能为空")
         if len(name) > 64:
@@ -764,19 +1937,31 @@ class ProfilePanel(tk.Frame):
         self.set_status(f"正在创建「{name}」…")
         self.on_log(f"正在创建环境「{name}」", "info")
         call_async(self, lambda: self.api.create_profile(name, group),
-                   lambda res: self._after_create(res, name, ov))
+                   lambda res: self._after_create(res, name, ov, proxy_text))
         return True
 
     def _after_create(self, res: tuple[bool, Any, dict[str, Any] | None],
-                      name: str, ov: Any = None) -> None:
-        self._busy = max(0, self._busy - 1)
+                      name: str, ov: Any = None, proxy_text: str = "") -> None:
         ok, data, err = res
         if ok:
+            pid = str((data or {}).get("id") or name)
+            if proxy_text:
+                # 第二步：绑代理。忙碌标记**不在这里减**，等第二步回来再减 ——
+                # 否则这两步之间的空隙里，用户能点出第二个启动/删除，
+                # 而新建流程还没结束，状态机会乱。
+                self.on_log(f"已创建环境「{name}」，正在设置代理 …", "ok")
+                self.set_status(f"已创建「{name}」，正在设置代理 …")
+                self._apply_new_proxy(pid, name, proxy_text, ov)
+                self.on_changed()
+                self.refresh(force=True)
+                return
+            self._busy = max(0, self._busy - 1)
             self.on_log(f"已创建环境「{name}」", "ok")
             self.set_status(f"已创建「{name}」")
             if isinstance(ov, TextOverlay) and ov.is_open():
                 ov.close()          # 只有成功了才收起浮层
         else:
+            self._busy = max(0, self._busy - 1)
             code = str((err or {}).get("code") or "")
             msg = str((err or {}).get("message") or "")
             hint = str((err or {}).get("hint") or "")
@@ -787,6 +1972,281 @@ class ProfilePanel(tk.Frame):
                 ov.set_error(f"{msg}{extra or ''}")   # 原因就写在输入框下面
             self.on_log(f"创建环境失败：{name} [{code}] {msg}{extra}", "bad")
             self.set_status(f"创建失败：[{code}] {msg}", bad=True)
+        self.on_changed()
+        self.refresh(force=True)
+
+    def _apply_new_proxy(self, pid: str, name: str, proxy_text: str, ov: Any) -> None:
+        """新建流程的第二步：把代理绑上去。
+
+        为什么失败要单独弹一个提示：环境已经建好了，这一步静默失败的话用户会
+        以为"代理填了、也在用"，直到发现出口 IP 不对（可能在花的钱上才看出来）。
+        所以宁可打断一次，并把"去哪里补"直接写在提示里。
+        """
+        self.on_log(f"正在给「{name}」设置代理 {mask_proxy_text(proxy_text)}", "info")
+        call_async(self, lambda: self.api.set_profile_proxy(pid, raw=proxy_text),
+                   lambda res: self._after_new_proxy(res, pid, name, ov))
+
+    def _after_new_proxy(self, res: tuple[bool, Any, dict[str, Any] | None],
+                         pid: str, name: str, ov: Any) -> None:
+        self._busy = max(0, self._busy - 1)
+        ok, data, err = res
+        if ok:
+            display = proxy_display_from_assign(data or {}) or "未设置"
+            self.on_log(f"已给「{name}」设置代理：{display}", "ok")
+            self.set_status(f"已创建「{name}」，代理 {display}")
+            if isinstance(ov, TextOverlay) and ov.is_open():
+                ov.close()
+        else:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            hint = str((err or {}).get("hint") or "")
+            extra = f"（{hint}）" if hint else ""
+            self.on_log(f"环境「{name}」已建好，但代理没设上：[{code}] {msg}{extra}", "bad")
+            self.set_status(f"环境已建好，但代理没设上：[{code}] {msg}", bad=True)
+            if isinstance(ov, TextOverlay) and ov.is_open():
+                ov.close()
+            self._open_overlay(NoticeOverlay(
+                self, self.theme, self.fonts,
+                title="环境已建好，但代理没设上",
+                message=(f"「{name}」已经创建成功。\n\n"
+                         f"代理没设上：[{code}] {msg}{extra}\n\n"
+                         "可以在环境列表里点这一行的「代理」重新设置。"),
+                danger=True,
+            ))
+        self.on_changed()
+        self.refresh(force=True)
+
+    # -- 操作：代理（行上改 / 批量导入 / 代理库）--
+    def ask_proxy(self, pid: str, name: str) -> None:
+        profile: dict[str, Any] = {}
+        for p in self._profiles:
+            if str(p.get("id")) == pid:
+                profile = p
+                break
+        if not profile:
+            profile = {"id": pid, "name": name}
+        ov = ProxyOverlay(self, self.theme, self.fonts, api=self.api,
+                          profile=profile, library=self._library)
+        idx = str(pid)
+        ov.on_save = lambda raw: self._save_proxy(idx, name, raw=raw, ov=ov)
+        ov.on_clear = lambda: self._save_proxy(idx, name, raw="", ov=ov)
+        self._open_overlay(ov)
+
+    def _save_proxy(self, pid: str, name: str, *, raw: str, ov: ProxyOverlay | None) -> None:
+        if self._busy:
+            msg = "上一个操作还没完成，稍等一下"
+            if ov is not None and ov.is_open():
+                ov.mark_failed(msg)
+            self.set_status(msg, bad=True)
+            self.on_log(f"没给「{name}」改代理：上一个操作还没完成", "warn")
+            return
+        self._busy += 1
+        verb = "清除代理" if not raw else "保存代理"
+        self.set_status(f"正在{verb}：{name} …")
+        self.on_log(f"正在{verb}：「{name}」", "info")
+        call_async(self, lambda: self.api.set_profile_proxy(pid, raw=raw),
+                   lambda res: self._after_save_proxy(res, name, raw, ov))
+
+    def _after_save_proxy(self, res: tuple[bool, Any, dict[str, Any] | None],
+                          name: str, raw: str, ov: ProxyOverlay | None) -> None:
+        self._busy = max(0, self._busy - 1)
+        ok, data, err = res
+        d = data if isinstance(data, dict) else {}
+        if ok:
+            cleared = bool(d.get("cleared"))
+            display = proxy_display_from_assign(d) or "未设置"
+            restart = bool(d.get("restart_required"))
+            hint = str(d.get("restart_hint") or "")
+            if cleared:
+                self.on_log(f"已清除环境「{name}」的代理", "ok")
+                self.set_status(f"已清除「{name}」的代理")
+            else:
+                self.on_log(f"环境「{name}」代理改为 {display}"
+                            + ("（正在运行，需要重启后生效）" if restart else ""),
+                            "warn" if restart else "ok")
+                self.set_status(f"「{name}」代理：{display}"
+                                + ("，重启这个环境后生效" if restart else ""),
+                                bad=False)
+            if ov is not None and ov.is_open():
+                ov.mark_saved(display, restart=restart, hint=hint)
+        else:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            hint = str((err or {}).get("hint") or "")
+            extra = f"（{hint}）" if hint else ""
+            self.on_log(f"设置代理失败：{name} [{code}] {msg}{extra}", "bad")
+            self.set_status(f"设置代理失败：[{code}] {msg}", bad=True)
+            if ov is not None and ov.is_open():
+                ov.mark_failed(f"[{code}] {msg}{extra}")
+        self.on_changed()
+        self.refresh(force=True)
+
+    def ask_import_proxies(self) -> None:
+        # 回调要拿到浮层实例本身（用来把结果写在按钮下面），所以先造再绑：
+        # 构造函数里那个占位回调只是满足签名，下一行就被替换掉。
+        ov = ImportProxiesOverlay(self, self.theme, self.fonts, on_import=lambda _t: None)
+        ov.on_import = lambda text: self._do_import_proxies(text, ov)
+        self._open_overlay(ov)
+
+    def _do_import_proxies(self, text: str, ov: ImportProxiesOverlay | None) -> None:
+        payload = (text or "").strip()
+        if not payload:
+            if ov is not None and ov.is_open():
+                ov.note("粘贴框是空的：一行一个代理，直接整段粘进来", bad=True)
+            self.set_status("导入代理：粘贴框是空的", bad=True)
+            self.on_log("导入代理没有执行：粘贴框是空的", "warn")
+            return
+        self._busy += 1
+        self.set_status("正在导入代理 …")
+        self.on_log("正在批量导入代理 …", "info")
+        call_async(self, lambda: self.api.import_proxies(payload),
+                   lambda res: self._after_import_proxies(res, ov))
+
+    def _after_import_proxies(self, res: tuple[bool, Any, dict[str, Any] | None],
+                              ov: ImportProxiesOverlay | None) -> None:
+        self._busy = max(0, self._busy - 1)
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            hint = str((err or {}).get("hint") or "")
+            extra = f"（{hint}）" if hint else ""
+            text = f"导入失败：[{code}] {msg}{extra}"
+            if ov is not None and ov.is_open():
+                ov.note(text, bad=True)
+            self.set_status(text, bad=True)
+            self.on_log(f"批量导入代理失败：[{code}] {msg}{extra}", "bad")
+            return
+        d = data if isinstance(data, dict) else {}
+        imported = int(d.get("imported") or 0)
+        skipped = int(d.get("skipped") or 0)
+        ignored = int(d.get("ignored") or 0)
+        failed = list(d.get("failed") or [])
+        summary = f"导入 {imported} 条 / 跳过 {skipped} 条"
+        if ignored:
+            summary += f" / 忽略空行与注释 {ignored} 行"
+        if failed:
+            summary += f" / 失败 {len(failed)} 条"
+            head = failed[:3]
+            detail = "；".join(
+                f"{_clip(mask_proxy_text(str(f.get('line') or '')), 30)} → "
+                f"{str(f.get('error') or '格式不对')}"
+                for f in head
+            )
+            summary += f"\n失败明细（前 {len(head)} 条）：{detail}"
+        if ov is not None and ov.is_open():
+            ov.note(summary, bad=bool(failed))
+        self.set_status(f"导入代理：{imported} 条成功，{skipped} 条重复跳过"
+                        + (f"，{len(failed)} 条失败" if failed else ""),
+                        bad=bool(failed and not imported))
+        self.on_log(f"批量导入代理：新增 {imported} 条，重复跳过 {skipped} 条，"
+                    f"失败 {len(failed)} 条", "warn" if failed else "ok")
+        if failed:
+            first = failed[0]
+            self.on_log(f"导入失败样例：[{str(first.get('error') or '')}] "
+                        f"{_clip(mask_proxy_text(str(first.get('line') or '')), 60)}", "bad")
+        self.on_changed()
+        self.refresh(force=True)
+
+    def ask_proxy_library(self) -> None:
+        ov = ProxyLibraryOverlay(self, self.theme, self.fonts, api=self.api,
+                                 on_log=self.on_log, on_changed=self.on_changed)
+        self._open_overlay(ov)
+        ov.reload()
+
+    # -- 操作：扩展包 --
+    def ask_packs(self) -> None:
+        ov = PacksOverlay(self, self.theme, self.fonts, api=self.api,
+                          on_log=self.on_log, on_changed=self.on_changed,
+                          profiles_provider=lambda: list(self._profiles))
+        self._open_overlay(ov)
+        ov.reload()
+
+    def ask_apply_packs(self, pid: str, name: str) -> None:
+        """给这个环境应用扩展包：先拉包列表，再让他挑。"""
+        self.set_status("正在读取扩展包列表 …")
+
+        def open_picker(res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+            ok, data, err = res
+            if not ok:
+                code = str((err or {}).get("code") or "")
+                msg = str((err or {}).get("message") or "")
+                self.set_status(f"读不到扩展包：[{code}] {msg}", bad=True)
+                self.on_log(f"读取扩展包失败：[{code}] {msg}", "bad")
+                return
+            packs = list((data or {}).get("packs") or [])
+            if not packs:
+                self._open_overlay(NoticeOverlay(
+                    self, self.theme, self.fonts,
+                    title="还没有扩展包",
+                    message=("先在「扩展包」里点「从环境导入」，"
+                             "选那个已经装好插件的环境（例如 RXYCDP），"
+                             "把插件连数据一起打包，再回来应用。"),
+                ))
+                self.set_status("还没有扩展包，先导入一份")
+                return
+            ov = PackApplyOverlay(
+                self, self.theme, self.fonts, profile_name=name, packs=packs,
+                on_apply=lambda ids: self._do_apply_packs(pid, name, ids),
+            )
+            self._open_overlay(ov)
+
+        call_async(self, self.api.list_packs, open_picker)
+
+    def _do_apply_packs(self, pid: str, name: str, pack_ids: list[str]) -> None:
+        if self._busy:
+            self.set_status("上一个操作还没完成，稍等一下", bad=True)
+            self.on_log(f"没给「{name}」应用扩展包：上一个操作还没完成", "warn")
+            return
+        self._busy += 1
+        self.set_status(f"正在把 {len(pack_ids)} 个扩展包应用到「{name}」…")
+        self.on_log(f"正在给环境「{name}」应用扩展包：{pack_ids}", "info")
+        call_async(self, lambda: self.api.apply_packs(pid, pack_ids),
+                   lambda res: self._after_apply_packs(res, name))
+
+    def _after_apply_packs(self, res: tuple[bool, Any, dict[str, Any] | None],
+                           name: str) -> None:
+        self._busy = max(0, self._busy - 1)
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            hint = str((err or {}).get("hint") or "")
+            extra = f"（{hint}）" if hint else ""
+            self.on_log(f"应用扩展包失败：{name} [{code}] {msg}{extra}", "bad")
+            self.set_status(f"应用扩展包失败：[{code}] {msg}", bad=True)
+            self._open_overlay(NoticeOverlay(
+                self, self.theme, self.fonts, title="应用扩展包失败",
+                message=f"「{name}」[{code}] {msg}{extra}", danger=True,
+            ))
+            self.refresh(force=True)
+            return
+        d = data if isinstance(data, dict) else {}
+        applied = list(d.get("applied") or [])
+        warnings = list(d.get("warnings") or [])
+        needs_restart = list(d.get("needs_restart") or [])
+        names = "、".join(str(a.get("name") or a.get("slug") or "") for a in applied[:6])
+        if len(applied) > 6:
+            names += f" 等 {len(applied)} 个"
+        if not applied:
+            self.on_log(f"扩展包没有写入任何扩展：{name}", "warn")
+            self.set_status("扩展包没有写入任何扩展（包里可能是空的）", bad=True)
+        else:
+            self.on_log(f"已给「{name}」应用 {len(applied)} 个扩展：{names}", "ok")
+            self.set_status(f"已给「{name}」应用 {len(applied)} 个扩展")
+        lines = []
+        if applied:
+            lines.append(f"已应用 {len(applied)} 个扩展到「{name}」：\n{names}")
+        else:
+            lines.append(f"包里没有可用的扩展，「{name}」没有被改动。")
+        if needs_restart:
+            lines.append("环境正在运行：扩展要到下次启动才会加载。")
+        if warnings:
+            lines.append("注意：" + "；".join(str(w) for w in warnings[:3]))
+        self._open_overlay(NoticeOverlay(
+            self, self.theme, self.fonts, title="应用扩展包",
+            message="\n\n".join(lines), danger=not applied,
+        ))
         self.on_changed()
         self.refresh(force=True)
 
@@ -825,8 +2285,6 @@ class ProfilePanel(tk.Frame):
 
     # -- 操作：删除 --
     def ask_delete(self, pid: str, name: str) -> None:
-        if self._overlay is not None and self._overlay.is_open():
-            self._overlay.close()
         ov = ConfirmOverlay(
             self, self.theme, self.fonts,
             title="删除环境",
@@ -836,8 +2294,7 @@ class ProfilePanel(tk.Frame):
             confirm_text="删除",
             on_confirm=lambda: self._do_delete(pid, name),
         )
-        self._overlay = ov
-        ov.open()
+        self._open_overlay(ov)
 
     def _do_delete(self, pid: str, name: str) -> None:
         if self._busy:

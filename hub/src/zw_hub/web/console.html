@@ -1693,6 +1693,7 @@ function makeTerminal(dev, card){
     name: q('name'), sub: q('sub'), flag: q('flag'), warn: q('warn'),
     out: q('out'), input: q('input'), runBtn: q('run'), cancelBtn: q('cancel'),
     busy: false, jobId: null, pollToken: null, timer: null, timerResolve: null,
+    ws: null, wsReady: false, sid: 'ui' + Math.random().toString(36).slice(2, 10), wsTries: 0,
     histIdx: localCmdHistory.length, current: null, startedAt: 0,
   };
   t.name.textContent = devName(dev);                 // 用户可控 → textContent
@@ -1718,6 +1719,16 @@ function syncTermChrome(t){
   if (on === true){ t.flag.className = 'badge ok'; t.flag.textContent = '命令行：开'; }
   else if (on === false){ t.flag.className = 'badge bad'; t.flag.textContent = '命令行：关'; }
   else { t.flag.className = 'badge'; t.flag.textContent = '命令行：未知'; }
+  // 实时 / 队列：连上 WS 就是实时（边跑边出字、cd 保持），否则回退到队列
+  if (t.wsReady){
+    t.flag.className = 'badge ok';
+    t.flag.textContent = '实时';
+    t.flag.title = 'WebSocket 实时通道：输出边产生边显示，cd / 环境变量在同一会话里保持';
+  } else if (on !== false){
+    t.flag.className = 'badge';
+    t.flag.textContent = '队列';
+    t.flag.title = '实时通道没连上（客户端版本旧 / 命令行被关 / 网络挡了 WS），已回退到一问一答的队列模式';
+  }
 
   const off = on === false;
   t.input.disabled = off;
@@ -1755,6 +1766,7 @@ function openTerminal(id){
   card.root.classList.add('term-open');
   setTermBtn(card, true);
   syncTermChrome(t);
+  connectTermWS(t);
   t.input.focus();
   try { card.root.scrollIntoView({ block: 'nearest' }); } catch (_) {}
   loadTermHistory(t);
@@ -1779,6 +1791,7 @@ function closeTerminal(id){
   t.closed = true;
   t.pollToken = null;
   clearTermTimer(t);
+  closeTermWS(t);
   if (t.root.parentNode) t.root.parentNode.removeChild(t.root);
   terminals.delete(id);
   const card = cards.get(id);
@@ -1792,6 +1805,112 @@ function closeAllTerminals(){
   Array.from(terminals.keys()).forEach(id => { try { closeTerminal(id); } catch (_) {} });
 }
 window.addEventListener('beforeunload', closeAllTerminals);
+
+
+/* ── 实时终端（WebSocket）───────────────────────────────────────────────
+   连的是同一台服务器的 /v1/console/term/{device_id}，hub 再中继到设备的出站连接。
+   为什么要有它：HTTP 队列是"一问一答"，命令跑完才有输出；实时终端边跑边出字，
+   而且 cd / 环境变量 在同一会话里保持。
+   连不上（客户端版本旧、命令行被关、网络挡 WS）就**自动回退**到 HTTP 队列，
+   用户看到的区别只有右上角那个"实时/队列"徽章。
+*/
+function termWsUrl(id){
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return proto + '//' + location.host + '/v1/console/term/' + encodeURIComponent(id);
+}
+function closeTermWS(t){
+  if (t.ws){
+    try { t.ws.onclose = null; t.ws.close(); } catch (_) {}
+    t.ws = null;
+  }
+  t.wsReady = false;
+}
+function connectTermWS(t){
+  if (t.closed || t.ws) return;
+  let sock;
+  try { sock = new WebSocket(termWsUrl(t.id)); } catch (_) { return; }
+  t.ws = sock;
+  const fail = () => {
+    t.wsReady = false;
+    if (t.ws === sock) t.ws = null;
+    syncTermChrome(t);
+  };
+  sock.onopen = () => {};
+  sock.onerror = fail;
+  sock.onclose = fail;
+  sock.onmessage = ev => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.t === 'hello'){
+      t.wsReady = true;
+      syncTermChrome(t);
+      return;
+    }
+    if (msg.t === 'device_offline'){ fail(); return; }
+    if (msg.t === 'overflow'){ t.wsReady = true; return; }
+    if (msg.sid !== t.sid) return;
+    if (msg.t === 'out'){
+      appendWS(t, String(msg.data == null ? '' : msg.data), '');
+      if (t.current) setNote(t.current, '执行中…', '');
+      return;
+    }
+    if (msg.t === 'done'){
+      if (t.current){
+        if (msg.rc !== 0) appendWS(t, '', '退出码 ' + msg.rc);
+        setNote(t.current, (msg.rc === 0 ? '完成' : '退出码 ' + msg.rc) +
+          (msg.cwd ? ' · ' + msg.cwd : '') + (msg.truncated ? ' · 输出已截断' : ''),
+          msg.rc === 0 ? '' : 'bad');
+      }
+      finishBusy(t);
+      return;
+    }
+    if (msg.t === 'err'){
+      appendWS(t, '', (msg.code || '错误') + (msg.message ? '：' + msg.message : ''));
+      if (t.current) setNote(t.current, msg.message || msg.code || '出错', 'bad');
+      finishBusy(t);
+      return;
+    }
+    if (msg.t === 'exit'){ t.wsReady = false; syncTermChrome(t); return; }
+  };
+}
+function appendWS(t, text, note){
+  if (text) appendTermText(t, text);
+  if (note) appendTermText(t, (text && !text.endsWith('\n') ? '\n' : '') + '[' + note + ']\n');
+}
+function appendTermText(t, text){
+  if (!text) return;
+  if (!t.current) return;
+  // pushEntry 返回的是 {el, out, err, note, meta} 这样的对象，不是 DOM 本身
+  const body = t.current.out;
+  if (!body) return;
+  body.textContent += text;
+  if (body.textContent.length > TERM_RENDER_CAP){
+    body.textContent = '…（前面内容太多，已省略）\n' + body.textContent.slice(-TERM_RENDER_CAP);
+  }
+  body.hidden = false;
+  termScrollToEnd(t);
+}
+async function wsExec(t, cmd, entry){
+  t.busy = true;
+  t.runBtn.disabled = true;
+  t.runBtn.textContent = '执行中…';
+  t.cancelBtn.disabled = false;
+  t.current = entry;
+  t.startedAt = Date.now();
+  setNote(entry, '执行中…', '');
+  try {
+    t.ws.send(JSON.stringify({ t: 'run', sid: t.sid, command: cmd, timeout: 300 }));
+  } catch (e){
+    setNote(entry, '发送失败，改用队列：' + (e.message || ''), 'bad');
+    t.wsReady = false;
+    t.busy = false;
+    t.runBtn.textContent = '执行';
+    t.runBtn.disabled = t.input.disabled;
+    return false;
+  }
+  return true;
+}
 
 function rememberCommand(cmd){
   if (!cmd) return;
@@ -1831,6 +1950,10 @@ async function runCommand(t){
   t.current = entry;
   t.startedAt = Date.now();
 
+  if (t.wsReady && t.ws && t.ws.readyState === 1){
+    const ok = await wsExec(t, cmd, entry);
+    if (ok) return;
+  }
   try {
     const res = await api('POST', '/v1/devices/' + enc(t.id) + '/shell', { command: cmd });
     if (t.closed) return;

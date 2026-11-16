@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -32,10 +33,11 @@ from typing import Any
 
 import httpx
 
-from ..config import Settings
+from ..config import Settings, get_settings
 from .proc import popen_hidden, run_hidden
 
 IS_WIN = sys.platform == "win32"
+logger = logging.getLogger("zw.engines")
 
 # Windows 上常见的安装位置（按优先级）
 _WIN_CANDIDATES = [
@@ -339,8 +341,9 @@ def build_cmdline(
     proxy = (profile.get("proxy") or "").strip()
     if proxy:
         # 上游地址里绝不能带凭据：Chromium 会把它当成主机名的一部分而连不上。
-        # 带密码的代理走 proxy-auth 扩展（由 manager 注入 _auth_ext）。
-        args.append(f"--proxy-server={_upstream_of(proxy)}")
+        # 带凭据的代理改走本机中继（见 services/proxyrelay.py 顶部：
+        # Chrome 149 已忽略 --load-extension，扩展那条路会静默失效）。
+        args.append(f"--proxy-server={_proxy_server_for(profile, proxy)}")
 
     if profile.get("window_w") and profile.get("window_h"):
         args.append(f"--window-size={int(profile['window_w'])},{int(profile['window_h'])}")
@@ -379,6 +382,52 @@ def build_cmdline(
         args.append("--no-sandbox")
     args.extend(urls or ["about:blank"])
     return args
+
+
+def _proxy_server_for(profile: dict[str, Any], proxy: str) -> str:
+    """算出真正要写进 `--proxy-server` 的地址。
+
+    - **不带凭据**：直连上游。少一层转发就少一个故障点，没必要为了统一而绕。
+    - **带凭据 + `ZW_PROXY_RELAY` 开着**（默认）：指向 `127.0.0.1:<中继端口>`，
+      由中继补 `Proxy-Authorization` / 做 SOCKS5 用户名密码握手。
+      为什么不能用扩展：Chrome 149 已经完全忽略 `--load-extension`，
+      带认证的代理会静默失效（网页一直转圈，没有任何报错能告诉你原因）。
+    - **中继起不来**：退回直连上游并记一条警告。宁可退化（至少能启动、能看到失败），
+      也不要让整个启动直接失败。
+
+    有副作用：必要时会在本进程内起一个监听线程（端口交给系统分配）。
+    """
+    if not get_settings().proxy_relay:
+        return _upstream_of(proxy)  # 老行为：扩展负责认证
+    spec = _proxy_spec_of(profile, proxy)
+    if spec is None or not spec.needs_auth:
+        return _upstream_of(proxy)
+    try:
+        from . import proxyrelay
+
+        port = proxyrelay.pool().ensure(spec)
+    except Exception as exc:  # noqa: BLE001 —— 中继失败不该拦住浏览器启动
+        logger.warning("本地代理中继启动失败，退回直连上游（带认证的上游会连不上）：%s", exc)
+        return _upstream_of(proxy)
+    return f"http://127.0.0.1:{port}"
+
+
+def _proxy_spec_of(profile: dict[str, Any], proxy: str) -> Any:
+    """拿到带凭据的 ProxySpec。
+
+    优先用 manager 在 `_prepare_launch` 里塞进来的 `_proxy_spec` ——
+    经过 `_prepare_launch` 之后 `profile["proxy"]` 已经被脱敏成 `scheme://host:port`，
+    凭据只剩在这个 spec 里。测试里直接传带凭据的字符串也能解析出来。
+    """
+    spec = profile.get("_proxy_spec")
+    if spec is not None:
+        return spec
+    from .proxy import parse_proxy
+
+    try:
+        return parse_proxy(proxy)
+    except Exception:  # noqa: BLE001 —— 解析不了就当"不需要认证"，走直连
+        return None
 
 
 def _upstream_of(proxy: str) -> str:

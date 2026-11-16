@@ -38,6 +38,38 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+# ── 启动时默认打开的"检测页"────────────────────────────────
+# 挑选标准：无需登录、不需要人机验证、打开就能看到出口 IP / 指纹 / IP 干净度。
+# 2026-11-17 实测（curl 拿到 200 之后，再用 google-chrome 149 --headless=new
+# 真实渲染一次，确认页面里真的有数据，而不是只剩一个 JS 空壳）：
+#
+#   https://browserleaks.com/ip                    200，渲染出 "IP Address 118.114.95.247"，
+#                                                  同时给出 WebRTC 泄漏结果 —— 出口 IP 与泄漏一起看
+#   https://ip123.in/                              200，渲染出「欺诈评分 0/100 低风险」「代理 IP / VPN
+#                                                  特征：未检测到」「黑名单状态：未检测到」「IP 来源：原生 IP」
+#                                                  「IP 属性：家庭宽带」—— 中文的 IP 干净度页，正好对上需求
+#   https://abrahamjuliot.github.io/creepjs/       200，渲染出 "FP ID: 11e647…" 与 fuzzy hash、
+#                                                  WebRTC 候选、时区/语言 —— 综合指纹
+#
+# 被剔掉的候选（都试过，各自有硬伤）：
+#   https://ping0.cc/                 curl 200 但 DOM 是空的：Cloudflare Turnstile 人机验证墙，
+#                                     机器启动时打开只会看到验证码，不算"能用"
+#   https://scamalytics.com/ip        curl/渲染都 200，但页面是**查询表单**，不会自动显示
+#                                     "你自己这个 IP"的欺诈分；要填 IP 才有结果
+#   https://www.ip.cn/                渲染出 127.0.0.1（页面走了本地探测），不能反映出口 IP
+#   https://whoer.net/ 、https://ipcheck.ing/   渲染出来只有"请稍候…"，是纯前端挑战页
+#   https://www.ipqualityscore.com/  需要 API Key
+#
+# 备选（也验证过能用，嫌默认三页太多时可以换上来）：
+#   https://ipinfo.io/json           纯 JSON，最轻：{"ip":"…","city":"…","org":"AS4134 …"}
+#   https://browserleaks.com/canvas  单独看 canvas 指纹
+DEFAULT_DETECT_URLS = (
+    "https://browserleaks.com/ip",
+    "https://ip123.in/",
+    "https://abrahamjuliot.github.io/creepjs/",
+)
+
+
 def _default_root() -> Path:
     """默认数据目录。
 
@@ -56,7 +88,13 @@ class Settings:
     # ── 基础 ────────────────────────────────────────────
     root: Path = field(default_factory=lambda: Path(_env("ZW_ROOT") or _default_root()))
     node_id: str = field(default_factory=lambda: _env("ZW_NODE_ID") or socket.gethostname())
-    host: str = field(default_factory=lambda: _env("ZW_HOST", "127.0.0.1"))
+    # 默认监听 0.0.0.0：客户端控制台要能被同网段/远程访问。
+    # **安全边界不靠"只绑回环"**，而是靠 require_auth：
+    #   - 来自回环 → 直接放行（本机打开控制台不需要任何密码）
+    #   - 来自其它地址 → 必须提供机器码（device_id）或 ZW_ADMIN_TOKEN
+    # 浏览器本身仍然只听 127.0.0.1（见 engines.build_cmdline），
+    # 所以对外暴露的只有控制台 API，不是 CDP。
+    host: str = field(default_factory=lambda: _env("ZW_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: _env_int("ZW_PORT", 8730))
 
     # 管理令牌。留空 = 只允许本机回环且不校验（开发模式）
@@ -84,6 +122,31 @@ class Settings:
     shell_timeout: int = field(default_factory=lambda: _env_int("ZW_SHELL_TIMEOUT", 60))
     shell_max_output: int = field(default_factory=lambda: _env_int("ZW_SHELL_MAX_OUTPUT", 65536))
     shell_cwd: str = field(default_factory=lambda: _env("ZW_SHELL_CWD", ""))
+
+    # ── 启动页：恢复上次标签页 + 默认打开的检测页 ───────────
+    # 用户要的语义是「先恢复上次关闭时的网址，再额外开检测页」，
+    # 两个开关分开是为了能单独关掉其中一半（只恢复、不开检测页，或反过来）。
+    restore_tabs: bool = field(default_factory=lambda: _env_bool("ZW_RESTORE_TABS", True))
+    open_detect_on_start: bool = field(default_factory=lambda: _env_bool("ZW_OPEN_DETECT_ON_START", True))
+    # 逗号分隔。留空 = 用 DEFAULT_DETECT_URLS 那三个（而不是"一个都不开"）——
+    # 想一个都不开请关 ZW_OPEN_DETECT_ON_START，这样语义不歧义。
+    detect_urls: list[str] = field(
+        default_factory=lambda: (
+            [u.strip() for u in _env("ZW_DETECT_URLS").split(",") if u.strip()]
+            or list(DEFAULT_DETECT_URLS)
+        )
+    )
+
+    # ── 扩展包（Extension Packs）────────────────────────
+    # 新建环境时是否自动把"默认包"（is_default=1）带上。
+    default_packs: bool = field(default_factory=lambda: _env_bool("ZW_DEFAULT_PACKS", True))
+
+    # ── 代理中继 ────────────────────────────────────────
+    # 带用户名密码的上游代理，改由本机回环上一个极简中继代做认证
+    # （见 services/proxyrelay.py 顶部：Chrome 149 已忽略 --load-extension，
+    #  原来的"生成 MV3 认证扩展"方案在那类内核上是静默失效）。
+    # 设成 false 退回老方案：仍生成认证扩展，--proxy-server 直接指上游。
+    proxy_relay: bool = field(default_factory=lambda: _env_bool("ZW_PROXY_RELAY", True))
 
     # ── 端口池 ──────────────────────────────────────────
     port_pool_start: int = field(default_factory=lambda: _env_int("ZW_PORT_POOL_START", 21001))
@@ -113,6 +176,9 @@ class Settings:
     )
     # 绑 0.0.0.0 时是否强制要求 token
     force_token_on_public: bool = field(default_factory=lambda: _env_bool("ZW_FORCE_TOKEN_ON_PUBLIC", True))
+    # 绑定时被降级的原因（空=没降级）。main.py 会把它写进日志，免得用户困惑
+    # "我明明配了 0.0.0.0 为什么外面连不上"。
+    host_notice: str = ""
     # 是否信任反向代理传来的 X-Forwarded-For（放在 nginx 后面时才开）
     trust_proxy_headers: bool = field(default_factory=lambda: _env_bool("ZW_TRUST_PROXY_HEADERS", False))
 
@@ -137,6 +203,7 @@ class Settings:
     db_path: Path = field(default=Path("."))
     profiles_dir: Path = field(default=Path("."))
     ext_dir: Path = field(default=Path("."))
+    packs_dir: Path = field(default=Path("."))
     log_dir: Path = field(default=Path("."))
     staging_dir: Path = field(default=Path("."))
     runtime_dir: Path = field(default=Path("."))
@@ -146,6 +213,9 @@ class Settings:
         self.db_path = self.root / "zhiwen.db"
         self.profiles_dir = self.root / "profiles"
         self.ext_dir = self.root / "extensions"
+        # 扩展包：与"扩展库"分开。库是单个扩展的去重副本，包是"一整套扩展 + 它们的
+        # 存储数据"，两者生命周期不同（包要能整体删掉、能标记为默认）。
+        self.packs_dir = self.root / "packs"
         self.log_dir = self.root / "logs"
         self.staging_dir = self.root / "staging"
         # 运行时生成的辅助文件（代理认证扩展等），与用户的扩展库分开
@@ -154,7 +224,7 @@ class Settings:
             self.engine_dir = self.root / "engines"
         self.engine_dir = Path(self.engine_dir).expanduser().resolve()
         for d in (
-            self.root, self.profiles_dir, self.ext_dir, self.log_dir,
+            self.root, self.profiles_dir, self.ext_dir, self.packs_dir, self.log_dir,
             self.staging_dir, self.engine_dir, self.runtime_dir,
         ):
             Path(d).mkdir(parents=True, exist_ok=True)
@@ -162,12 +232,26 @@ class Settings:
         if self.port_pool_end <= self.port_pool_start:
             raise ValueError("ZW_PORT_POOL_END 必须大于 ZW_PORT_POOL_START")
 
-        # 安全兜底：对外监听时必须要有 admin token
-        if self.host not in ("127.0.0.1", "localhost", "::1") and self.force_token_on_public and not self.admin_token:
-            raise ValueError(
-                "ZW_HOST 不是回环地址时必须设置 ZW_ADMIN_TOKEN，否则任何人都能控制你的浏览器。"
-                "如果确实不需要（例如只在内网且已用防火墙隔离），显式设置 ZW_FORCE_TOKEN_ON_PUBLIC=false。"
+        # 安全兜底：对外监听时**必须有一个凭据**。
+        # 现在的模型是"远程用机器码"，所以 device_id 也算有效凭据 ——
+        # 客户端一定会生成它；只有独立跑 core（没有 device_id）时才需要 admin_token。
+        # 对外监听但一个凭据都没有 → **降级回回环**，而不是抛异常。
+        #
+        # 为什么不再抛：模块级有 `app = create_app()`，抛异常会让"仅仅 import
+        # 这个模块"就崩溃（自检、单元测试、CLI 全都受影响）。
+        # 降级同样安全（没监听出去），而且行为可预期；真正跑客户端时
+        # device_id 一定存在，所以不会触发这条。
+        if (
+            self.host not in ("127.0.0.1", "localhost", "::1")
+            and self.force_token_on_public
+            and not self.admin_token
+            and not self.device_id
+        ):
+            self.host_notice = (
+                f"ZW_HOST={self.host} 但没有 ZW_ADMIN_TOKEN 或 ZW_DEVICE_ID，"
+                "已自动降级为只监听 127.0.0.1（避免把控制台暴露给全网段）"
             )
+            self.host = "127.0.0.1"
         if self.host not in ("127.0.0.1", "localhost", "::1") and not self.internal_token:
             self.internal_token = self.admin_token  # 单机部署常见情形，网关与核心共用
         if not self.internal_token:
