@@ -46,6 +46,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 # ── 常量：本项目的硬约定，改这些等于改契约 ────────────────────────────────
 APP_NAME = "知纹客户端"
+# 安装目录名（纯 ASCII）。与显示名 APP_NAME 分开：显示可以中文，路径不行。
+APP_DIR_NAME = "ZhiwenClient"
 APP_PUBLISHER = "pscly"
 MAIN_EXE = "zhiwen-client.exe"
 # .iss 里必须写成的源路径形式（相对 packaging/windows/）
@@ -432,11 +434,14 @@ def check_version(iss: IssScript, rep: Report, expected: str | None) -> None:
 def check_dir_and_output(iss: IssScript, rep: Report) -> None:
     cid = "C09"
     ddn = iss.setup.get("DefaultDirName", "")
-    if ddn.startswith("{autopf}\\") and ddn.endswith("\\" + APP_NAME):
-        rep.add(cid, f"默认装到 {{autopf}}\\{APP_NAME}（按权限自适应）", ddn)
+    # 安装目录名必须是纯 ASCII：中文路径会在旧命令行工具、备份脚本、
+    # 日志 grep、跨机复制等场景里反复出问题。显示名可以中文，路径不行。
+    if ddn.startswith("{autopf}\\") and ddn.endswith("\\" + APP_DIR_NAME):
+        rep.add(cid, f"默认装到 {{autopf}}\\{APP_DIR_NAME}（纯英文路径、按权限自适应）", ddn)
     else:
-        rep.fail(cid, f"默认装到 {{autopf}}\\{APP_NAME}（按权限自适应）",
-                 f"现在是 {ddn!r}；{'{autopf}'} 在管理员模式=Program Files，普通用户=%LOCALAPPDATA%\\Programs")
+        rep.fail(cid, f"默认装到 {{autopf}}\\{APP_DIR_NAME}（纯英文路径、按权限自适应）",
+                 f"现在是 {ddn!r}。安装目录名必须是不含中文的 ASCII 名字；"
+                 f"中文只能用在显示名（AppName/UninstallDisplayName）上")
 
     cid = "C10"
     obf = iss.setup.get("OutputBaseFilename", "")
@@ -462,6 +467,51 @@ def check_dir_and_output(iss: IssScript, rep: Report) -> None:
                 else f"PrivilegesRequired 合法（{priv}）", priv)
     else:
         rep.fail(cid, "PrivilegesRequired 合法（lowest/admin/poweruser）", f"现在是 {priv!r}")
+
+
+def check_ascii_paths(iss: IssScript, rep: Report) -> None:
+    """所有会生成磁盘路径的指令，都不允许出现非 ASCII 字符。
+
+    这条是"中文路径"问题的总闸。只看默认目录是不够的 ——
+    开始菜单项名、桌面快捷方式名、卸载项名都是**文件名**，
+    中文照样会落到 `开始菜单\\程序\\<中文>` 下面。
+
+    显示用的字段（AppName / Comment / Description / UninstallDisplayName）
+    不受这条约束：它们在界面里中文更友好。
+    """
+    cid = "C36"
+    offenders: list[str] = []
+
+    def bad(where: str, value: str) -> None:
+        if value and not value.isascii():
+            offenders.append(f"{where} = {value!r}")
+
+    # [Setup] 里会变成本地路径的两项
+    bad("DefaultDirName", iss.setup.get("DefaultDirName", ""))
+    bad("DefaultGroupName", iss.setup.get("DefaultGroupName", ""))
+    bad("OutputBaseFilename", iss.setup.get("OutputBaseFilename", ""))
+
+    # [Icons] 的 Name 是快捷方式文件的路径
+    for e in iss.entries.get("Icons", []):
+        bad("[Icons] Name", e.get("name", ""))
+        bad("[Icons] DestName", e.get("destname", ""))
+
+    # [Files] 的目标目录/文件名
+    for e in iss.entries.get("Files", []):
+        bad("[Files] DestDir", e.get("destdir", ""))
+        bad("[Files] DestName", e.get("destname", ""))
+
+    # [Dirs] / [UninstallDelete] 直接就是目录名
+    for sec in ("Dirs", "UninstallDelete"):
+        for e in iss.entries.get(sec, []):
+            bad(f"[{sec}] Name", e.get("name", ""))
+
+    if offenders:
+        rep.fail(cid, "所有磁盘路径与文件名都是纯 ASCII（中文只能出现在显示名里）",
+                 "发现中文路径：" + "; ".join(offenders[:6]))
+    else:
+        rep.add(cid, "所有磁盘路径与文件名都是纯 ASCII（中文只出现在显示名里）",
+                "检查了 DefaultDirName / DefaultGroupName / Icons / Files / Dirs / UninstallDelete")
 
 
 def check_source_path(iss: IssScript, rep: Report, repo_root: Path) -> None:
@@ -803,7 +853,8 @@ CHECKS_HELP = [
     ("C06", f"AppName={APP_NAME}、AppPublisher={APP_PUBLISHER}"),
     ("C07", "版本号走 /D 注入的 {#MyAppVersion}，不是写死"),
     ("C08", "版本号格式合法；与 --version 不一致只告警（/D 会覆盖）"),
-    ("C09", "DefaultDirName={autopf}\\知纹客户端"),
+    ("C09", f"DefaultDirName={{autopf}}\\{APP_DIR_NAME}（纯英文路径）"),
+    ("C36", "所有磁盘路径/文件名纯 ASCII（中文只能出现在显示名里）"),
     ("C10", f"OutputBaseFilename={OUTPUT_BASENAME} 且纯 ASCII"),
     ("C11", "OutputDir 指向仓库根 dist\\"),
     ("C12", "PrivilegesRequired 合法（lowest = 免管理员）"),
@@ -891,6 +942,7 @@ def main(argv: list[str] | None = None) -> int:
     check_dir_and_output(iss, rep)
     check_source_path(iss, rep, repo_root)
     check_no_hardcoded_paths(iss, rep)
+    check_ascii_paths(iss, rep)
     check_icons(iss, rep)
     check_tasks(iss, rep)
     check_registry(iss, rep)

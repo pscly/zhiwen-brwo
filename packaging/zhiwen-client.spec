@@ -4,7 +4,7 @@
 #   pyinstaller packaging/zhiwen-client.spec --noconfirm
 #
 # 产物：
-#   Windows  dist/知纹客户端.exe      （--windowed，双击不弹黑框）
+#   Windows  dist/zhiwen-client.exe   （--windowed，双击不弹黑框）
 #   Linux    dist/zhiwen-client       （单文件，配合 AppImage 使用）
 #
 # 为什么要把 zw_core 整个包进来：客户端要在本机跑 core（浏览器只能在本地开）。
@@ -138,7 +138,10 @@ exe = EXE(  # noqa: F821
 if sys.platform == "darwin":
     app = BUNDLE(  # noqa: F821
         exe,
-        name="知纹客户端.app",
+        # .app 的**文件名就是路径**，必须是 ASCII；中文名放到
+        # CFBundleDisplayName 里，Finder 与程序坞仍然显示「知纹客户端」。
+        # 这条和 Windows 安装包是同一个原则：路径纯英文，显示可以中文。
+        name="ZhiwenClient.app",
         icon=None,
         bundle_identifier="cc.pscly.zhiwen.client",
         info_plist={

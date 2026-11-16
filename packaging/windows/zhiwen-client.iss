@@ -34,7 +34,19 @@
   #define MyAppVersion4 "0.0.0.0"
 #endif
 
+; ── 显示名 vs 路径名（必须分开，别合并）──────────────────────────
+; MyAppName   ：只用于**显示**（添加/删除程序里的名字、快捷方式注释）。
+;               可以是中文，用户看着舒服。
+; MyAppDirName：用于**所有磁盘路径与文件/文件夹名**。必须是纯 ASCII。
+;
+; 为什么必须分开：中文路径会在很多地方踩坑 ——
+;   · 某些老版本命令行工具不解 UTF-8 路径
+;   · 备份/同步脚本按 GBK 处理路径会乱码
+;   · 用户从别的机器粘贴路径时容易出错
+;   · 上报日志、生成配置里带中文路径很难 grep
+; 所以：**只要会落到磁盘上的名字，一律 ASCII**。
 #define MyAppName "知纹客户端"
+#define MyAppDirName "ZhiwenClient"
 #define MyAppPublisher "pscly"
 #define MyAppExeName "zhiwen-client.exe"
 #define MyAppURL "https://github.com/pscly/zhiwen-brwo"
@@ -56,8 +68,8 @@ AppUpdatesURL={#MyAppURL}
 
 ; {autopf} = Program Files（管理员/全局安装）或 %LOCALAPPDATA%\Programs（免管理员）。
 ; 配合下面的 PrivilegesRequired=lowest，用户是普通账号也能装成功。
-DefaultDirName={autopf}\{#MyAppName}
-DefaultGroupName={#MyAppName}
+DefaultDirName={autopf}\{#MyAppDirName}
+DefaultGroupName={#MyAppDirName}
 DisableProgramGroupPage=yes
 
 ; lowest = 默认按当前用户装、不弹 UAC；想全局装就运行 setup /ALLUSERS。
@@ -128,10 +140,10 @@ Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignor
 
 [Icons]
 ; 开始菜单项（{group} = 开始菜单里的「知纹客户端」文件夹）
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "{cm:AppComment}"
-Name: "{group}\卸载{#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{group}\{#MyAppDirName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "{cm:AppComment}"
+Name: "{group}\Uninstall {#MyAppDirName}"; Filename: "{uninstallexe}"
 ; 桌面快捷方式（只在勾了 desktopicon 任务时才建；{autodesktop} 随安装模式走）
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "{cm:AppComment}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppDirName}"; Filename: "{app}\{#MyAppExeName}"; Comment: "{cm:AppComment}"; Tasks: desktopicon
 
 [Run]
 ; 装完直接打开（postinstall = 在完成页显示成勾选框，默认勾上）
@@ -150,7 +162,7 @@ Type: filesandordirs; Name: "{app}"
 ; 开始菜单文件夹（卸载程序自己会删它建的快捷方式，这里兜底）
 Type: dirifempty; Name: "{group}"
 ; 桌面快捷方式兜底（万一用户自己复制过同名的）
-Type: files; Name: "{autodesktop}\{#MyAppName}.lnk"
+Type: files; Name: "{autodesktop}\{#MyAppDirName}.lnk"
 
 [CustomMessages]
 ; 下面这些名字里，CreateDesktopIcon / AdditionalIcons / LaunchProgram 是 Inno

@@ -230,8 +230,8 @@ jobs:
           elif [ "${{ runner.os }}" = "macOS" ]; then
             cd "${{ github.workspace }}/dist"
             ls -la
-            if [ -d "知纹客户端.app" ]; then
-              TARGET="知纹客户端.app"
+            if [ -d "ZhiwenClient.app" ]; then
+              TARGET="ZhiwenClient.app"
             elif [ -f "zhiwen-client" ]; then
               TARGET="zhiwen-client"
             else

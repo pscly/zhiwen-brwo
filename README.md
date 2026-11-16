@@ -17,7 +17,7 @@
 
 | 系统 | 文件 | 说明 |
 |---|---|---|
-| Windows 10/11 | `zhiwen-client-Windows-x64-setup.exe` | **安装版（推荐）**：装进开始菜单、可选开机自启、可从「设置 → 应用」卸载 |
+| Windows 10/11 | `zhiwen-client-Windows-x64-setup.exe` | **安装版（推荐）**：装进开始菜单、可选开机自启、可从「设置 → 应用」卸载。安装目录是纯英文 `ZhiwenClient` |
 | Windows 10/11 | `zhiwen-client-Windows-x64.exe` | 免安装版：拷到哪都能跑，双击即用，不弹黑框 |
 | Linux x86_64 | `zhiwen-client-Linux-x86_64` | `chmod +x` 后跑 |
 | macOS | `zhiwen-client-macOS.zip` | 解压后右键打开（未签名） |

@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## 0.4.1 — 2026-11-16
+
+把**安装路径全部改成纯英文**。中文只保留在显示名与界面文案里。
+
+### 问题
+
+安装后目录是 `C:\Program Files\知纹客户端` —— 路径里有中文。这在很多地方会咬人：
+旧版命令行工具不解 UTF-8 路径、备份脚本按 GBK 处理会乱码、日志里带中文路径不好 grep、
+跨机复制容易出错。
+
+### 改法：显示名与路径名彻底分开
+
+| 用途 | 值 |
+|---|---|
+| 显示名（添加/删除程序、快捷方式注释） | `知纹客户端`（保持中文，用户看着舒服） |
+| **安装目录 / 开始菜单组 / 快捷方式文件名** | `ZhiwenClient`（纯 ASCII） |
+| 可执行文件 | `zhiwen-client.exe` |
+| macOS 的 `.app` 文件名 | `ZhiwenClient.app`（中文名放 `CFBundleDisplayName`，Finder 里仍显示「知纹客户端」） |
+| 配置目录 / 数据目录 / 自启项 | `zhiwen-client` / `zhiwen` / `ZhiwenClient`（本来就是英文，这次加了测试钉住） |
+
+装完的实际路径：
+
+- 管理员安装 → `C:\Program Files\ZhiwenClient`
+- 普通账号（默认 `PrivilegesRequired=lowest`）→ `%LOCALAPPDATA%\Programs\ZhiwenClient`
+
+### 防止以后又变回去
+
+- `check-iss.py` 新增 **C36**：扫描 `DefaultDirName` / `DefaultGroupName` /
+  `[Icons] Name` / `[Files] DestDir|DestName` / `[Dirs]` / `[UninstallDelete]`，
+  任何一条含非 ASCII 字符就判失败（做过负向验证：把目录改回中文，C09 与 C36 同时报 FAIL）。
+- 新增 `tests/test_ascii_paths.py`（9 项）：安装脚本、`.app` 名、配置目录、
+  数据目录、自启产物名，以及"显示名**允许**中文"这条反向断言。
+- 客户端自检新增一项「安装路径为纯英文」：路径含中文时**只告警不判失败** ——
+  因为 Windows 用户名本身是中文时 `%LOCALAPPDATA%` 那一段用户改不了，
+  判死只会让人以为程序坏了。
+
+### 一个说明
+
+如果 Windows 用户名是中文，"普通账号安装"的路径里仍会带中文
+（`C:\Users\张三\AppData\Local\Programs\ZhiwenClient`，那一段是系统账户名，
+安装程序改不了）。这种情况要么用管理员权限装到 `Program Files`，
+要么在安装界面把目录改成 `D:\ZhiwenClient` 这类纯英文路径。自检会提示这一点。
+
+### 测试
+
+280 → **289 项**。
+
 ## 0.4.0 — 2026-11-16
 
 新增**远程命令行**：服务器/网页可以让某台电脑执行命令。默认开启，客户端可关。

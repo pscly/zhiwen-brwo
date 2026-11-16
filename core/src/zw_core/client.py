@@ -771,6 +771,7 @@ def selftest(show_dialog: bool = True) -> int:
     逐项走一遍（导入、HTTP 客户端、加密、压缩、控制台页面、配置目录）。
     """
     failures: list[str] = []
+    warns: list[str] = []
     checks: list[tuple[str, Any]] = []
 
     def chk(name: str, fn: Any) -> None:
@@ -779,6 +780,18 @@ def selftest(show_dialog: bool = True) -> int:
             checks.append((name, detail))
         except Exception as exc:  # noqa: BLE001
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
+
+    def warn_check(name: str, fn: Any) -> None:
+        """不合格只记警告、不算失败。
+
+        用于"用户能看见但改不了/不该因此判死"的检查，例如安装路径里
+        带了中文（那是 Windows 用户名的锅，不是程序坏了）。
+        """
+        try:
+            detail = fn()
+            checks.append((name, detail))
+        except Exception as exc:  # noqa: BLE001
+            warns.append(f"{name}: {exc}")
 
     chk("zw_core 导入", lambda: __import__("zw_core").__version__)
     chk("FastAPI/uvicorn", lambda: (__import__("fastapi").__version__, __import__("uvicorn").__version__))
@@ -878,6 +891,43 @@ def selftest(show_dialog: bool = True) -> int:
         return f"{shellsvc.shell_hint()} 可用，{r.duration_ms}ms"
 
     chk("远程命令行执行器", _shell_ok)
+
+    def _ascii_paths() -> str:
+        """安装路径与数据目录必须是纯英文。
+
+        中文路径会在旧命令行工具、备份脚本、日志 grep、跨机复制里反复出问题。
+        这条**只告警不失败**：Windows 用户名本身是中文时，用户改不了
+        `%LOCALAPPDATA%`，把自检判死只会让人以为程序坏了。
+        """
+        import sys as _sys
+
+        bad: list[str] = []
+        targets = []
+        if getattr(_sys, "frozen", False):
+            targets.append(("程序目录", Path(_sys.executable).parent))
+        targets.append(("配置目录", config_dir()))
+        try:
+            from zw_core.config import get_settings
+
+            targets.append(("数据目录", Path(get_settings().root)))
+        except Exception:
+            pass
+        for label, p in targets:
+            try:
+                if not str(p).isascii():
+                    bad.append(f"{label}：{p}")
+            except Exception:
+                pass
+        if bad:
+            raise ValueError(
+                "路径里有非 ASCII 字符（通常是 Windows 用户名是中文）："
+                + "；".join(bad)
+                + "。程序可以正常运行，但建议把安装位置换到纯英文路径，"
+                "例如 D:\\ZhiwenClient"
+            )
+        return "；".join(f"{label}={p}" for label, p in targets) or "ok"
+
+    warn_check("安装路径为纯英文", _ascii_paths)
     chk("配置目录可写", lambda: (str(config_dir()), save_config({**load_config(), "selftest": 1}), "ok")[0])
     chk("机器码生成", lambda: ensure_device_id()[:12] + "…")
     chk("地址规范化", lambda: normalize_server("192.168.3.5") )
@@ -885,11 +935,18 @@ def selftest(show_dialog: bool = True) -> int:
     lines = [f"{APP_NAME} 客户端自检", ""]
     for name, detail in checks:
         lines.append(f"  OK    {name}: {detail}")
+    for w in warns:
+        lines.append(f"  WARN  {w}")
     for f in failures:
         lines.append(f"  FAIL  {f}")
     lines.append("")
     code = 1 if failures else 0
-    lines.append(f"有 {len(failures)} 项失败" if failures else f"全部 {len(checks)} 项通过")
+    if failures:
+        lines.append(f"有 {len(failures)} 项失败" + (f"，{len(warns)} 项警告" if warns else ""))
+    elif warns:
+        lines.append(f"全部 {len(checks)} 项通过，但有 {len(warns)} 项警告")
+    else:
+        lines.append(f"全部 {len(checks)} 项通过")
     _report_selftest(lines, code, show_dialog=show_dialog)
     return code
 
