@@ -625,8 +625,20 @@ class _Placeholder:
         self.active = False
         entry.bind("<FocusIn>", self._hide, add="+")
         entry.bind("<FocusOut>", self._show, add="+")
+        # 必须盯变量本身，不能只靠焦点事件：鼠标右键粘贴、或者调用方直接
+        # `var.set(...)` 都不会触发 <FocusIn>，占位标记会赖着不走，于是
+        # `value()` 一直返回空串 —— 表现就是"明明填了代理，点测试却说输入框是空的"。
+        var.trace_add("write", self._on_write)
         if not var.get():
             self._show()
+
+    def _on_write(self, *_args: Any) -> None:
+        if self.active and self.var.get() != self.text:
+            self.active = False
+            try:
+                self.entry.configure(fg=self.theme.ink)
+            except Exception:
+                pass
 
     def _show(self, _event: Any = None) -> None:
         if self.var.get():
@@ -649,8 +661,11 @@ class _Placeholder:
             pass
 
     def value(self) -> str:
-        """真实内容（占位符状态下是空串）。"""
-        return "" if self.active else self.var.get()
+        """真实内容（还停留在占位符上时算空）。"""
+        current = self.var.get()
+        if self.active and current == self.text:
+            return ""
+        return current
 
     def reset(self) -> None:
         """清空并重新显示占位符（保存成功后用，避免用户以为还没写进去）。"""
