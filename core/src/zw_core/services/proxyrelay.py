@@ -103,8 +103,63 @@ class RelayError(Exception):
 
 
 # ── 小工具 ────────────────────────────────────────────────
+# 链式代理里两跳的角色名。错误消息带上它，排错时才能一眼看出
+# "到底前置坏了还是落地坏了" —— 这两种故障的症状一模一样（连不上 / 认证失败）。
+_ROLE_HOP = "前置"
+_ROLE_EXIT = "落地"
+
+
+def _tag(role: str, msg: str) -> str:
+    """给错误消息加上"是哪一跳出的错"。`role` 为空时**原样返回**（单跳行为不变）。"""
+    return f"{role}代理：{msg}" if role else msg
+
+
 def _is_socks(scheme: str) -> bool:
     return scheme.lower().startswith("socks")
+
+
+class _Prefixed:
+    """把"上游抢跑的字节"接到一个套接字前面的薄包装。
+
+    链式里前置的 `CONNECT` 应答后面可能已经跟着落地代理发来的字节。
+    那些字节属于**下一层的协议流**，必须喂给下一跳的握手；直接丢掉等于
+    让落地的握手永远等不到数据（表现为卡到空闲超时才 502）。
+    只在前置真的抢跑了字节时才用这个包装 —— 正常路径上没有任何额外开销。
+    """
+
+    def __init__(self, sock: socket.socket, prefix: bytes) -> None:
+        self._sock = sock
+        #: 底层真实套接字。`_conns` 里登记的是它，`_forget(wrapper)` 要靠它精确摘掉。
+        self.raw = sock
+        self._buf = bytearray(prefix or b"")
+
+    def recv(self, n: int) -> bytes:
+        if self._buf:
+            take = bytes(self._buf[:n])
+            del self._buf[:n]
+            return take
+        return self._sock.recv(n)
+
+    def sendall(self, data: bytes) -> None:
+        self._sock.sendall(data)
+
+    def settimeout(self, value: float | None) -> None:
+        self._sock.settimeout(value)
+
+    def shutdown(self, how: int) -> None:
+        try:
+            self._sock.shutdown(how)
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def fileno(self) -> int:
+        return self._sock.fileno()
 
 
 def _read_until(sock: socket.socket, marker: bytes, limit: int = _MAX_HEADER_BYTES) -> tuple[bytes, bytes]:
@@ -334,7 +389,7 @@ class RelayServer:
         logger.info(
             "本地中继已启动 port=%s 上游=%s 上限=%s 空闲超时=%ss",
             self._port,
-            self._spec.upstream,
+            self._spec.chain_text,  # 链式时是 `前置|落地`（不含凭据），排错先看这里
             self._max_conn,
             self._idle,
         )
@@ -373,6 +428,10 @@ class RelayServer:
                 "port": self._port,
                 "upstream": self._spec.upstream,
                 "scheme": self._spec.scheme,
+                # 链式时把 `前置|落地` 也报出来（不含凭据）：只看 upstream 会让人
+                # 以为这个中继在直连落地，从而把"前置挂了"错判成"落地挂了"。
+                "chain": self._spec.chain_text,
+                "is_chain": self._spec.hop is not None,
                 "connections": self._connections,
                 "bytes_in": self._bytes_in,
                 "bytes_out": self._bytes_out,
@@ -464,20 +523,23 @@ class RelayServer:
             else:
                 host, port = _request_target(head)
                 if _is_socks(self._spec.scheme):
-                    up = self._socks5_connect(host, port)
+                    up, from_up = self._open_to_target(host, port)
                     # SOCKS5 不是 HTTP 代理：去掉 Proxy-* 头后按原样发。
                     # 请求行保留了绝对 URI 形式 —— RFC 9112 §3.2.2 要求服务端
                     # 必须接受 absolute-form，实际主流服务端（nginx/CDN）都认。
                     out = _rewrite_headers(head, None)
                 else:
-                    up, _ = self._open_upstream(host_hint=host)
-                    out = _rewrite_headers(head, self._auth_header() or None)
+                    # 明文 HTTP 走 HTTP 上游：连上落地（必要时穿过前置）之后
+                    # 直接发绝对 URI 请求，不套 CONNECT —— 这是代理协议本身的样子。
+                    up = self._open_to_proxy()
+                    from_up = b""
+                    out = _rewrite_headers(head, self._auth_header_of(self._spec))
                 # 明文 HTTP 还没给客户端写过任何字节，所以这一步失败仍然可以回 502，
                 # 因此 established 放在"请求确实发出去了"之后。
                 up.sendall(out + leftover)
                 self._count_in(len(out) + len(leftover))
                 established = True
-                self._tunnel(conn, up)
+                self._tunnel(conn, up, to_client=from_up)
         except RelayError as exc:
             with self._lock:
                 self._last_error = str(exc)
@@ -497,84 +559,111 @@ class RelayServer:
                 self._send_error(conn, 502, "Bad Gateway", f"与上游/客户端通信失败：{exc}")
 
     # ── 上游握手 ─────────────────────────────────────────
-    def _auth_header(self) -> bytes:
-        """Basic 认证头（不放进日志、不进命令行，只进这条连接的请求头）。"""
-        if not self._spec.username:
+    def _auth_header_of(self, spec: ProxySpec) -> bytes:
+        """Basic 认证头（不放进日志、不进命令行，只进这条连接的请求头）。
+
+        带 `spec` 参数而不是用 `self._spec`：链式代理里前置与落地**各有各的凭据**，
+        两跳都必须能生成自己的认证头，用 self 就写不出来。
+        """
+        if not spec.username:
             return b""
         token = base64.b64encode(
-            f"{self._spec.username}:{self._spec.password}".encode("utf-8")
+            f"{spec.username}:{spec.password}".encode("utf-8")
         ).decode("ascii")
         return f"Proxy-Authorization: Basic {token}\r\n".encode("ascii")
 
-    def _open_upstream(self, *, host_hint: str = "") -> tuple[socket.socket, bytes]:
-        """连上游代理本体（不开隧道）。https 上游在这里套 TLS。"""
+    def _auth_header(self) -> bytes:
+        """本跳（落地）的认证头。"""
+        return self._auth_header_of(self._spec)
+
+    def _connect_proxy(self, spec: ProxySpec, *, role: str = "") -> socket.socket:
+        """连上某个代理本体的 TCP（https 上游在这里套 TLS）。**只连接，不握手。**
+
+        "只连接"这一条是链式能成立的前提：连接与握手分开之后，
+        "在一条已经建好的隧道上再对下一个代理握一次手"才有可能 —— 见 `_open_tunnel`。
+        """
         try:
-            sock = socket.create_connection((self._spec.host, self._spec.port), timeout=self._idle)
+            sock = socket.create_connection((spec.host, spec.port), timeout=self._idle)
         except OSError as exc:
             raise RelayError(
-                f"连不上上游代理 {self._spec.host}:{self._spec.port}（{type(exc).__name__}: {exc}）"
+                _tag(role, f"连不上上游代理 {spec.host}:{spec.port}（{type(exc).__name__}: {exc}）")
             ) from exc
         sock.settimeout(self._idle)
         with self._lock:
             self._conns.add(sock)
-        if self._spec.scheme.lower() == "https":
+        if spec.scheme.lower() == "https":
             import ssl
 
             try:
                 ctx = ssl.create_default_context()
-                sock = ctx.wrap_socket(sock, server_hostname=self._spec.host)
+                sock = ctx.wrap_socket(sock, server_hostname=spec.host)
             except OSError as exc:
                 self._forget(sock)
                 raise RelayError(
-                    f"与上游 https 代理 {self._spec.host}:{self._spec.port} 建立 TLS 失败：{exc}"
+                    _tag(role, f"与上游 https 代理 {spec.host}:{spec.port} 建立 TLS 失败：{exc}")
                 ) from exc
-        return sock, b""
+        return sock
 
     def _forget(self, sock: socket.socket) -> None:
+        # `_conns` 里存的是**真实**套接字；链式路径上可能传进来 `_Prefixed` 包装，
+        # 直接 discard 包装对象是无效操作（会把真实套接字永远留在集合里）。
         with self._lock:
-            self._conns.discard(sock)
+            self._conns.discard(getattr(sock, "raw", sock))
         try:
             sock.close()
         except OSError:
             pass
 
-    def _tunnel_to(self, host: str, port: int) -> tuple[socket.socket, bytes]:
-        """按上游类型建一条到 host:port 的隧道，返回 (套接字, 上游抢跑的字节)。"""
-        if _is_socks(self._spec.scheme):
-            if self._spec.scheme.lower().startswith("socks4"):
-                raise RelayError("上游是 socks4，本地中继只实现了 socks5（请把代理改成 socks5://）")
-            return self._socks5_connect(host, port), b""
-        up, _ = self._open_upstream(host_hint=host)
+    def _http_connect(
+        self,
+        sock: socket.socket,
+        spec: ProxySpec,
+        host: str,
+        port: int,
+        *,
+        role: str = "",
+    ) -> bytes:
+        """在**已经连上的** socket 上发 `CONNECT host:port` 并校验 200。
+
+        返回上游抢跑的尾巴字节（常为空）：那已经属于隧道里的应用数据，丢掉等于截断。
+        """
         target = f"{_uri_host(host)}:{port}"
         req = (
             f"CONNECT {target} HTTP/1.1\r\n"
             f"Host: {target}\r\n"
             f"User-Agent: zhiwen-relay/{self._port}\r\n"
         ).encode("latin-1")
-        req += self._auth_header()
+        req += self._auth_header_of(spec)
         req += b"Proxy-Connection: Keep-Alive\r\n\r\n"
         try:
             # 这条 CONNECT 是我们自己生成的，不计入 bytes_in（那是"客户端发来的字节"）
-            up.sendall(req)
-            head, rest = _read_until(up, b"\r\n\r\n")
+            sock.sendall(req)
+            head, rest = _read_until(sock, b"\r\n\r\n")
         except OSError as exc:
-            self._forget(up)
-            raise RelayError(f"向上游代理发起 CONNECT {target} 失败：{exc}") from exc
+            raise RelayError(_tag(role, f"向上游代理发起 CONNECT {target} 失败：{exc}")) from exc
         if not head:
-            self._forget(up)
-            raise RelayError(f"上游代理 {self._spec.upstream} 在 CONNECT {target} 时直接断开，没有任何响应")
+            raise RelayError(
+                _tag(role, f"上游代理 {spec.upstream} 在 CONNECT {target} 时直接断开，没有任何响应")
+            )
         code, line = _status_line(head)
         if code != 200:
-            self._forget(up)
             if code == 407:
                 raise RelayError(
-                    f"上游代理拒绝认证（407）—— 用户名或密码不对，或者该代理要求 IP 白名单：{line}"
+                    _tag(role, f"上游代理拒绝认证（407）—— 用户名或密码不对，或者该代理要求 IP 白名单：{line}")
                 )
-            raise RelayError(f"上游代理拒绝 CONNECT {target}：{line}")
-        return up, rest
+            raise RelayError(_tag(role, f"上游代理拒绝 CONNECT {target}：{line}"))
+        return rest
 
-    def _socks5_connect(self, host: str, port: int) -> socket.socket:
-        """SOCKS5 握手 + RFC 1929 用户名密码，拿到成功应答后返回套接字。
+    def _socks5_handshake(
+        self,
+        sock: socket.socket,
+        spec: ProxySpec,
+        host: str,
+        port: int,
+        *,
+        role: str = "",
+    ) -> None:
+        """在**已经连上的** socket 上做 SOCKS5 握手 + RFC 1929 + CONNECT。
 
         字节序列（写清楚是为了以后能照着对抓包）：
           客户端(本中继) → 上游：05 02 00 02      （5 版本、2 种方法、无认证、用户名密码）
@@ -584,62 +673,145 @@ class RelayServer:
           本中继 → 上游：          05 01 00 ATYP ADDR PORT
           上游 → 本中继：          05 00 00 ATYP BND.ADDR BND.PORT
         """
+        has_auth = bool(spec.username)
         try:
-            sock = socket.create_connection((self._spec.host, self._spec.port), timeout=self._idle)
-        except OSError as exc:
-            raise RelayError(
-                f"连不上上游 SOCKS5 {self._spec.host}:{self._spec.port}（{type(exc).__name__}: {exc}）"
-            ) from exc
-        sock.settimeout(self._idle)
-        with self._lock:
-            self._conns.add(sock)
-        try:
-            has_auth = bool(self._spec.username)
             sock.sendall(b"\x05\x02\x00\x02" if has_auth else b"\x05\x01\x00")
             ver, method = _recv_exact(sock, 2)
-            if ver != 5:
-                raise RelayError(f"上游不是 SOCKS5（握手版本字节是 0x{ver:02x}，应为 0x05）")
-            if method == 0x02:
-                if not has_auth:
-                    raise RelayError("上游 SOCKS5 要求用户名密码，但代理没配凭据")
-                raw_u = self._spec.username.encode("utf-8")[:255]
-                raw_p = self._spec.password.encode("utf-8")[:255]
-                sock.sendall(
-                    b"\x01" + bytes([len(raw_u)]) + raw_u + bytes([len(raw_p)]) + raw_p
-                )
-                _sver, status = _recv_exact(sock, 2)
-                if status != 0:
-                    raise RelayError(
+        except OSError as exc:
+            raise RelayError(_tag(role, f"与上游 SOCKS5 握手时连接出错：{exc}")) from exc
+        if ver != 5:
+            raise RelayError(
+                _tag(role, f"上游不是 SOCKS5（握手版本字节是 0x{ver:02x}，应为 0x05）")
+            )
+        if method == 0x02:
+            if not has_auth:
+                raise RelayError(_tag(role, "上游 SOCKS5 要求用户名密码，但代理没配凭据"))
+            raw_u = spec.username.encode("utf-8")[:255]
+            raw_p = spec.password.encode("utf-8")[:255]
+            sock.sendall(
+                b"\x01" + bytes([len(raw_u)]) + raw_u + bytes([len(raw_p)]) + raw_p
+            )
+            _sver, status = _recv_exact(sock, 2)
+            if status != 0:
+                raise RelayError(
+                    _tag(
+                        role,
                         f"上游 SOCKS5 用户名密码认证失败（状态 0x{status:02x}）"
-                        " —— 凭据不对，或该代理只允许白名单 IP"
+                        " —— 凭据不对，或该代理只允许白名单 IP",
                     )
-            elif method == 0x00:
-                if has_auth:
-                    logger.debug("上游 SOCKS5 不需要认证，跳过 RFC1929")
-            elif method == 0xFF:
-                raise RelayError("上游 SOCKS5 拒绝了所有认证方式（0xFF）—— 通常是没有提供它要求的凭据")
-            else:
-                raise RelayError(f"上游 SOCKS5 选了不支持的认证方式 0x{method:02x}")
+                )
+        elif method == 0x00:
+            if has_auth:
+                logger.debug("上游 SOCKS5 不需要认证，跳过 RFC1929")
+        elif method == 0xFF:
+            raise RelayError(
+                _tag(role, "上游 SOCKS5 拒绝了所有认证方式（0xFF）—— 通常是没有提供它要求的凭据")
+            )
+        else:
+            raise RelayError(_tag(role, f"上游 SOCKS5 选了不支持的认证方式 0x{method:02x}"))
 
-            # 目标地址：域名走 ATYP=0x03 让上游解析（DNS 不泄漏）
-            sock.sendall(b"\x05\x01\x00" + _socks5_addr(host, port))
-            _ver, rep, _rsv, atyp = _recv_exact(sock, 4)
-            if rep != 0:
-                raise RelayError(_SOCKS5_REPLY.get(rep, f"上游返回未知应答码 {rep}"))
-            # BND.ADDR / BND.PORT 必须吃干净，否则它们会被当成隧道里的应用数据
-            if atyp == 0x01:
-                _recv_exact(sock, 4 + 2)
-            elif atyp == 0x04:
-                _recv_exact(sock, 16 + 2)
-            elif atyp == 0x03:
-                (n,) = _recv_exact(sock, 1)
-                _recv_exact(sock, n + 2)
-            else:
-                raise RelayError(f"上游 SOCKS5 应答里的地址类型不认识：0x{atyp:02x}")
-            return sock
-        except (RelayError, OSError):
+        # 目标地址：域名走 ATYP=0x03 让上游解析（DNS 不泄漏）
+        sock.sendall(b"\x05\x01\x00" + _socks5_addr(host, port))
+        _ver, rep, _rsv, atyp = _recv_exact(sock, 4)
+        if rep != 0:
+            raise RelayError(_tag(role, _SOCKS5_REPLY.get(rep, f"上游返回未知应答码 {rep}")))
+        # BND.ADDR / BND.PORT 必须吃干净，否则它们会被当成隧道里的应用数据
+        if atyp == 0x01:
+            _recv_exact(sock, 4 + 2)
+        elif atyp == 0x04:
+            _recv_exact(sock, 16 + 2)
+        elif atyp == 0x03:
+            (n,) = _recv_exact(sock, 1)
+            _recv_exact(sock, n + 2)
+        else:
+            raise RelayError(_tag(role, f"上游 SOCKS5 应答里的地址类型不认识：0x{atyp:02x}"))
+
+    def _handshake(
+        self,
+        sock: socket.socket,
+        spec: ProxySpec,
+        host: str,
+        port: int,
+        *,
+        role: str = "",
+    ) -> bytes:
+        """按 `spec` 的协议，在一条**已连上的** socket 上完成"到 host:port"的握手。"""
+        if _is_socks(spec.scheme):
+            if spec.scheme.lower().startswith("socks4"):
+                raise RelayError(
+                    _tag(role, "上游是 socks4，本地中继只实现了 socks5（请把代理改成 socks5://）")
+                )
+            self._socks5_handshake(sock, spec, host, port, role=role)
+            return b""
+        return self._http_connect(sock, spec, host, port, role=role)
+
+    def _open_tunnel(
+        self,
+        spec: ProxySpec,
+        host: str,
+        port: int,
+        *,
+        role: str = "",
+    ) -> tuple[socket.socket, bytes]:
+        """建立一条"按 spec 的协议到 host:port"的隧道，返回 (套接字, 抢跑的尾巴)。
+
+        这是链式代理的地基。把"连上代理"（`_connect_proxy`）与"在连接上握手"
+        （`_handshake`）拆开之后，链式就是三步、每步都是现成的：
+
+            sock = _open_tunnel(前置, 落地host, 落地port)   # 先穿过前置
+            _handshake(sock, 落地spec, 目标host, 目标port)   # 在隧道上再握一次
+
+        旧实现把这两件事焊死在 `_socks5_connect` 里（它自己 create_connection），
+        所以第二条连接根本没法复用 —— 这就是这次必须拆的原因。
+        """
+        sock = self._connect_proxy(spec, role=role)
+        try:
+            rest = self._handshake(sock, spec, host, port, role=role)
+        except BaseException:
             self._forget(sock)
             raise
+        return sock, rest
+
+    def _open_to_proxy(self) -> socket.socket:
+        """连到**落地代理本体**（有前置就先穿过前置）。
+
+        用途：明文 HTTP 走 HTTP 上游时，要在这条连接上直接发绝对 URI 请求，
+        而不是再套一层 CONNECT（RFC 9112 §3.2.2 的 absolute-form）。
+        """
+        hop = self._spec.hop
+        if hop is None:
+            return self._connect_proxy(self._spec)
+        sock, rest = self._open_tunnel(hop, self._spec.host, self._spec.port, role=_ROLE_HOP)
+        if rest:
+            sock = _Prefixed(sock, rest)
+        return sock
+
+    def _open_to_target(self, host: str, port: int) -> tuple[socket.socket, bytes]:
+        """建一条到**最终目标**的隧道；链式就先过前置，再让落地去连目标。
+
+        两跳时的字节流长这样（以 HTTP 前置 + SOCKS5 落地为例）：
+
+            本中继 --CONNECT 落地:20000--> 前置
+            本中继 --05 02 00 02 / 认证 / 05 01 00 03 len host port--> 落地   （走在前置隧道里）
+            之后的字节全部是"目标 ↔ 浏览器"的裸流
+        """
+        hop = self._spec.hop
+        if hop is None:
+            return self._open_tunnel(self._spec, host, port)
+        sock, rest = self._open_tunnel(hop, self._spec.host, self._spec.port, role=_ROLE_HOP)
+        if rest:
+            sock = _Prefixed(sock, rest)
+        try:
+            tail = self._handshake(sock, self._spec, host, port, role=_ROLE_EXIT)
+        except BaseException:
+            self._forget(sock)
+            raise
+        return sock, tail
+
+    def _tunnel_to(self, host: str, port: int) -> tuple[socket.socket, bytes]:
+        """老名字（`_handle` 在用），语义就是 `_open_to_target`。"""
+        return self._open_to_target(host, port)
+
 
     # ── 双向转发 ─────────────────────────────────────────
     def _tunnel(

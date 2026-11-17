@@ -80,11 +80,44 @@ def _dump_inventory(v: Any) -> str | None:
             "state": str(item.get("state") or "")[:32],
             "group": str(item.get("group") or "")[:64],
             "cdp_path": str(item.get("cdp_path") or "")[:200],
+            "proxy": _clean_proxy(item.get("proxy")),
         })
     try:
         return json.dumps(out, ensure_ascii=False)
     except (TypeError, ValueError):
         return None
+
+
+def _clean_proxy(raw: Any) -> dict[str, Any]:
+    """清洗设备上报的代理摘要。
+
+    **只接受脱敏字段**：客户端应该把密码换成 `***` 再上报（它本来就会这么做），
+    但这里也不能盲信 —— 万一某个版本把明文 password 塞进来，hub 不该把它写进库
+    （hub 的 SQLite 会被备份、会被别的机器同步读，代理密码不该躺在那里）。
+
+    所以显式按白名单重建：任何不在列表里的键都丢掉，`url` 里如果出现 `:***@`
+    以外的东西也一律截断成不带凭据的形式。
+    """
+    if not isinstance(raw, dict) or not raw.get("set"):
+        return {"set": False}
+    url = str(raw.get("url") or "")[:200]
+    # 双保险：url 里若带了看起来像密码的片段（非 ***），把它抹掉
+    if "@" in url:
+        head, _, tail = url.partition("@")
+        scheme, _, _auth = head.partition("://")
+        user = ""
+        if ":" in _auth:
+            user = _auth.split(":", 1)[0]
+        url = f"{scheme}://{user}:***@{tail}" if scheme else f"{user}:***@{tail}"
+    return {
+        "set": True,
+        "url": url,
+        "has_auth": bool(raw.get("has_auth")),
+        "username": str(raw.get("username") or "")[:80],
+        "host": str(raw.get("host") or "")[:120],
+        "port": _as_int(raw.get("port")) or 0,
+        "scheme": str(raw.get("scheme") or "")[:16],
+    }
 
 
 def _load_inventory(raw: Any) -> list[dict[str, Any]]:

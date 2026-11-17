@@ -354,18 +354,27 @@ class HeartbeatThread:
         return get_settings().gateway_public_base.rstrip("/")
 
     def _inventory(self) -> list[dict[str, Any]]:
-        """当前浏览器环境清单（给主控台展示用）。"""
-        from zw_core.services import manager as mgr
+        """当前浏览器环境清单（给主控台展示用）。
+
+        每个环境带上**脱敏的**代理摘要：主控台要能显示"这个环境走哪个代理"，
+        但代理密码不该离开这台机器（见 proxylib.display_summary 的说明）。
+        """
+        from zw_core.services import manager as mgr, proxylib
 
         items: list[dict[str, Any]] = []
         for p in mgr.list_profiles():
             pid = str(p.get("id") or "")
+            try:
+                spec = mgr.proxy_spec_for(p)
+            except Exception:
+                spec = None
             items.append({
                 "id": pid,
                 "name": str(p.get("name") or ""),
                 "state": str(p.get("state") or ""),
                 "group": str(p.get("group_name") or ""),
                 "cdp_path": f"/cdp/{pid}" if pid else "",
+                "proxy": proxylib.display_summary(spec),
             })
         return items
 

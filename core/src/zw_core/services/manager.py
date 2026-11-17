@@ -637,6 +637,21 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
 
     gateway.ROUTER.register(p["id"], port, p["name"])
     _update(p["id"], state="running", last_start_at=time.time(), last_active_at=time.time(), last_error="")
+
+    # 无头模式：命令行只能带一个网址，剩下的（恢复的标签页 + 检测页）
+    # 在这里用 CDP 补开。失败只记日志，不影响"已经启动成功"这个事实。
+    try:
+        headless = bool(row.get("headless")) or engines._needs_headless()
+        wanted = [u for u in (urls or []) if u]
+        if headless and len(wanted) > 1:
+            from . import cookies as ck
+
+            res = ck.open_tabs_sync(ws_url, wanted[1:])
+            if res.get("failed"):
+                logger.warning("补开标签页部分失败：%s", res["failed"][:2])
+            logger.info("无头模式补开 %d 个标签页", len(res.get("opened") or []))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("补开标签页失败（不影响使用）：%s", exc)
     get_db().audit("profile.start", p["id"], detail={"port": port, "pid": proc.pid})
     logger.info("环境已就绪 name=%s pid=%s ws=%s", p["name"], proc.pid, ws_url)
 

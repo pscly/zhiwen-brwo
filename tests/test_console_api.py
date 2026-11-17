@@ -215,3 +215,45 @@ def test_panel_secret_persists_across_restarts(tmp_path):
     b.data_dir = data
     b.resolve_paths()
     assert b.panel_secret == a.panel_secret, "重启后必须沿用同一个密钥"
+
+
+def test_inventory_carries_masked_proxy(hub):
+    """主控台的「代理」列要能看到每个环境走哪个代理 —— 但不能看到密码。
+
+    密码只留在客户端那台机器上：hub 的库会被备份、也会被别的机器同步读，
+    代理密码不该躺在那里。所以客户端上报前就把密码换成 ***，
+    hub 侧再按白名单重建一次（不盲信上报内容）。
+    """
+    login(hub)
+    dev = "zwd_proxycol111122223333"
+    hub.post("/v1/devices/enroll", json={"device_id": dev, "hostname": "px-pc"})
+    hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": dev}, json={
+        "inventory": [
+            {"id": "a", "name": "带代理", "state": "stopped",
+             "proxy": {"set": True, "url": "socks5://u:***@1.2.3.4:20000",
+                       "has_auth": True, "username": "u", "host": "1.2.3.4",
+                       "port": 20000, "scheme": "socks5"}},
+            {"id": "b", "name": "直连", "state": "running", "proxy": {"set": False}},
+        ]})
+    d = hub.get("/v1/console/overview", params={"probe": False}).json()["data"]
+    m = next(x for x in d["machines"] if x["device_id"] == dev)
+    by_name = {b["name"]: b for b in m["browsers"]}
+    assert by_name["带代理"]["proxy"]["set"] is True
+    assert by_name["带代理"]["proxy"]["host"] == "1.2.3.4"
+    assert by_name["带代理"]["proxy"]["port"] == 20000
+    assert by_name["带代理"]["proxy"]["has_auth"] is True
+    assert by_name["直连"]["proxy"]["set"] is False
+
+
+def test_hub_strips_password_from_inventory_proxy(hub):
+    """即使客户端把明文密码塞进 payload，hub 也不能把它存进库。"""
+    login(hub)
+    dev = "zwd_proxyleak11112222333"
+    hub.post("/v1/devices/enroll", json={"device_id": dev})
+    hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": dev}, json={
+        "inventory": [{"id": "x", "name": "泄漏测试", "state": "stopped",
+                       "proxy": {"set": True, "url": "socks5://user:REALPASSWORD@9.9.9.9:1080",
+                                 "has_auth": True, "host": "9.9.9.9", "port": 1080,
+                                 "scheme": "socks5", "password": "REALPASSWORD"}}]})
+    raw = hub.get("/v1/console/overview", params={"probe": False}).text
+    assert "REALPASSWORD" not in raw, "hub 把代理密码存下来/返回了"

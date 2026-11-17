@@ -17,6 +17,28 @@ Chromium 的 `--proxy-server` **不支持**用户名密码。命令行里写成
 
 同一个代理可能被很多环境共用，目录内容完全一样，没必要每个环境复制一份；
 而不同代理必须用不同目录（内容不同），所以用 `sha256(上游+凭据)` 的前 16 位做目录名。
+
+## 链式代理（前置 → 落地）
+
+有些落地代理**只能经某条前置**访问到源码/机房（机场的 SOCKS5 落地、只放行白名单
+IP 的住宅代理都是这样）：直连它永远是超时，而从前置过去就通。
+
+这类需求在代理串里用 `|` 写成两段，左边是前置、右边是落地：
+
+```
+http://127.0.0.1:21080 | socks5://user:pass@66.80.12.66:20000
+```
+
+`ProxySpec.hop` 存的就是"前置"那一跳（`None` = 单跳，行为与以前完全一致）。
+`upstream` / `key` / `chain_text` 三个属性的语义在链式下要注意：
+
+- `upstream` 仍然是**落地**地址（日志与展示说"这个环境走哪个出口"）
+- `key` **必须包含前置**，否则"同一个落地 + 不同前置"会是同一条链的两份配置，
+  而它们出口 IP 完全不同 —— 中继端口一旦复用就是串号（A 环境的流量从 B 的前置出去）
+- `chain_text` 是给人和日志看的 `前置|落地`，**不含凭据**
+
+只支持两跳。三跳以上不做：每多一跳就多一层握手与一层超时叠加，收益远小于排查成本，
+所以宁可明确报 `PROXY_CHAIN_TOO_LONG`，也不要默默支持出一个"偶尔能通"的怪东西。
 """
 
 from __future__ import annotations
@@ -25,14 +47,18 @@ import hashlib
 import json
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import httpx
 
 from ..config import get_settings
+
+#: 链分隔符。顺序有讲究：`|` 最明确，`>>` 次之，`,` 只是兜底
+#: （凭据里真的可能有逗号，所以逗号必须放在"单跳解析失败之后"才用，见 `parse_with_chain`）。
+CHAIN_SEPARATORS = ("|", ">>", ",")
 
 
 @dataclass(frozen=True)
@@ -42,20 +68,37 @@ class ProxySpec:
     port: int
     username: str = ""
     password: str = ""
+    #: 前置代理。`None` = 单跳（直连这个代理），行为与 0.7.x 完全一致。
+    hop: "ProxySpec | None" = None
 
     @property
     def upstream(self) -> str:
-        """给 `--proxy-server` 用的形式（不带凭据）。"""
+        """给 `--proxy-server` 用的形式（不带凭据）。链式下这是**落地**地址。"""
         return f"{self.scheme}://{self.host}:{self.port}"
 
     @property
     def needs_auth(self) -> bool:
+        """这一跳自己需不需要认证（不含前置）。
+
+        不看 `hop`：中继里"要不要补认证头"是逐跳判断的，
+        把前置的凭据算成落地需要认证会往落地多发一条凭据。
+        """
         return bool(self.username)
 
     @property
     def key(self) -> str:
+        """中继端口复用键。**必须含前置**：同落地不同前置是两条不同的链路。"""
         raw = f"{self.scheme}|{self.host}|{self.port}|{self.username}|{self.password}"
+        if self.hop is not None:
+            raw = f"hop[{self.hop.key}]|{raw}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    @property
+    def chain_text(self) -> str:
+        """给人看的 `前置|落地`（**不含凭据**，可以进日志/响应）。单跳时就是 upstream。"""
+        if self.hop is None:
+            return self.upstream
+        return f"{self.hop.upstream}|{self.upstream}"
 
     def safe_dict(self) -> dict[str, Any]:
         """脱敏版本，可以安全地进日志/响应。"""
@@ -66,7 +109,40 @@ class ProxySpec:
             "username": self.username,
             "has_password": bool(self.password),
             "upstream": self.upstream,
+            "is_chain": self.hop is not None,
+            "chain": self.chain_text,
         }
+
+
+def split_chain(text: str) -> list[str]:
+    """按链分隔符把一行切段（**只切，不校验**）。
+
+    优先级 `|` → `>>` → `,`，命中第一个就切。返回的段已经 strip 过。
+    长度 >2 的合法性由调用方判断（要报 `PROXY_CHAIN_TOO_LONG`）。
+    """
+    raw = (text or "").strip()
+    for sep in CHAIN_SEPARATORS:
+        if sep in raw:
+            return [p.strip() for p in raw.split(sep)]
+    return [raw]
+
+
+def mask_url(raw: str) -> str:
+    """把代理串里的密码换成 `***`（错误消息 / 日志 / 展示用）。
+
+    故意**不**走解析：这是给"解析失败"那一步用的兜底脱敏，
+    解析得失败才走到这里 —— 再调解析就成了循环。
+    """
+    def one(seg: str) -> str:
+        seg = (seg or "").strip()
+        if not seg or "@" not in seg:
+            return seg
+        head, _, tail = seg.rpartition("@")
+        if "://" in head:
+            return f"{head.split('://', 1)[0]}://***@{tail}"
+        return f"***@{tail}"
+
+    return "|".join(one(p) for p in split_chain(raw))
 
 
 class ProxyError(Exception):
@@ -79,11 +155,24 @@ class ProxyError(Exception):
 def parse_proxy(raw: str) -> ProxySpec | None:
     """解析用户填的代理串。空串返回 None。
 
-    接受：`http://h:p`、`socks5://u:p@h:p`、`h:p`、`u:p@h:p`
+    接受单跳：`http://h:p`、`socks5://u:p@h:p`、`h:p`、`u:p@h:p`
+    也接受两跳链：`前置 | 落地`（分隔符 `|`、`>>`、`,` 都行）。
+
+    为什么要在这里就认链式：`--proxy-server` 只能填一个代理，链式必须由本机中继
+    串起来（见 services/proxyrelay.py），而中继拿到的是 `ProxySpec` ——
+    所以"两段"这件事必须在解析这一层就被表达出来，否则后面所有调用方都看不见它。
     """
     text = (raw or "").strip()
     if not text:
         return None
+    return parse_with_chain(text, parse_single_proxy)
+
+
+def parse_single_proxy(raw: str) -> ProxySpec:
+    """单跳解析（**不做**链切分）。链式判定见 `parse_with_chain`。"""
+    text = (raw or "").strip()
+    if not text:
+        raise ProxyError("PROXY_INVALID", "空代理串")
     if "://" not in text:
         text = f"http://{text}"
     parts = urlsplit(text)
@@ -91,8 +180,13 @@ def parse_proxy(raw: str) -> ProxySpec | None:
     if scheme not in ("http", "https", "socks5", "socks4", "socks"):
         raise ProxyError("PROXY_SCHEME_UNSUPPORTED", f"不支持的代理协议：{scheme}（可用 http / https / socks5）")
     if not parts.hostname:
-        raise ProxyError("PROXY_INVALID", f"代理地址里没有主机名：{raw}")
-    port = parts.port
+        raise ProxyError("PROXY_INVALID", f"代理地址里没有主机名：{mask_url(raw)}")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        # urlsplit 在端口不是数字时抛 ValueError，不是 ProxyError；
+        # 不接住它就会变成一个莫名其妙的 500（用户看到的只是"导入失败"）。
+        raise ProxyError("PROXY_INVALID", f"代理串的端口不是数字：{mask_url(raw)}") from exc
     if not port:
         port = 1080 if scheme.startswith("socks") else 8080
     # urlsplit 不会解码百分号编码（"pa%40ss" 原样留着），但用户填的凭据
@@ -106,6 +200,48 @@ def parse_proxy(raw: str) -> ProxySpec | None:
         username=unquote(parts.username or ""),
         password=unquote(parts.password or ""),
     )
+
+
+def parse_with_chain(text: str, single: Callable[[str], ProxySpec]) -> ProxySpec:
+    """"先认显式链 → 再试单跳 → 最后兜底逗号链"的解析策略。
+
+    为什么是这个顺序（不是一上来就按分隔符切）：凭据是代理商随机生成的，
+    **密码里出现逗号完全可能**。`http://u:p,ss@h:8080` 按逗号切会变成
+    "http://u:p" + "ss@h:8080" 两段，两段都能解析成功 —— 于是悄悄变成一条
+    不存在的链，出口 IP 完全不对且没有任何报错。而 `|` 与 `>>`
+    不会出现在任何密码策略里，所以它们可以无条件当分隔符。
+    """
+    parts = split_chain(text)
+    if len(parts) > 2:
+        raise ProxyError(
+            "PROXY_CHAIN_TOO_LONG",
+            f"只支持两跳（前置 | 落地），这行有 {len(parts)} 段：{mask_url(text)}",
+        )
+    explicit = "|" in text or ">>" in text
+    if len(parts) == 2 and explicit:
+        return _chain_of(parts, single)
+    try:
+        return single(text)
+    except (ProxyError, ValueError):
+        if len(parts) != 2:
+            raise
+        # 单跳解析不了，而串里确实有两个可解析的段 → 那就是逗号写的链
+        return _chain_of(parts, single)
+
+
+def _chain_of(parts: list[str], single: Callable[[str], ProxySpec]) -> ProxySpec:
+    """把 `[前置, 落地]` 两段合成一个带 `hop` 的 spec。"""
+    hop_text, exit_text = parts[0], parts[1]
+    if not hop_text or not exit_text:
+        raise ProxyError(
+            "PROXY_INVALID",
+            f"链式代理两段都要填（前置 | 落地），现在只有一段：{mask_url('|'.join(parts))}",
+        )
+    hop = single(hop_text)
+    exit_spec = single(exit_text)
+    if exit_spec.hop is not None:
+        raise ProxyError("PROXY_CHAIN_TOO_LONG", "只支持两跳（前置 | 落地）")
+    return replace(exit_spec, hop=hop)
 
 
 # ── 认证扩展 ──────────────────────────────────────────────
@@ -200,7 +336,15 @@ _ECHO_ENDPOINTS = [
 
 
 def check_egress(spec: ProxySpec, timeout: float = 15.0) -> dict[str, Any]:
-    """通过这个代理访问一次出口 IP 接口，返回 {ok, exit_ip, latency_ms, country, error}。"""
+    """通过这个代理访问一次出口 IP 接口，返回 {ok, exit_ip, latency_ms, country, error}。
+
+    链式代理走另一条路：**本机中继**。理由很直接 —— 落地代理直连不通（这正是它
+    需要前置的原因），httpx 也不会替我们串两跳。而中继里已经有完整的
+    "穿过前置再对落地握手"的实现，复用它比在这里再写一遍第二套链式逻辑可靠得多。
+    """
+    if spec.hop is not None:
+        return _check_egress_via_relay(spec, timeout)
+
     proxy_url = spec.scheme
     if spec.scheme == "socks":
         proxy_url = "socks5"
@@ -217,13 +361,46 @@ def check_egress(spec: ProxySpec, timeout: float = 15.0) -> dict[str, Any]:
                 "country": "",
                 "error": "本机缺少 socks 支持（pip install 'httpx[socks]'），无法检测 socks 代理",
             }
-    url = f"{proxy_url}://{auth}{spec.host}:{spec.port}"
+    return _probe_egress(f"{proxy_url}://{auth}{spec.host}:{spec.port}", timeout)
 
+
+def _check_egress_via_relay(spec: ProxySpec, timeout: float) -> dict[str, Any]:
+    """临时起一个中继，把两跳串起来再去取出口 IP，探完立刻关。
+
+    为什么不放进 `RelayPool`：检测是低频动作（用户点一下"测试"），
+    没必要为此常驻一个监听端口；池里的端口要留给真正在跑的环境。
+    """
+    try:
+        from . import proxyrelay  # 延迟导入：proxyrelay 反过来依赖本模块的 ProxySpec
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "exit_ip": "", "latency_ms": 0, "country": "",
+                "error": f"链式代理需要本机中继，但中继模块加载失败：{exc}"}
+    server = proxyrelay.RelayServer(spec)
+    try:
+        port = server.start()
+    except OSError as exc:
+        return {"ok": False, "exit_ip": "", "latency_ms": 0, "country": "",
+                "error": f"链式检测无法启动本机中继（{type(exc).__name__}: {exc}）"}
+    try:
+        out = _probe_egress(f"http://127.0.0.1:{port}", timeout)
+        if not out["ok"]:
+            # 中继自己知道卡在哪一跳（前置还是落地），这个原因比 httpx 的
+            # "连接被重置"有用得多。中继已经把细节存在 stats().last_error 里。
+            detail = (server.stats().get("last_error") or "").strip()
+            if detail:
+                out["error"] = f"{out['error']}（中继：{detail}）" if out["error"] else detail
+        return out
+    finally:
+        server.stop()
+
+
+def _probe_egress(proxy_url: str, timeout: float) -> dict[str, Any]:
+    """真正去轮询出口接口。`proxy_url` 是标准 `scheme://[auth@]host:port` 形态。"""
     last_error = ""
     for endpoint in _ECHO_ENDPOINTS:
         started = time.perf_counter()
         try:
-            with httpx.Client(proxy=url, timeout=timeout, follow_redirects=True) as client:
+            with httpx.Client(proxy=proxy_url, timeout=timeout, follow_redirects=True) as client:
                 resp = client.get(endpoint, headers={"User-Agent": "curl/8.5.0"})
             latency = int((time.perf_counter() - started) * 1000)
             if resp.status_code >= 400:
@@ -249,3 +426,4 @@ def check_egress(spec: ProxySpec, timeout: float = 15.0) -> dict[str, Any]:
             last_error = f"{type(exc).__name__}: {exc}"
             continue
     return {"ok": False, "exit_ip": "", "latency_ms": 0, "country": "", "error": last_error or "所有出口检测源都失败了"}
+

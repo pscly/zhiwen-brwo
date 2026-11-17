@@ -865,6 +865,12 @@ function openDialog(opts){
     p.textContent = opts.text;
     body.appendChild(p);
   }
+  if (opts.html){
+    // 调用方负责转义（这里的内容全部由 esc() 产出，不含用户原文）
+    const w = document.createElement('div');
+    w.innerHTML = opts.html;
+    body.appendChild(w);
+  }
   let input = null;
   if (opts.input){
     input = document.createElement('input');
@@ -882,6 +888,9 @@ function openDialog(opts){
   }
   const okBtn = $('#dlg-ok');
   okBtn.textContent = opts.okText || '确定';
+  // 纯展示用的弹窗不需要「取消」，hideCancel 让底部只剩一个「关闭」
+  const cancelBtn = $('#dlg-cancel');
+  if (cancelBtn) cancelBtn.hidden = !!opts.hideCancel;
   okBtn.className = 'btn sm ' + (opts.danger ? 'danger' : 'primary');
   dlgHandler = opts.onOk || null;
   if (!d.open) d.showModal();
@@ -920,6 +929,7 @@ function askText(title, text, initial, onOk){
 /* ── 数据：overview / 兼容模式 ─────────────────────────────────────────── */
 function normBrowser(b){
   b = b || {};
+  const px = b.proxy && typeof b.proxy === 'object' ? b.proxy : null;
   return {
     id: String(b.id || ''),
     name: b.name || '',
@@ -927,6 +937,17 @@ function normBrowser(b){
     group: b.group || '',
     cdp_http: b.cdp_http || '',
     cdp_ws: b.cdp_ws || '',
+    // 代理摘要（已脱敏）。必须在这里列出来，否则会被这条白名单丢掉 ——
+    // 我第一版就漏了，表现是"表头有代理列但永远显示直连"。
+    proxy: px && px.set ? {
+      set: true,
+      url: String(px.url || ''),
+      has_auth: !!px.has_auth,
+      username: String(px.username || ''),
+      host: String(px.host || ''),
+      port: Number(px.port) || 0,
+      scheme: String(px.scheme || ''),
+    } : { set: false },
   };
 }
 function normMachine(m){
@@ -1405,6 +1426,7 @@ function renderBrowsers(){
         '<div class="cell-sub">' + esc(b.id) + '</div></td>' +
         '<td>' + stateBadge(b.state) + '</td>' +
         '<td>' + (b.group ? '<span class="badge">' + esc(b.group) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+        '<td>' + proxyCell(b.proxy) + '</td>' +
         '<td>' + httpCell + '</td>' +
         '<td>' + cdpCell(b.cdp_ws, 'CDP WS 地址') + '</td>' +
         '</tr>';
@@ -1414,11 +1436,48 @@ function renderBrowsers(){
       '用「机器 → 终端」在那台机器上操作，或让客户端升到 ≥0.5.0。</div>';
     return '<section class="br-sec glass">' + head +
       '<div class="table-wrap"><table class="tbl"><thead><tr>' +
-      '<th>环境名</th><th>状态</th><th>分组</th><th>CDP HTTP</th><th>CDP WS</th>' +
+      '<th>环境名</th><th>状态</th><th>分组</th><th>代理</th><th>CDP HTTP</th><th>CDP WS</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div class="br-scroll-hint">← 左右滑动看完整 CDP 地址</div>' + noBase +
       '</section>';
   }).join('');
+}
+
+/* ── 代理列 ───────────────────────────────────────────────────────────────
+   显示的是**脱敏摘要**（密码已被客户端换成 ***），点开看细节：
+   协议、主机、端口、用户名、有没有密码、以及"改代理要回客户端"的提示。
+   密码不离开那台机器——hub 本来也改不了本机启动参数。
+*/
+function proxyCell(px){
+  if (!px || !px.set) return '<span class="muted">直连</span>';
+  const badge = px.has_auth
+    ? '<span class="badge ok">' + esc(px.scheme) + '</span>'
+    : '<span class="badge">' + esc(px.scheme) + '</span>';
+  // esc() 已经转义 & < > " '，属性里用它是安全的（console.html 没有单独的 escAttr）
+  return '<button class="btn xs ghost proxy-cell" type="button" data-proxy="' + esc(JSON.stringify(px)) + '">' +
+    badge + ' <span class="mono">' + esc(px.host) + ':' + esc(px.port) + '</span></button>';
+}
+function proxyDialog(px){
+  const rows = [
+    ['协议', px.scheme || '—'],
+    ['主机', px.host || '—'],
+    ['端口', String(px.port || '—')],
+    ['用户名', px.username || '（无）'],
+    ['密码', px.has_auth ? '已设置（不显示原文）' : '（无）'],
+    ['完整地址', px.url || '—'],
+  ];
+  const body = '<dl class="kv">' + rows.map(([k, v]) =>
+    '<dt>' + esc(k) + '</dt><dd class="mono">' + esc(v) + '</dd>').join('') + '</dl>' +
+    '<div class="br-note" style="margin-top:12px">' +
+    '改代理要在客户端里操作（环境列表 → 代理）。这里只读：代理是浏览器**启动期**参数，' +
+    '服务器改不了。带认证的代理由客户端本机的中继代填凭据，所以密码不会离开那台机器。' +
+    '</div>';
+  openDialog({
+    title: '代理详情',
+    html: body,
+    okText: '关闭',
+    hideCancel: true,
+  });
 }
 
 /* ── 令牌视图 ───────────────────────────────────────────────────────────── */
@@ -2258,6 +2317,11 @@ $('#mach-list').addEventListener('click', async (ev) => {
 
 /* 浏览器视图里的「复制」按钮（事件委托：表格每次刷新都重建）*/
 $('#br-list').addEventListener('click', (ev) => {
+  const px = ev.target.closest('[data-proxy]');
+  if (px){
+    try { proxyDialog(JSON.parse(px.dataset.proxy)); } catch (_) {}
+    return;
+  }
   const btn = ev.target.closest('[data-copy]');
   if (!btn) return;
   ev.preventDefault();

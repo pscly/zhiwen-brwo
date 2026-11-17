@@ -681,14 +681,21 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         try:
             from zw_core.services import manager as mgr
 
+            from zw_core.services import proxylib as _plib
+
             for pr in mgr.list_profiles():
                 pid = str(pr.get("id") or "")
+                try:
+                    _spec = mgr.proxy_spec_for(pr)
+                except Exception:
+                    _spec = None
                 inv.append({
                     "id": pid,
                     "name": str(pr.get("name") or ""),
                     "state": str(pr.get("state") or ""),
                     "group": str(pr.get("group_name") or ""),
                     "cdp_path": f"/cdp/{pid}" if pid else "",
+                    "proxy": _plib.display_summary(_spec),
                 })
         except Exception:
             inv = []

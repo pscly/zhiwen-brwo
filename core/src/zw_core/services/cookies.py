@@ -567,6 +567,35 @@ def screenshot_sync(ws_url: str, fmt: str = "png", full_page: bool = False) -> b
     return run(screenshot(ws_url, fmt=fmt, full_page=full_page))
 
 
+async def open_tabs(ws_url: str, urls: list[str]) -> dict[str, Any]:
+    """在浏览器里逐个开标签（每个 URL 一个新标签）。
+
+    为什么需要：`--headless=new` **不接受命令行传多个网址**
+    （会直接退出，报 "Multiple targets are not supported in headless mode"）。
+    而"恢复上次标签 + 追加检测页"天然是多网址，所以无头模式下只能靠 CDP 补开。
+    """
+    opened: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    if not urls:
+        return {"opened": opened, "failed": failed}
+    conn = CDP(ws_url)
+    try:
+        await conn.connect()
+        for url in urls:
+            try:
+                res = await conn.call("Target.createTarget", {"url": url})
+                opened.append({"url": url, "target_id": res.get("targetId", "")})
+            except Exception as exc:  # noqa: BLE001  单个失败不影响其它
+                failed.append({"url": url, "error": f"{type(exc).__name__}: {exc}"})
+    finally:
+        await conn.close()
+    return {"opened": opened, "failed": failed}
+
+
+def open_tabs_sync(ws_url: str, urls: list[str]) -> dict[str, Any]:
+    return run(open_tabs(ws_url, urls))
+
+
 def navigate_sync(ws_url: str, url: str) -> dict[str, Any]:
     return run(navigate(ws_url, url))
 

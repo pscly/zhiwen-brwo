@@ -715,6 +715,8 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
                 # ws 地址要连上 /json/version 才知道 uuid，这里给的是
                 # "浏览器级 ws 的入口前缀"，前端提示用户点开 http 拿真实 ws。
                 "cdp_ws": (http_url.replace("http://", "ws://").replace("https://", "wss://") + "/devtools/browser/") if http_url else "",
+                # 代理摘要（已脱敏，见 devices._clean_proxy）。控制台的「代理」列用它。
+                "proxy": it.get("proxy") or {"set": False},
             })
         total_browsers += len(browsers)
         total_running += int(d.get("running") or 0)

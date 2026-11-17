@@ -380,18 +380,31 @@ def build_cmdline(
         args.append("--no-sandbox")
     if IS_WIN and profile.get("_extra_no_sandbox"):
         args.append("--no-sandbox")
-    args.extend(urls or ["about:blank"])
+    targets = [u for u in (urls or []) if u]
+    headless = bool(profile.get("headless")) or _needs_headless()
+    if headless and len(targets) > 1:
+        # 坑：`--headless=new` **不接受命令行传多个网址**，会直接退出
+        # （chrome_main.cc: "Multiple targets are not supported in headless mode"），
+        # 表现是浏览器启动后立刻退出、错误码 13。
+        # 而"恢复上次标签 + 追加检测页"天然是多网址，所以只传第一个，
+        # 其余的由 manager.start 在浏览器就绪之后用 CDP 补开（见 open_tabs_sync）。
+        args.append(targets[0])
+    else:
+        args.extend(targets or ["about:blank"])
     return args
 
 
 def _proxy_server_for(profile: dict[str, Any], proxy: str) -> str:
     """算出真正要写进 `--proxy-server` 的地址。
 
-    - **不带凭据**：直连上游。少一层转发就少一个故障点，没必要为了统一而绕。
+    - **不带凭据的单跳**：直连上游。少一层转发就少一个故障点，没必要为了统一而绕。
     - **带凭据 + `ZW_PROXY_RELAY` 开着**（默认）：指向 `127.0.0.1:<中继端口>`，
       由中继补 `Proxy-Authorization` / 做 SOCKS5 用户名密码握手。
       为什么不能用扩展：Chrome 149 已经完全忽略 `--load-extension`，
       带认证的代理会静默失效（网页一直转圈，没有任何报错能告诉你原因）。
+    - **链式（前置 → 落地）**：**一律**走本机中继，哪怕两跳都不需要认证。
+      原因是 `--proxy-server` 只能表达**一层**代理，链式它根本没有语法；
+      把落地地址直接交给 Chrome 的结果就是"永远连不上"（落地只能经前置访问）。
     - **中继起不来**：退回直连上游并记一条警告。宁可退化（至少能启动、能看到失败），
       也不要让整个启动直接失败。
 
@@ -400,41 +413,69 @@ def _proxy_server_for(profile: dict[str, Any], proxy: str) -> str:
     if not get_settings().proxy_relay:
         return _upstream_of(proxy)  # 老行为：扩展负责认证
     spec = _proxy_spec_of(profile, proxy)
-    if spec is None or not spec.needs_auth:
+    if spec is None:
+        return _upstream_of(proxy)
+    if spec.hop is None and not spec.needs_auth:
         return _upstream_of(proxy)
     try:
         from . import proxyrelay
 
         port = proxyrelay.pool().ensure(spec)
     except Exception as exc:  # noqa: BLE001 —— 中继失败不该拦住浏览器启动
-        logger.warning("本地代理中继启动失败，退回直连上游（带认证的上游会连不上）：%s", exc)
+        logger.warning("本地代理中继启动失败，退回直连上游（带认证/链式上游会连不上）：%s", exc)
         return _upstream_of(proxy)
     return f"http://127.0.0.1:{port}"
 
 
 def _proxy_spec_of(profile: dict[str, Any], proxy: str) -> Any:
-    """拿到带凭据的 ProxySpec。
+    """拿到带凭据的 ProxySpec（链式时带 `hop`）。
 
     优先用 manager 在 `_prepare_launch` 里塞进来的 `_proxy_spec` ——
     经过 `_prepare_launch` 之后 `profile["proxy"]` 已经被脱敏成 `scheme://host:port`，
     凭据只剩在这个 spec 里。测试里直接传带凭据的字符串也能解析出来。
+
+    **链式要补一次前置**：`manager.proxy_spec_for()` 是从 proxies 表的五列
+    （scheme/host/port/username/password）重建代理的，那五列里没有 hop，
+    所以从这里拿到的 spec 会把"库里的链式"降级成"直连落地"。补法见
+    `proxylib.attach_hop`：按 proxy_id 回库读一次前置。
     """
     spec = profile.get("_proxy_spec")
-    if spec is not None:
-        return spec
-    from .proxy import parse_proxy
+    if spec is None:
+        from .proxy import parse_proxy
 
-    try:
-        return parse_proxy(proxy)
-    except Exception:  # noqa: BLE001 —— 解析不了就当"不需要认证"，走直连
+        try:
+            spec = parse_proxy(proxy)
+        except Exception:  # noqa: BLE001 —— 解析不了就当"不需要认证"，走直连
+            return None
+    if spec is None:
         return None
+    if spec.hop is None and profile.get("proxy_id"):
+        try:
+            from . import proxylib
+
+            spec = proxylib.attach_hop(int(profile["proxy_id"]), spec)
+        except Exception:  # noqa: BLE001 —— 读库失败就退回单跳，至少能启动
+            logger.debug("补代理前置失败（按单跳处理）", exc_info=True)
+    return spec
 
 
 def _upstream_of(proxy: str) -> str:
-    """把 `http://user:pass@h:p` 去掉凭据，只留 Chromium 认的 `http://h:p`。"""
+    """把 `http://user:pass@h:p` 去掉凭据，只留 Chromium 认的 `http://h:p`。
+
+    链式串（`前置 | 落地`）在这里取**最后一段**：这条函数是"退化路径"，
+    而 Chromium 最多只能拿到一层，所以退化成直连落地 —— 通不通是另一回事，
+    但至少不能把一个带 `|` 的怪串塞进命令行（Chrome 会把它当主机名）。
+    """
     from urllib.parse import urlsplit, urlunsplit
 
+    from .proxy import split_chain
+
     raw = proxy if "://" in proxy else f"http://{proxy}"
+    parts_list = split_chain(raw)
+    if len(parts_list) > 1:
+        raw = parts_list[-1]
+        if "://" not in raw:
+            raw = f"http://{raw}"
     parts = urlsplit(raw)
     host = parts.hostname or ""
     if parts.port:

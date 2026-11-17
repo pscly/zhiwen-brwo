@@ -11,8 +11,8 @@
 
 1. **密码只进库，绝不进返回值/日志。** 返回值里只有 `has_password`；
    连"解析失败的行"回显都要先脱敏（用户粘贴的那一行里就有密码）。
-2. **导入按行切，绝不按逗号/空格/分号切。** 代理串里的凭据可能含这些字符，
-   自动切分只会把一条好代理拆成两条坏代理。
+2. **导入按行切；逗号只在写链时当兜底分隔符。** 凭据里可能含逗号，
+   所以"单跳能解析成功就绝不切"（先认 `|`/`>>`，再试单跳，最后才试逗号）。
 3. **换代理不允许静默热改。** Chromium 的 `--proxy-server` 是启动期参数，
    运行中改库只会让"界面显示 A、实际走 B"，所以运行中的环境一律返回
    `restart_required=true`，由调用方决定什么时候重启。
@@ -36,6 +36,7 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any, Iterable
 from urllib.parse import quote
 
@@ -104,7 +105,9 @@ def _spec_from_url(raw: str) -> proxysvc.ProxySpec:
     代理串里往往就有密码，所以这里把原文换成脱敏版本再往外抛。
     """
     try:
-        spec = proxysvc.parse_proxy(raw)
+        # 这里必须走**单跳**解析：`_spec_from_url` 被 `_parse_core_single` 与 `_build` 用，
+        # 链的切分已经在 `_parse_core` 那一层做完了，再走一遍链式解析会把 `hop` 丢掉。
+        spec = proxysvc.parse_single_proxy(raw)
     except proxysvc.ProxyError as exc:
         message = exc.message.replace(raw, _redact(raw)) if raw else exc.message
         raise proxysvc.ProxyError(exc.code, message) from exc
@@ -129,6 +132,19 @@ def _build(scheme: str, host: str, port: Any, user: str, password: str) -> proxy
 
 def _parse_core(text: str) -> proxysvc.ProxySpec:
     """把一句话解析成 ProxySpec（不含备注）。失败抛 `proxy.ProxyError`。
+
+    支持两跳链：`前置 | 落地`（也认 `>>` 与 `,`）。
+    链式判定与单跳解析的先后顺序由 `proxy.parse_with_chain` 统一管 ——
+    两边必须用同一套策略，否则"库里能导入、启动时解析不了"这种不一致会很难查。
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise proxysvc.ProxyError("PROXY_INVALID", "空代理串")
+    return proxysvc.parse_with_chain(raw, _parse_core_single)
+
+
+def _parse_core_single(text: str) -> proxysvc.ProxySpec:
+    """单跳解析（同时也认代理商那几种 `host:port:user:pass` 简写）。
 
     判定顺序是按"哪个位置最不可能看错"排的：
 
@@ -214,6 +230,11 @@ def _redact(text: str) -> str:
     宁可少给点信息，也不能把凭据回显出去。
     """
     s = (text or "").strip()
+    # 链式行逐段脱敏：整行一起处理会把"前置"那一段连带吃掉，
+    # 用户就看不到到底哪一段写错了（导入失败的提示要能定位）。
+    segs = proxysvc.split_chain(s)
+    if len(segs) > 1:
+        return " | ".join(_redact(seg) for seg in segs)
     if "@" in s:
         head, _, tail = s.rpartition("@")
         if "://" in s:
@@ -228,8 +249,81 @@ def _redact(text: str) -> str:
     return s
 
 
+# ══ 前置（链式代理的左半边）怎么落库 ═══════════════════════
+def _ensure_hop_column() -> None:
+    """给 `proxies` 表补一列 `hop`，存"前置"那一跳（空串 = 单跳）。
+
+    ## 为什么是懒迁移，而不是改建表语句
+
+    这次改动的边界是代理相关的服务文件；动 `db.py` 的建表语句会牵到 schema 版本号
+    与所有存量库，收益远小于风险。SQLite 的 `ADD COLUMN` 本身是幂等的（列已存在就
+    报错），这里把异常吃掉即可：老库自动升级，新库同样。
+
+    ## 为什么每次都先查一遍 PRAGMA，而不是留一个模块级"已迁移"标志
+
+    标志看着更省，但它**不成立**：`db.reset_db()` 会换成一个全新的库
+    （测试每个用例一个库、运维重建库、换 ZW_ROOT 都会发生），而模块级标志还留着
+    True，于是新库永远等不到这条 DDL —— 症状是"第一次能导入，之后报
+    no column named hop"。`PRAGMA table_info` 只读一次 schema，代价可忽略，
+    换来的是"永远和当前这个库对齐"。
+
+    ## 为什么必须落库
+
+    前置**带着自己的凭据**，不能让用户"再填一次"。而且导入时就得能按
+    "前置 + 落地"去重 —— 同一个落地配不同前置是两条完全不同的链路（出口 IP 不同），
+    当成一条会直接串号。
+    """
+    with get_db().conn() as c:
+        cols = {row[1] for row in c.execute("PRAGMA table_info(proxies)")}
+        if not cols:  # 表还没建出来，等真正建表的路径来加
+            return
+        if "hop" in cols:
+            return
+        try:
+            c.execute("ALTER TABLE proxies ADD COLUMN hop TEXT NOT NULL DEFAULT ''")
+        except Exception:  # noqa: BLE001 —— 并发下另一个人刚好加好了，不影响后续读写
+            pass
+
+
+def _hop_to_text(spec: proxysvc.ProxySpec) -> str:
+    """把"前置"这一跳序列化成一行 URL（**含凭据**，与 password 列同等对待）。
+
+    凭据必须 quote：密码里的 `@`、`:`、`/` 直接拼进去会被 urlsplit 读成别的结构
+    （`pa@ss` 会变成"另一台主机上的另一个用户"）。
+    """
+    hop = spec.hop
+    if hop is None:
+        return ""
+    auth = ""
+    if hop.username:
+        auth = f"{quote(hop.username, safe='')}:{quote(hop.password, safe='')}@"
+    return f"{hop.scheme}://{auth}{hop.host}:{hop.port}"
+
+
+def _hop_of_row(row: Any) -> proxysvc.ProxySpec | None:
+    """从库行里读回"前置"。没有 hop 列 / 列为空 / 解析不了 → None（= 单跳）。"""
+    try:
+        text = row["hop"]
+    except (IndexError, KeyError, TypeError):
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return _normalize(proxysvc.parse_single_proxy(text))
+    except proxysvc.ProxyError:
+        return None
+
+
+def _hop_key(spec: proxysvc.ProxySpec | None) -> tuple[str, str, int, str, str]:
+    """去重键里的"前置"部分。无前置用全空元组（与历史数据天然兼容）。"""
+    if spec is None:
+        return ("", "", 0, "", "")
+    return (spec.scheme, spec.host, spec.port, spec.username, spec.password)
+
+
 def _spec_of_row(row: Any) -> proxysvc.ProxySpec:
-    """库里的行 → ProxySpec。
+    """库里的行 → ProxySpec（含 `hop`）。
 
     凭据必须重新 quote：库里存的是**原文**（`pa/ss@x` 这种很常见），
     而 `urlsplit` 会把 `/` 当路径分隔、把 `#` 当 fragment、把 `@` 当 userinfo
@@ -240,7 +334,9 @@ def _spec_of_row(row: Any) -> proxysvc.ProxySpec:
         auth = f"{quote(user, safe='')}:{quote(row['password'] or '', safe='')}@"
     else:
         auth = ""
-    return _normalize(proxysvc.parse_proxy(f"{row['scheme']}://{auth}{row['host']}:{row['port']}"))
+    base = _normalize(proxysvc.parse_single_proxy(f"{row['scheme']}://{auth}{row['host']}:{row['port']}"))
+    hop = _hop_of_row(row)
+    return base if hop is None else replace(base, hop=hop)
 
 
 def _row_to_public(row: Any) -> dict[str, Any]:
@@ -255,6 +351,9 @@ def _row_to_public(row: Any) -> dict[str, Any]:
         "username": spec.username,
         "has_password": bool(spec.password),
         "upstream": spec.upstream,
+        # 链式：`is_chain` 给界面决定要不要画"前置 → 落地"，`chain` 是不含凭据的展示串
+        "is_chain": spec.hop is not None,
+        "chain": spec.chain_text,
         "country": row["country"] or "",
         "last_ok": row["last_ok"],
         "last_check": row["last_check"],
@@ -269,13 +368,30 @@ def _load(proxy_id: int | None) -> Any:
         pid = int(proxy_id)
     except (TypeError, ValueError):
         return None
+    _ensure_hop_column()  # SELECT * 想拿到 hop 列，先保证它存在
     with get_db().conn() as c:
         return c.execute("SELECT * FROM proxies WHERE id=?", (pid,)).fetchone()
 
 
-def _spec_key(spec: proxysvc.ProxySpec) -> tuple[str, str, int, str, str]:
-    """去重键：同 scheme+host+port+user+password 视为同一个代理。"""
-    return (spec.scheme, spec.host, spec.port, spec.username, spec.password)
+def _spec_key(spec: proxysvc.ProxySpec) -> tuple:
+    """去重键：同 scheme+host+port+user+password **且同前置** 才算同一个代理。
+
+    前置必须进键：同一个落地配两条不同前置是两条**出口不同**的链路，
+    合并成一条就等于把 A 环境的流量从 B 的前置发出去（串号，且没有任何报错）。
+    """
+    return (_hop_key(spec.hop), spec.scheme, spec.host, spec.port, spec.username, spec.password)
+
+
+def _row_key(row: Any) -> tuple:
+    """库行 → 去重键。与 `_spec_key` 必须同构，否则"库里有、又被判成新的"会无限重复导入。"""
+    return (
+        _hop_key(_hop_of_row(row)),
+        row["scheme"],
+        row["host"],
+        int(row["port"]),
+        row["username"],
+        row["password"],
+    )
 
 
 # ══ 标签 ══════════════════════════════════════════════════
@@ -321,6 +437,9 @@ def import_batch(text: str, label_prefix: str = "") -> dict:
 
     单行失败只进 `failed`，绝不整批回滚 —— 用户粘 50 条有 3 条格式不对，
     剩下 47 条必须能用。
+
+    去重按 `_spec_key`（**含前置**）：同一行重复粘贴只入库一次，但
+    "同一个落地 + 不同前置"必须各占一条（出口 IP 不同的两条链路）。
     """
     # 粘贴来的文本常常带 BOM 或 CRLF：`splitlines()` 处理换行，
     # BOM 得自己剥，否则第一行会变成 "\ufeff1.2.3.4:1080" 而解析失败。
@@ -331,11 +450,9 @@ def import_batch(text: str, label_prefix: str = "") -> dict:
     skipped = 0
     ignored = 0
 
+    _ensure_hop_column()
     with get_db().conn() as c:
-        existing = {
-            (r["scheme"], r["host"], int(r["port"]), r["username"], r["password"])
-            for r in c.execute("SELECT scheme,host,port,username,password FROM proxies")
-        }
+        existing = {_row_key(r) for r in c.execute("SELECT * FROM proxies")}
         used = {r["label"] for r in c.execute("SELECT label FROM proxies")}
 
         for line in lines:
@@ -359,16 +476,17 @@ def import_batch(text: str, label_prefix: str = "") -> dict:
                 continue
             label = _unique_label(note, used) if note else _numbered_label(label_prefix, used)
             cur = c.execute(
-                "INSERT INTO proxies(label,scheme,host,port,username,password,country,last_ok,last_check,last_exit_ip) "
-                "VALUES(?,?,?,?,?,?,'',NULL,NULL,'')",
-                (label, spec.scheme, spec.host, spec.port, spec.username, spec.password),
+                "INSERT INTO proxies(label,scheme,host,port,username,password,hop,country,last_ok,last_check,last_exit_ip) "
+                "VALUES(?,?,?,?,?,?,?,'',NULL,NULL,'')",
+                (label, spec.scheme, spec.host, spec.port, spec.username, spec.password,
+                 _hop_to_text(spec)),
             )
             existing.add(key)
             ids.append(int(cur.lastrowid or 0))
             labels.append(label)
             # 只记上游地址与标签；密码永不进日志。逐条走 DEBUG，
             # INFO 只留一条汇总（用户一次可能粘几百行，别把日志刷爆）。
-            logger.debug("代理导入 label=%s upstream=%s", label, spec.upstream)
+            logger.debug("代理导入 label=%s upstream=%s", label, spec.chain_text)
 
     if ids or failed:
         logger.info(
@@ -409,6 +527,7 @@ def _bound_profiles(proxy_id: int | None = None) -> list[dict[str, Any]]:
 
 def list_all() -> list[dict[str, Any]]:
     """列出代理库（脱敏），附带"被哪些环境在用"。"""
+    _ensure_hop_column()
     with get_db().conn() as c:
         rows = c.execute("SELECT * FROM proxies ORDER BY id").fetchall()
 
@@ -450,6 +569,8 @@ def describe_profile_proxy(profile: dict[str, Any]) -> dict[str, Any]:
                 "username": spec.username,
                 "has_password": bool(spec.password),
                 "upstream": spec.upstream,
+                "is_chain": spec.hop is not None,
+                "chain": spec.chain_text,
                 "last_ok": row["last_ok"],
                 "last_check": row["last_check"],
                 "last_exit_ip": row["last_exit_ip"] or "",
@@ -466,6 +587,8 @@ def describe_profile_proxy(profile: dict[str, Any]) -> dict[str, Any]:
             "username": "",
             "has_password": False,
             "upstream": "",
+            "is_chain": False,
+            "chain": "",
             "last_ok": None,
             "last_check": None,
             "last_exit_ip": "",
@@ -476,6 +599,7 @@ def describe_profile_proxy(profile: dict[str, Any]) -> dict[str, Any]:
         return {
             "source": "none", "proxy_id": None, "label": "", "scheme": "", "host": "",
             "port": 0, "username": "", "has_password": False, "upstream": "",
+            "is_chain": False, "chain": "",
             "last_ok": None, "last_check": None, "last_exit_ip": "", "missing": False,
         }
     spec = proxysvc.parse_proxy(raw)
@@ -489,6 +613,8 @@ def describe_profile_proxy(profile: dict[str, Any]) -> dict[str, Any]:
         "username": spec.username if spec else "",
         "has_password": bool(spec.password) if spec else False,
         "upstream": spec.upstream if spec else "",
+        "is_chain": bool(spec and spec.hop is not None),
+        "chain": spec.chain_text if spec else "",
         "last_ok": None,
         "last_check": None,
         "last_exit_ip": "",
@@ -702,16 +828,18 @@ def delete(proxy_id: int) -> dict[str, Any]:
 def _upsert(spec: proxysvc.ProxySpec, *, note: str = "", label_prefix: str = "") -> tuple[Any, bool]:
     """把 spec 写进库（已存在就复用）。返回 (行, 是否新建)。"""
     key = _spec_key(spec)
+    _ensure_hop_column()
     with get_db().conn() as c:
         for r in c.execute("SELECT * FROM proxies ORDER BY id"):
-            if (r["scheme"], r["host"], int(r["port"]), r["username"], r["password"]) == key:
+            if _row_key(r) == key:
                 return r, False
         used = {r["label"] for r in c.execute("SELECT label FROM proxies")}
         label = _unique_label(note, used) if note else _numbered_label(label_prefix, used)
         cur = c.execute(
-            "INSERT INTO proxies(label,scheme,host,port,username,password,country,last_ok,last_check,last_exit_ip) "
-            "VALUES(?,?,?,?,?,?,'',NULL,NULL,'')",
-            (label, spec.scheme, spec.host, spec.port, spec.username, spec.password),
+            "INSERT INTO proxies(label,scheme,host,port,username,password,hop,country,last_ok,last_check,last_exit_ip) "
+            "VALUES(?,?,?,?,?,?,?,'',NULL,NULL,'')",
+            (label, spec.scheme, spec.host, spec.port, spec.username, spec.password,
+             _hop_to_text(spec)),
         )
         row = c.execute("SELECT * FROM proxies WHERE id=?", (int(cur.lastrowid),)).fetchone()
     return row, True
@@ -876,6 +1004,10 @@ def update_proxy(
         if spec is None:
             return {"ok": False, "code": "PROXY_INVALID", "error": "没有可用的代理串", "id": int(row["id"])}
         changed.extend(["scheme", "host", "port", "username", "password"])
+        # 只有前置**真的变了**才把 hop 记进 changed：单跳改单跳时 changed 的内容
+        # 必须和以前一模一样（接口与界面都按这个集合判断"要不要重启/作废检测"）。
+        if _hop_key(current.hop) != _hop_key(spec.hop):
+            changed.append("hop")
         if raw_note and not note:
             note = raw_note
     else:
@@ -927,13 +1059,20 @@ def update_proxy(
             "restart_hint": "",
         }
 
-    spec_changed = any(f in changed for f in ("scheme", "host", "port", "username", "password"))
+    spec_changed = any(
+        f in changed for f in ("scheme", "host", "port", "username", "password", "hop")
+    )
+    # 只改字段（不给 raw）时 hop 原样保留：`_normalize` 造出来的 spec 没有 hop，
+    # 直接写回去会把"链式"悄悄降级成"直连落地" —— 那种错完全不报，只是永远连不上。
+    next_hop_text = _hop_to_text(spec) if ("hop" in changed or (raw or "").strip()) else (
+        (row["hop"] or "") if "hop" in row.keys() else ""
+    )
     with get_db().conn() as c:
         c.execute(
-            "UPDATE proxies SET label=?, scheme=?, host=?, port=?, username=?, password=?, "
+            "UPDATE proxies SET label=?, scheme=?, host=?, port=?, username=?, password=?, hop=?, "
             "country=COALESCE(NULLIF(?,''), country) WHERE id=?",
             (next_label, spec.scheme, spec.host, spec.port, spec.username, spec.password,
-             note, int(row["id"])),
+             next_hop_text, note, int(row["id"])),
         )
     if spec_changed:
         _reset_check_state(int(row["id"]))
@@ -944,7 +1083,7 @@ def update_proxy(
     running = [p for p in affected if (p.get("state") or "") in ("running", "starting")]
     get_db().audit("proxy.update", detail={"id": int(row["id"]), "fields": sorted(changed)})
     logger.info("代理条目已改 id=%s label=%s upstream=%s 字段=%s",
-                int(row["id"]), next_label, spec.upstream, ",".join(sorted(changed)))
+                int(row["id"]), next_label, spec.chain_text, ",".join(sorted(changed)))
     return {
         "ok": True,
         "id": int(row["id"]),
@@ -994,3 +1133,75 @@ def set_default(proxy_id: int | None) -> dict[str, Any]:
         get_db().set_setting(c, DEFAULT_PROXY_SETTING, str(int(row["id"])))
     get_db().audit("proxy.set_default", detail={"proxy_id": int(row["id"]), "label": row["label"]})
     return {"ok": True, "proxy_id": int(row["id"]), "label": row["label"]}
+
+
+def _mask_spec_url(spec: proxysvc.ProxySpec) -> str:
+    """单跳的展示串：密码换成 `***`（用户名保留，用来区分"是谁的代理"）。"""
+    auth = f"{spec.username}:***@" if spec.username else ""
+    return f"{spec.scheme}://{auth}{spec.host}:{spec.port}"
+
+
+def _chain_display(spec: proxysvc.ProxySpec) -> str:
+    """`前置 → 落地`（两边密码都脱敏）。单跳时就是落地本身。"""
+    if spec.hop is None:
+        return _mask_spec_url(spec)
+    return f"{_mask_spec_url(spec.hop)} → {_mask_spec_url(spec)}"
+
+
+def display_summary(spec: "proxysvc.ProxySpec | None", *, label: str = "") -> dict[str, Any]:
+    """给主控台展示用的代理摘要。
+
+    ## 为什么不直接给原始串
+
+    主控台跑在**服务器**上（hub），而这个摘要会随心跳一起发过去。
+    把代理密码明文发到别处、还存进 hub 的 SQLite，是没必要的暴露 ——
+    要改代理本来就得在客户端上改（hub 改不了本机启动参数）。
+
+    所以这里只给：
+      - `url`：把密码换成 `***` 的完整地址（足以确认"是不是这个代理"；链式时是**落地**）
+      - `chain`：`前置 → 落地`（**两边**密码都是 `***`），单跳时等于 `url`
+      - `is_chain`：界面要不要把 `chain` 画成两段
+      - `has_auth` / `username` / `host` / `port` / `scheme`
+      - `local`：是否走了本机中继（Chromium 的 --proxy-server 实际指向哪）
+
+    链式时 `username`/`host`/`port` 讲的都是**落地**那一跳：那才是"出口是谁"。
+    前置的地址只在 `chain` 里出现 —— 单独给一份前置字段会诱导界面把它当出口显示。
+    """
+    if spec is None:
+        return {"set": False, "url": "", "chain": "", "is_chain": False, "has_auth": False,
+                "username": "", "host": "", "port": 0, "scheme": "", "label": label, "local": ""}
+    return {
+        "set": True,
+        "url": _mask_spec_url(spec),
+        "chain": _chain_display(spec),
+        "is_chain": spec.hop is not None,
+        "has_auth": bool(spec.username) or bool(spec.hop and spec.hop.username),
+        "username": spec.username,
+        "host": spec.host,
+        "port": spec.port,
+        "scheme": spec.scheme,
+        "label": label,
+        "local": "",
+    }
+
+
+def attach_hop(proxy_id: int, spec: proxysvc.ProxySpec) -> proxysvc.ProxySpec:
+    """把库里存的"前置"补回一个 spec，返回新的 spec（**给启动路径用**）。
+
+    ## 为什么需要在启动时补一次
+
+    `manager.proxy_spec_for()` 是从 `proxies` 表的
+    scheme/host/port/username/password **五列**重建代理的，那五列里没有前置。
+    于是"库里存的是链式、启动时拿到的却是单跳" —— 本机中继会去直连落地，
+    永远连不上（而落地本来就必须经前置才通）。
+
+    `services/engines.py` 的 `_proxy_spec_of()` 在拿到 spec 后调用本函数补一次，
+    这样"库里是什么，启动就是什么"这条一致性就闭合了，而且不必改 manager。
+    """
+    if spec is None or spec.hop is not None:
+        return spec
+    row = _load(proxy_id)
+    if row is None:
+        return spec
+    hop = _hop_of_row(row)
+    return spec if hop is None else replace(spec, hop=hop)
