@@ -102,6 +102,25 @@ const SECRETS = {
   hint: '这些是服务器 .env 里的值，只在本机/局域网可用，别透到公网',
 };
 
+// 代理库（服务器与用户机共享的那份）。三条覆盖三种展示形态：
+// 普通单跳 / 链式（前置 → 落地）/ 已隐藏
+const PROXIES = [
+  { id: 1, scheme: 'socks5', host: '66.80.12.66', port: 20000, username: 'cf1b081103',
+    has_password: true, hop: '', label: '落地A', note: '', hidden: false,
+    origin: 'zwd_hubtest01', upstream: 'socks5://66.80.12.66:20000',
+    is_chain: false, chain: 'socks5://cf1b081103:***@66.80.12.66:20000',
+    created_at: 1794836000, updated_at: 1794836000 },
+  { id: 2, scheme: 'http', host: '1.2.3.4', port: 8080, username: '',
+    has_password: false, hop: 'http://127.0.0.1:21080', label: '链式B', note: '',
+    hidden: false, origin: 'panel', upstream: 'http://1.2.3.4:8080',
+    is_chain: true, chain: 'http://127.0.0.1:21080 → http://1.2.3.4:8080',
+    created_at: 1794836001, updated_at: 1794836001 },
+  { id: 3, scheme: 'http', host: '9.9.9.9', port: 3128, username: 'svr',
+    has_password: true, hop: '', label: '藏起来的', note: '', hidden: true,
+    origin: 'panel', upstream: 'http://9.9.9.9:3128', is_chain: false,
+    chain: 'http://svr:***@9.9.9.9:3128', created_at: 1794836002, updated_at: 1794836002 },
+];
+
 const LEGACY_DEVICES = (OVERVIEW.machines || []).map(m => ({
   device_id: m.device_id, label: m.label, hostname: m.hostname,
   platform: m.platform, arch: m.arch, app_version: m.app_version,
@@ -173,6 +192,40 @@ function setupRoutes(page, opts){
       if (m.overviewMode === 'missing') return bad(route, 404, 'NOT_FOUND', 'Not Found');
       return json(route, { ok: true, data: OVERVIEW });
     }
+    // ── 代理库（新增的「代理」视图）──
+    if (p === '/v1/proxies' && method === 'GET'){
+      if (!m.loggedIn) return bad(route, 401, 'UNAUTHENTICATED', '需要管理面板会话');
+      const showHidden = url.searchParams.get('include_hidden') === 'true';
+      const items = PROXIES.filter(x => showHidden || !x.hidden);
+      return json(route, { ok: true, data: { proxies: items, total: items.length } });
+    }
+    if (p === '/v1/proxies' && method === 'POST'){
+      let body = {};
+      try { body = JSON.parse(req.postData() || '{}'); } catch (_) {}
+      if (!body.host) return bad(route, 400, 'PROXY_INVALID', '主机不能为空');
+      m.added = m.added || [];
+      m.added.push(body);
+      return json(route, { ok: true, data: {
+        id: 99, scheme: body.scheme || 'http', host: body.host,
+        port: Number(body.port) || 0, username: body.username || '',
+        has_password: !!body.password, hop: body.hop || '', label: body.label || '',
+        hidden: false, origin: 'panel',
+        upstream: (body.scheme || 'http') + '://' + body.host + ':' + body.port,
+      } });
+    }
+    if (/^\/v1\/proxies\/\d+\/hide$/.test(p) && method === 'POST'){
+      let body = {};
+      try { body = JSON.parse(req.postData() || '{}'); } catch (_) {}
+      m.hidden = m.hidden || [];
+      m.hidden.push({ id: Number(p.split('/')[3]), hidden: !!body.hidden });
+      return json(route, { ok: true, data: { id: Number(p.split('/')[3]), hidden: !!body.hidden } });
+    }
+    if (/^\/v1\/proxies\/\d+$/.test(p) && method === 'DELETE'){
+      m.pxDeleted = m.pxDeleted || [];
+      m.pxDeleted.push(Number(p.split('/')[3]));
+      return json(route, { ok: true, data: { deleted: true, id: Number(p.split('/')[3]) } });
+    }
+
     if (p === '/v1/console/secrets'){
       if (!m.loggedIn) return bad(route, 401, 'UNAUTHENTICATED', '需要管理面板会话');
       if (m.secretsMode === 'missing') return bad(route, 404, 'NOT_FOUND', 'Not Found');
@@ -248,14 +301,19 @@ function setupRoutes(page, opts){
   // 本脚本故意制造 401（错误密码）与 404（接口未就绪），这些是由 mock 触发的
   // 网络层记录，不是页面 JS 报错；单独计数，不算失败。
   const netNoise = [];
-  const IGNORE = /Failed to load resource/i;
+  // 主控台的实时终端会开一条 WS（/v1/console/term/<dev>）。
+  // 本脚本的 mock 后端只有 HTTP，没有 WS，所以浏览器必然报连接失败
+  // （而且是无头环境常见的 ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS）。
+  // 这属于"测试环境没有 WS 后端"，不是页面 JS 出错，归入预期噪音。
+  const IGNORE = /Failed to load resource|WebSocket connection to .*\/v1\/console\/term\//i;
   const ctx = await browser.newContext({
     viewport: { width: 1440, height: 900 },
     locale: 'zh-CN',
     permissions: ['clipboard-read', 'clipboard-write'],
   });
   const page = await ctx.newPage();
-  setupRoutes(page, {});
+  // 接住 mock 的内部记录（隐藏/添加/删除调用过什么），断言要用
+  const pxMocks = setupRoutes(page, {});
   page.on('console', msg => {
     if (msg.type() !== 'error') return;
     if (IGNORE.test(msg.text())) netNoise.push(msg.text());
@@ -304,7 +362,11 @@ function setupRoutes(page, opts){
     (await cardB.locator('[data-r="shell"]').textContent()) === '关');
   check('机器码完整显示（不是截断）',
     (await cardA.locator('[data-r="code"]').textContent()) === A_ID);
-  check('KPI：机器 2 / 在线 1 / 浏览器 2 / 运行中 1', (await page.locator('.kpi-val').allTextContents()).join(',') === '2,1,2,1');
+  // 控制台后来加了「待授权」这一格（免授权码审批流程），所以是 5 个而不是 4 个。
+  // 之前这里断言 '2,1,2,1' 已经过时，一直在报假失败。
+  check('KPI：机器 2 / 在线 1 / 待授权 0 / 浏览器 2 / 运行中 1',
+    (await page.locator('.kpi-val').allTextContents()).join(',') === '2,1,0,2,1',
+    'got=' + (await page.locator('.kpi-val').allTextContents()).join(','));
 
   await cardA.locator('[data-act="copy-code"]').click();
   await page.waitForTimeout(250);
@@ -339,7 +401,53 @@ function setupRoutes(page, opts){
     (await page.locator('#view-browsers').textContent()).includes('这台还没上报浏览器清单（客户端需 ≥0.5.0）'));
   check('cdp_ws 有独立「复制」按钮', (await page.locator('#view-browsers [data-copy^="ws://"]').count()) === 1);
 
-  console.log('\n— D. 令牌视图 —');
+  console.log('\n— D. 代理视图（服务器与用户机共享的代理库）—');
+  await page.click('#tabs .tab[data-view="proxies"]');
+  await page.waitForTimeout(500);
+  check('切到代理视图：hash=#proxies 且只显示这一屏',
+    new URL(page.url()).hash === '#proxies' &&
+    (await page.isVisible('#view-proxies')) && !(await page.isVisible('#view-browsers')));
+  const pxRows = page.locator('#px-rows tr');
+  check('排出的行数 = 2（隐藏的那条默认不显示）', (await pxRows.count()) === 2,
+    'count=' + (await pxRows.count()));
+  const pxText = await page.locator('#px-rows').textContent();
+  check('单跳显示 scheme://host:port', pxText.includes('socks5://66.80.12.66:20000'), pxText.slice(0, 120));
+  check('链式显示前置地址', pxText.includes('http://127.0.0.1:21080'), pxText.slice(0, 160));
+  check('有密码的标「已设置」', pxText.includes('已设置'));
+  check('无密码的标「无」', pxText.includes('无'));
+  check('来源列显示 origin', pxText.includes('zwd_hubtest01'), pxText.slice(0, 160));
+  check('计数文字正确', (await page.textContent('#px-count')).includes('共 2 条'));
+
+  // 隐藏：点第一行「隐藏」→ 应变成 1 行
+  await page.locator('#px-rows [data-px-hide]').first().click();
+  await page.waitForTimeout(500);
+  check('点「隐藏」后重新加载（只请求不带 include_hidden）',
+    pxMocks.hidden && pxMocks.hidden.length >= 1,
+    JSON.stringify(pxMocks.hidden || []));
+
+  // 勾「显示已隐藏」→ 隐藏的那条出现并带徽章
+  await page.check('#px-show-hidden');
+  await page.waitForTimeout(500);
+  const pxText2 = await page.locator('#px-rows').textContent();
+  check('勾「显示已隐藏」后出现「已隐藏」徽章', pxText2.includes('已隐藏'), pxText2.slice(0, 160));
+  check('已隐藏的行给出「取消隐藏」按钮',
+    (await page.locator('#px-rows [data-px-hide][data-px-hid="1"]').count()) >= 1);
+
+  // 添加代理：填表 → 保存 → 请求体正确
+  await page.click('#px-add');
+  await page.waitForTimeout(400);
+  check('「添加代理」弹出对话框', await page.isVisible('#dlg[open]'));
+  await page.fill('#pxf-host', '5.5.5.5');
+  await page.fill('#pxf-port', '1080');
+  await page.fill('#pxf-label', '自检加的');
+  await page.click('#dlg-ok');
+  await page.waitForTimeout(600);
+  const added = (pxMocks.added || [])[0] || {};
+  check('添加请求带上 host/port/label',
+    added.host === '5.5.5.5' && Number(added.port) === 1080 && added.label === '自检加的',
+    JSON.stringify(added));
+
+  console.log('\n— D2. 令牌视图 —');
   await page.click('#tabs .tab[data-view="secrets"]');
   await page.waitForSelector('.sec-row', { timeout: 5000 });
   check('令牌视图有安全提示条',
@@ -379,8 +487,12 @@ function setupRoutes(page, opts){
   await cardA.locator('[data-act="term"]').click();
   await page.waitForSelector('.mach[data-dev="' + A_ID + '"] .term', { timeout: 3000 });
   check('点「终端」在卡片里展开终端', await page.isVisible('.mach[data-dev="' + A_ID + '"] .term'));
-  check('终端徽章显示「命令行：开」',
-    (await page.textContent('.mach[data-dev="' + A_ID + '"] [data-term="flag"]')).includes('开'));
+  // 徽章现在表达"通道形态"：连上 WS 显示「实时」，否则「队列」；
+  // 命令行被关时显示「命令行：关」。早先的「命令行：开」已被更好的设计取代，
+  // 这条断言跟着改，否则会一直误报。
+  const flagText = await page.textContent('.mach[data-dev="' + A_ID + '"] [data-term="flag"]');
+  check('终端徽章显示通道形态（实时 / 队列）',
+    flagText.includes('实时') || flagText.includes('队列'), 'flag=' + flagText);
   const termInput = page.locator('.mach[data-dev="' + A_ID + '"] [data-term="input"]');
   await termInput.fill('echo hi');
   await termInput.press('Enter');

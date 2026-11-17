@@ -88,12 +88,18 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 
 **提交前必须做**：
 ```bash
-.venv/bin/python -m pytest tests -q          # 142 passed
-.venv/bin/python scripts/e2e-check.py        # 63 项全过（真开浏览器）
-.venv/bin/python scripts/e2e-cross-machine.py # 30 项（两台真机器 + hub，可选）
-node scripts/gateway-check.cjs               # 20 项（Playwright 通过网关接管）
-node scripts/ui-check.cjs                    # 21 项（控制台逐视图点一遍）
+.venv/bin/python -m pytest tests -q            # 549 passed, 2 skipped
+.venv/bin/python scripts/e2e-check.py          # 65 通过 / 0 失败 / 6 跳过（真开浏览器）
+.venv/bin/python scripts/e2e-cross-machine.py  # 跨机（两台真机器 + hub，可选）
+node scripts/gateway-check.cjs                 # 网关接管
+node scripts/ui-check.cjs                      # 客户端控制台逐视图点一遍
+node scripts/console-ui-check.cjs              # 64 通过 / 0 失败（hub 主控台，mock 后端）
 ```
+
+> 这三条是最常用来判断"能不能交付"的：
+> `pytest`（逻辑）、`e2e-check.py`（单机全能力，走真 HTTP + 真浏览器）、
+> `console-ui-check.cjs`（主控台界面，真浏览器 + mock 后端）。
+> 数字对不上就说明有用例过时了 —— 要么改代码，要么改断言，别放着红。
 
 ---
 
