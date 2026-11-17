@@ -93,7 +93,7 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 
 ```bash
 bash scripts/check-all.sh                 # 工作区代码：七项全绿才算可交付（末尾给总表）
-bash scripts/verify-release.sh v0.8.0     # 发布后：**下载产物本身**跑它的 --selftest
+bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它的 --selftest → 用它起 core 跑完整 e2e
 ```
 
 > 第二个别省。`check-all.sh` 验的是源码，用户拿到的是 Releases 上的二进制 ——
@@ -134,7 +134,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - 588 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、75 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.51** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- hub **0.7.52** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
