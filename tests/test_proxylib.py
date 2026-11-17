@@ -26,6 +26,7 @@ import base64
 import http.server
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -1078,13 +1079,19 @@ def test_hub_patch_edits_in_place_not_insert(tmp_path):
         str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hub" / "src"),
         str(__import__("pathlib").Path(__file__).resolve().parent.parent / "core" / "src"),
     )
-    env = {
+    # **必须继承父环境**，只覆盖这几个变量。
+    # 第一版手工写了一个只有 PATH/HOME 的字典 —— Windows 上把 SystemRoot / PATHEXT /
+    # TEMP 全剥掉了，子进程连 fastapi 都 import 不了（CI 里 Windows 就是这样红的，
+    # 而 Linux 恰好容忍）。完整环境里 subprocess 才能正常起解释器。
+    env = dict(os.environ)
+    env.update({
         "ZW_DATA_DIR": str(tmp_path / "hubdata"),
         "ZW_PANEL_USER": "a",
         "ZW_PANEL_PASSWORD": "b",
-        "PATH": "/usr/bin:/bin",
-        "HOME": str(tmp_path),
-    }
+        # 清掉可能从父进程漏进来的同步/设备配置，避免影响 hub 的默认行为
+        "ZW_HUB_URL": "",
+        "ZW_DEVICE_ID": "",
+    })
     r = subprocess.run([_sys.executable, "-c", script], capture_output=True, text=True,
                        timeout=180, env=env)
     assert r.returncode == 0, f"stdout={r.stdout[-1500:]}\nstderr={r.stderr[-1500:]}"
