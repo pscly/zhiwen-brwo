@@ -888,6 +888,9 @@ def build_app() -> FastAPI:
         path: str = ""
         name: str = ""
         update: bool = True
+        # 装完顺手做成扩展包（默认开）；as_default 再标成"新建环境自动带上"
+        make_pack: bool = True
+        as_default: bool = False
 
     @app.post(f"{API_PREFIX}/extensions/install", tags=["扩展"], dependencies=[Auth],
               summary="从 Chrome 商店链接或 .crx 文件安装扩展")
@@ -901,7 +904,9 @@ def build_app() -> FastAPI:
 
         try:
             return ok(extstore.install(url=body.url, crx_path=body.path,
-                                       name=body.name, update=body.update))
+                                       name=body.name, update=body.update,
+                                       make_pack=body.make_pack,
+                                       as_default=body.as_default))
         except extstore.StoreError as exc:
             raise ApiError(exc.code, exc.message, status=exc.status) from exc
 

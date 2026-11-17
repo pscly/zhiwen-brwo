@@ -227,3 +227,64 @@ def test_download_unreachable_gives_actionable_message(monkeypatch):
         extstore.download_crx(CM_ID)
     assert ei.value.code == "EXT_STORE_UNREACHABLE"
     assert "clients2.google.com" in ei.value.message
+
+
+# ── 装完自动建包 + 设为默认（这才是"新建环境自动带上"的完整链路）──
+def test_install_makes_pack_by_default(home, tmp_path):
+    """装完必须自动建包。
+
+    只把代码放进 ext_dir 是**没用的**：没有任何环境会引用它
+    （`create_profile` 只按"默认包"挂扩展）。这就是用户"以后新建就带上"
+    这条要求缺的最后一环。
+    """
+    from zw_core.services import packs
+
+    crx = tmp_path / "c.crx"
+    crx.write_bytes(_crx3(_zip({"manifest.json": _manifest()})))
+    r = extstore.install(crx_path=str(crx))
+    assert r["pack_created"] is True
+    assert r["pack_id"], r
+    ids = [p["id"] for p in packs.list_packs()]
+    assert r["pack_id"] in ids
+
+
+def test_install_as_default_flows_into_new_profile(home, tmp_path):
+    """as_default=True → 新建环境自动带上这个扩展（端到端）。"""
+    from zw_core.services import manager as mgr, packs
+
+    crx = tmp_path / "d.crx"
+    crx.write_bytes(_crx3(_zip({"manifest.json": _manifest()})))
+    r = extstore.install(crx_path=str(crx), as_default=True)
+    assert r["is_default"] is True
+    assert r["pack_id"] in packs.default_pack_ids()
+
+    prof = mgr.create_profile({"name": "自动带扩展"})
+    assert "cookiemanager" in (mgr.get_profile(prof["id"]).get("extensions") or [])
+
+
+def test_install_without_pack_leaves_library_only(home, tmp_path):
+    """make_pack=False 时只入库、不建包（给"我自己管包"的场景留口子）。"""
+    from zw_core.services import packs
+
+    crx = tmp_path / "e.crx"
+    crx.write_bytes(_crx3(_zip({"manifest.json": _manifest()})))
+    r = extstore.install(crx_path=str(crx), make_pack=False)
+    assert r["pack_created"] is False and r["pack_id"] == ""
+    assert packs.list_packs() == []
+
+
+def test_pack_creation_failure_does_not_lose_the_extension(home, tmp_path, monkeypatch):
+    """建包失败不能让整个安装失败 —— 代码已经落好了，用户还能手动建。"""
+    from zw_core.services import packs
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(packs, "import_pack", boom)
+    crx = tmp_path / "f.crx"
+    crx.write_bytes(_crx3(_zip({"manifest.json": _manifest()})))
+    r = extstore.install(crx_path=str(crx))
+    assert r["ok"] is True
+    assert r["pack_created"] is False
+    assert "disk full" in r.get("pack_error", "")
+    assert Path(r["path"], "manifest.json").is_file(), "扩展本体不能丢"

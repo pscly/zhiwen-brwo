@@ -562,6 +562,26 @@ class CoreApi:
             timeout=600.0,
         ))
 
+    def install_extension(self, *, url: str = "", path: str = "",
+                          name: str = "", make_pack: bool = True,
+                          as_default: bool = False
+                          ) -> tuple[bool, Any, dict[str, Any] | None]:
+        """从 Chrome 商店链接或本地 .crx/.zip 装扩展。
+
+        下载由**这台机器**完成（服务器常没有外网，也没有用户的代理）。
+        装完默认顺手做成扩展包；`as_default=True` 再标成"新建环境自动带上"。
+        """
+        return _unwrap_business(*self.call(
+            "POST", "/api/v1/extensions/install",
+            json_body={"url": url, "path": path, "name": name,
+                       "make_pack": make_pack, "as_default": as_default},
+            timeout=180.0,
+        ))
+
+    def check_extension_updates(self) -> tuple[bool, Any, dict[str, Any] | None]:
+        return _unwrap_business(*self.call(
+            "GET", "/api/v1/extensions/updates", timeout=180.0))
+
     def set_pack_default(self, pack_id: str, enabled: bool = True
                          ) -> tuple[bool, Any, dict[str, Any] | None]:
         return _unwrap_business(*self.call(
@@ -1429,7 +1449,7 @@ class PacksOverlay(_Overlay):
                  profiles_provider: Callable[[], list[dict[str, Any]]]) -> None:
         super().__init__(
             master, theme, fonts, "扩展包",
-            "从环境导入 = 把这个环境里的插件连同本地数据一起打包。\n"
+            "三种加扩展的方式：从环境导入 / 从 Chrome 目录导入 / 从商店链接安装。\n"
             "勾了「默认」的包，新建环境时会自动带上。",
         )
         self.api = api
@@ -1455,6 +1475,13 @@ class PacksOverlay(_Overlay):
         # 用户数据目录里，所以让它给路径。默认值填 Chrome 的标准位置，省得找。
         ttk.Button(self.buttons, text="从 Chrome 目录导入", style="Tiny.TButton",
                    command=self.ask_import_from_chrome).pack(side="right", padx=(0, 6))
+        # 用户要的：直接粘商店链接就能装；也能自己拖/选一个 .crx 文件
+        ttk.Button(self.buttons, text="商店链接安装", style="Tiny.TButton",
+                   command=self.ask_install_from_store).pack(side="right", padx=(0, 6))
+        ttk.Button(self.buttons, text="选 .crx 文件", style="Tiny.TButton",
+                   command=self.pick_crx_file).pack(side="right", padx=(0, 6))
+        ttk.Button(self.buttons, text="检查更新", style="Tiny.TButton",
+                   command=self.check_updates).pack(side="right", padx=(0, 6))
         ttk.Button(self.buttons, text="刷新", style="Tiny.TButton",
                    command=lambda: self.reload(force=True)).pack(side="right", padx=(0, 6))
 
@@ -1586,6 +1613,124 @@ class PacksOverlay(_Overlay):
             empty_hint="这台机器上还没有环境。先建一个、把插件装好，再回来打包。",
         )
         ov.open()
+
+    # -- 从商店链接 / .crx 文件装扩展 ----------------------------------
+    def ask_install_from_store(self) -> None:
+        """粘 Chrome 应用商店的扩展链接（或 32 位 ID）就能装。
+
+        下载在**这台机器**上做：服务器常常没有外网，也没有你的代理；
+        客户机才有。装完默认做成扩展包，勾了"设为默认"以后新建环境自动带。
+        """
+        ov = TextOverlay(
+            self.card, self.theme, self.fonts, "从 Chrome 商店安装扩展",
+            "粘商店详情页的链接即可（也可以只填 32 位扩展 ID）。\n"
+            "这台机器需要能访问 clients2.google.com；国内网络请先配好代理。",
+            fields=[
+                ("url", "扩展链接或 ID", "",
+                 "https://chromewebstore.google.com/detail/…/hdhngoamekjhmnpenphenpaiindoinpo"),
+                ("name", "包名称（可留空）", ""),
+            ],
+            submit_text="安装",
+            on_submit=self._do_install_store,
+        )
+        ov.open()
+
+    def _do_install_store(self, values: dict[str, str]) -> bool:
+        url = str(values.get("url") or "").strip()
+        if not url:
+            self.set_status("请填写扩展链接或 ID", bad=True)
+            return False
+        self._start_install(url=url, name=str(values.get("name") or "").strip())
+        return True
+
+    def pick_crx_file(self) -> None:
+        """手动选一个 .crx / .zip 装进去（等价于"拖一个扩展放上来"）。
+
+        为什么是选择框而不是拖拽：tkinter 原生不支持拖放，
+        要做就得再引一个 `tkinterdnd2` 依赖。选文件能达到同样效果，少一个依赖。
+        """
+        try:
+            from tkinter import filedialog
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"打不开文件选择框：{exc}", bad=True)
+            return
+        path = filedialog.askopenfilename(
+            title="选择一个扩展文件",
+            filetypes=[("Chrome 扩展", "*.crx *.zip"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        self._start_install(url="", path=str(path))
+
+    def _start_install(self, *, url: str, path: str = "", name: str = "") -> None:
+        if self._inflight:
+            self.set_status("上一个操作还没完成，稍等一下", bad=True)
+            return
+        self._inflight = True
+        self.set_status("正在下载并安装扩展 …（要下载 + 解包，可能要几十秒）")
+        self.on_log(f"开始安装扩展（{url or path}）", "info")
+        call_async(self.card,
+                   lambda: self.api.install_extension(url=url, path=path, name=name,
+                                                      make_pack=True, as_default=False),
+                   self._on_installed)
+
+    def _on_installed(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        self._inflight = False
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            hint = str((err or {}).get("hint") or "")
+            extra = f"（{hint}）" if hint else ""
+            self.set_status(f"安装失败：[{code}] {msg}{extra}", bad=True)
+            self.on_log(f"安装扩展失败：[{code}] {msg}{extra}", "bad")
+            return
+        d = data or {}
+        msg = f"已装「{d.get('name')}」{d.get('version')}，已建包"
+        if d.get("pack_error"):
+            msg = f"已装「{d.get('name')}」{d.get('version')}，但自动建包失败：{d['pack_error']}"
+            self.set_status(msg, bad=True)
+            self.on_log(msg, "warn")
+        else:
+            self.set_status(msg)
+            self.on_log(msg + "。想要新环境自动带上，把这个包勾「默认」", "ok")
+        self.on_changed()
+        self.reload(force=True)
+
+    def check_updates(self) -> None:
+        """回商店比对已装扩展的版本（只查带 ID 标记的）。"""
+        if self._inflight:
+            self.set_status("上一个操作还没完成，稍等一下", bad=True)
+            return
+        self._inflight = True
+        self.set_status("正在检查扩展更新 …")
+        call_async(self.card, lambda: self.api.check_extension_updates(),
+                   self._on_updates)
+
+    def _on_updates(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+        self._inflight = False
+        ok, data, err = res
+        if not ok:
+            code = str((err or {}).get("code") or "")
+            msg = str((err or {}).get("message") or "")
+            self.set_status(f"检查更新失败：[{code}] {msg}", bad=True)
+            self.on_log(f"检查扩展更新失败：[{code}] {msg}", "bad")
+            return
+        d = data or {}
+        items = list(d.get("items") or [])
+        up = list(d.get("updatable") or [])
+        if not items:
+            self.set_status("库里没有带商店 ID 的扩展（手工导入的包查不了更新）")
+            self.on_log("检查更新：没有可查的扩展", "info")
+            return
+        if not up:
+            self.set_status(f"已检查 {len(items)} 个扩展，都是最新版")
+            self.on_log(f"检查更新：{len(items)} 个扩展均为最新", "ok")
+            return
+        detail = "、".join(f"{u.get('path', '').split(chr(92))[-1]} {u.get('current')}→{u.get('latest')}"
+                          for u in up[:4])
+        self.set_status(f"{len(up)} 个扩展有新版本：{detail}", bad=True)
+        self.on_log(f"可更新：{detail}（重新用链接装一次即可升级）", "warn")
 
     def ask_import_from_chrome(self) -> None:
         """从任意 Chrome / Roxy 的用户数据目录导入扩展包。

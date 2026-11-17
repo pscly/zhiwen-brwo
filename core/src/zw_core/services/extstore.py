@@ -215,6 +215,8 @@ def install(
     crx_path: str = "",
     name: str = "",
     update: bool = True,
+    make_pack: bool = True,
+    as_default: bool = False,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
     """从商店链接或本地 .crx/.zip 装一个扩展到本机扩展库。
@@ -223,6 +225,11 @@ def install(
       - `url`：商店详情页链接或 32 位扩展 ID → 下载最新版
       - `crx_path`：用户手动拖进来的 .crx / .zip
       - 两者都给：以 `url` 为准（链接更能保证是官方最新）
+
+    `make_pack=True`（默认）时，装完会顺手把它做成一个**扩展包**；
+    `as_default=True` 再把那个包标成"默认带上" —— 这样新建环境就自动有它了。
+    用户要的就是这条链路："以后创建浏览器时默认就把这些插件的数据都带上"。
+    只把代码放进 ext_dir 是**不够**的：那个目录不会被任何环境引用。
 
     **更新语义**（用户要求"如果更新的话，他也可以自己更新"）：
       - 目标目录按 `<slug>-<version>` 命名（复用 packs 的库布局）
@@ -293,7 +300,8 @@ def install(
 
     logger.info("扩展已入库 slug=%s version=%s path=%s（已存在=%s）",
                 slug, version, dest, existed)
-    return {
+
+    result: dict[str, Any] = {
         "ok": True,
         "slug": slug,
         "name": str(manifest.get("name") or slug),
@@ -303,7 +311,48 @@ def install(
         "ext_id": ext_id,
         "already_existed": existed,
         "bytes": len(zip_bytes),
+        "pack_id": "",
+        "pack_created": False,
+        "is_default": False,
     }
+    if make_pack:
+        result.update(_make_pack(dest, name=str(manifest.get("name") or slug),
+                                 as_default=as_default))
+    return result
+
+
+def _make_pack(dest, *, name: str, as_default: bool) -> dict[str, Any]:
+    """把刚装进库的扩展做成一个扩展包（可选设为默认）。
+
+    ## 为什么必须做这一步
+
+    只把代码放进 `ext_dir/<slug>-<version>` 的话，**没有任何环境会引用它**：
+    `manager.create_profile` 只按"默认包"给新环境挂扩展（见 `apply_default_packs`）。
+    所以"输入链接装好 → 以后新建就带上"这条用户要求，少的就是这一环。
+
+    建包失败不抛：扩展代码已经落好了，退一步用户还能手动在"扩展包"面板里建。
+    """
+    from pathlib import Path
+
+    from . import packs
+
+    try:
+        pack = packs.import_pack(src_path=str(Path(dest)), name=name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("扩展已入库，但自动建包失败（可稍后手动建）：%s", exc)
+        return {"pack_id": "", "pack_created": False, "is_default": False,
+                "pack_error": f"{type(exc).__name__}: {exc}"}
+    pack_id = str(pack.get("id") or "")
+    out: dict[str, Any] = {"pack_id": pack_id, "pack_created": True, "is_default": False}
+    if pack_id and as_default:
+        try:
+            packs.set_default(pack_id, True)
+            out["is_default"] = True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("扩展包已建，但设为默认失败：%s", exc)
+            out["is_default"] = False
+            out["default_error"] = f"{type(exc).__name__}: {exc}"
+    return out
 
 
 def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
