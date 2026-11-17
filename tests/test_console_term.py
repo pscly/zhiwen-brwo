@@ -187,3 +187,78 @@ def test_relay_queue_overflow_drops_oldest():
         assert any(i.get("data") == str(tr._ADMIN_QUEUE_MAX + 49) for i in items), "最新内容必须还在"
 
     asyncio.run(go())
+
+
+# ── 本机 WS 终端（core 的 /api/v1/term）────────────────────
+def test_local_term_ws_roundtrip(tmp_path, monkeypatch):
+    """本机控制台终端的 WS 端点：回环免鉴权，能跑命令并流式返回。"""
+    from fastapi.testclient import TestClient
+
+    from zw_core import api as apimod
+    from zw_core import config, db
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    monkeypatch.setenv("ZW_DEVICE_ID", "zwd_localtermtest1234567890")
+    monkeypatch.setenv("ZW_HOST", "127.0.0.1")
+    config.reset_settings()
+    db.reset_db()
+    apimod._LOCAL_SESSIONS = None
+    try:
+        app = apimod.build_app()
+        c = TestClient(app)
+        # TestClient 的 client.host 是 "testclient"，不是回环 —— 所以要带机器码。
+        # （真实浏览器从 127.0.0.1 打开时是免鉴权的，那条由 test_local_console_* 覆盖）
+        with c.websocket_connect("/api/v1/term?token=zwd_localtermtest1234567890") as ws:
+            hello = ws.receive_json()
+            assert hello["t"] == "hello"
+            ws.send_json({"t": "run", "sid": "s1", "command": "echo ws-local", "timeout": 10})
+            outs, done = [], None
+            for _ in range(80):
+                m = ws.receive_json()
+                if m.get("t") == "out":
+                    outs.append(m.get("data") or "")
+                elif m.get("t") == "done":
+                    done = m
+                    break
+            assert "ws-local" in "".join(outs), outs
+            assert done and done["rc"] == 0
+    finally:
+        config.reset_settings()
+        db.reset_db()
+        apimod._LOCAL_SESSIONS = None
+
+
+def test_local_term_ws_rejects_bad_token_from_remote(tmp_path, monkeypatch):
+    """非回环来源必须带机器码/令牌。
+
+    TestClient 的 client.host 是 "testclient"，既不是回环也不是合法 IP ——
+    正好用来验"外部来源"这条分支。
+    """
+    from fastapi.testclient import TestClient
+
+    from zw_core import api as apimod
+    from zw_core import config, db
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root2"))
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    monkeypatch.setenv("ZW_DEVICE_ID", "zwd_localtermtest1234567890")
+    monkeypatch.setenv("ZW_HOST", "127.0.0.1")
+    config.reset_settings()
+    db.reset_db()
+    apimod._LOCAL_SESSIONS = None
+    try:
+        app = apimod.build_app()
+        c = TestClient(app)
+        import pytest as _pytest
+
+        with _pytest.raises(Exception):
+            with c.websocket_connect("/api/v1/term") as ws:
+                ws.receive_json()
+        # 带上机器码就能进
+        with c.websocket_connect("/api/v1/term?token=zwd_localtermtest1234567890") as ws:
+            assert ws.receive_json()["t"] == "hello"
+    finally:
+        config.reset_settings()
+        db.reset_db()
+        apimod._LOCAL_SESSIONS = None

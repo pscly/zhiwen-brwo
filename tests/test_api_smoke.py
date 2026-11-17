@@ -607,3 +607,50 @@ def test_packs_list_and_import_from_profile(client, tmp_path):
     lst = client.get("/api/v1/packs", headers=H).json()["data"]["packs"]
     assert any(x.get("name") == "导出测试" for x in lst), lst
     client.delete(f"/api/v1/profiles/{p['id']}?purge=true", headers=H)
+
+
+# ── 客户端控制台鉴权：回环免令牌 / 远程要机器码 ──────────────
+def test_loopback_request_needs_no_token(client):
+    """用户要求：客户端打开自己的控制台，不该再输令牌。
+
+    TestClient 的 client.host 不是回环，所以这里直接测函数本身：
+    模拟 127.0.0.1 来源时必须放行（不抛异常）。
+    """
+    from types import SimpleNamespace
+
+    from zw_core.api import require_auth
+
+    fake = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"), headers={})
+    require_auth(fake)          # 不抛就是通过
+
+
+def test_remote_request_requires_machine_code_or_token(client, monkeypatch):
+    from types import SimpleNamespace
+
+    import pytest as _pytest
+
+    from zw_core.api import ApiError, require_auth
+    from zw_core.config import get_settings, reset_settings
+
+    dev = "zwd_remotetest1234567890abcdef"
+    monkeypatch.setenv("ZW_DEVICE_ID", dev)
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    reset_settings()
+    try:
+        _check_remote_auth(dev, _pytest, ApiError, require_auth, SimpleNamespace)
+    finally:
+        monkeypatch.delenv("ZW_DEVICE_ID", raising=False)
+        reset_settings()
+
+
+def _check_remote_auth(dev, _pytest, ApiError, require_auth, SimpleNamespace):
+    fake_ok = SimpleNamespace(client=SimpleNamespace(host="10.1.2.3"), headers={})
+    # 直接调函数时要显式给两个头（FastAPI 的 Header 默认值不是字符串）
+    # 机器码就是远程口令
+    require_auth(fake_ok, authorization=f"Bearer {dev}", x_zw_token="")
+    # 空凭据必须被拒
+    with _pytest.raises(ApiError):
+        require_auth(fake_ok, authorization="", x_zw_token="")
+    # 错的也不行
+    with _pytest.raises(ApiError):
+        require_auth(fake_ok, authorization="Bearer wrong-code", x_zw_token="")

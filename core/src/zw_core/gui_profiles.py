@@ -345,8 +345,18 @@ def call_async(widget: tk.Misc, fn: Callable[[], Any], on_done: Callable[[Any], 
                 return
             try:
                 on_done(res)
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                # 回调自己抛异常时**不能静默**。Tk 自己的回调错误会打到 stderr，
+                # 但这里是我们直接在主线程里调 on_done，异常会被这层吃掉 ——
+                # 结果就是"界面某项只是不动了"，查起来极难（踩过：after_idle 调在
+                # 一个非控件对象上，render 抛 AttributeError，状态行永远停在
+                # 「正在读取 …」）。打包后 stderr 可能是 None，所以整段都兜住。
+                try:
+                    import traceback
+
+                    traceback.print_exc()
+                except Exception:
+                    pass
 
         try:
             widget.after(0, finish)
@@ -739,11 +749,13 @@ class TextOverlay(_Overlay):
         row = tk.Frame(self.body, bg=self.theme.card2)
         row.pack(fill="x", pady=(8, 0), before=self.error_label)
         ttk.Button(row, text=text, style="Tiny.TButton",
-                   command=command).pack(side="left")
+                   command=command).pack(anchor="w")
+        # 结果放按钮**下面一行**（不是右边）：出口 IP 可能很长（有的人的检测源
+        # 返回一整段 JSON），挤在按钮右边会被压成一两个字宽。
         self.result_label = tk.Label(row, text="", bg=self.theme.card2, fg=self.theme.faint,
                                      font=self.fonts["tiny"], anchor="w", justify="left",
-                                     wraplength=250)
-        self.result_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
+                                     wraplength=320)
+        self.result_label.pack(fill="x", pady=(3, 0))
         return self.result_label
 
     def set_result(self, msg: str, bad: bool = False) -> None:
@@ -945,7 +957,7 @@ class ChoiceOverlay(_Overlay):
         if multi:
             ttk.Button(self.buttons, text=confirm_text, style="TinyAccent.TButton",
                        command=self._confirm).pack(side="right", padx=(0, 8))
-        self.after_idle(self.list._on_inner_configure, None)
+        self.card.after_idle(self.list._on_inner_configure, None)
 
     def _pick(self, value: str) -> None:
         self.close()
@@ -1067,12 +1079,12 @@ class ProxyOverlay(_Overlay):
         row = tk.Frame(self.body, bg=theme.card2)
         row.pack(fill="x", pady=(8, 0))
         ttk.Button(row, text="测试", style="Tiny.TButton",
-                   command=self._test).pack(side="left")
+                   command=self._test).pack(anchor="w")
         self.result_var = tk.StringVar(value="")
         self.result_label = tk.Label(row, textvariable=self.result_var, bg=theme.card2,
                                      fg=theme.faint, font=fonts["tiny"], anchor="w",
-                                     justify="left", wraplength=250)
-        self.result_label.pack(side="left", padx=(8, 0), fill="x", expand=True)
+                                     justify="left", wraplength=320)
+        self.result_label.pack(fill="x", pady=(3, 0))
         self.error_label = tk.Label(self.body, text="", bg=theme.card2, fg=theme.bad,
                                     font=fonts["tiny"], anchor="w", justify="left",
                                     wraplength=320)
@@ -1230,6 +1242,9 @@ class ProxyLibraryOverlay(_Overlay):
         self.on_changed = on_changed
         self._rows: list[dict[str, Any]] = []
         self._inflight = False
+        # 上一次"批量/单条检测"的汇总。要单独存一份：检测完必然跟着刷一次列表，
+        # 如果只把它写进状态行，1 秒后就被"共 N 条"覆盖掉了 —— 用户刚好错过。
+        self._summary = ""
         self.err_var = tk.StringVar(value="")
         self.list = _ScrollList(self.body, theme, height=200)
         self.list.pack(fill="both", expand=True)
@@ -1260,6 +1275,12 @@ class ProxyLibraryOverlay(_Overlay):
         self.set_status("正在读取代理库 …")
         call_async(self.card, self.api.list_proxies, self._on_list)
 
+    def _status_text(self) -> str:
+        """状态行 = 上次检测汇总 + 当前库统计（汇总不会被刷新吞掉）。"""
+        ok_n = sum(1 for r in self._rows if r.get("last_ok") == 1)
+        base = f"共 {len(self._rows)} 条代理 · 最近检测可用 {ok_n} 条"
+        return f"{self._summary} · {base}" if self._summary else base
+
     def _on_list(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:
         self._inflight = False
         ok, data, err = res
@@ -1271,8 +1292,7 @@ class ProxyLibraryOverlay(_Overlay):
             return
         self._rows = list((data or {}).get("proxies") or [])
         self.render()
-        ok_n = sum(1 for r in self._rows if r.get("last_ok") == 1)
-        self.set_status(f"共 {len(self._rows)} 条代理 · 最近检测可用 {ok_n} 条")
+        self.set_status(self._status_text())
 
     def render(self) -> None:
         theme, fonts = self.theme, self.fonts
@@ -1301,7 +1321,7 @@ class ProxyLibraryOverlay(_Overlay):
             tk.Label(card, text=_clip(meta, 70), bg=theme.card2, fg=theme.faint,
                      font=fonts["tiny"], anchor="w").pack(fill="x", padx=8, pady=(0, 3))
         self.list.bind_wheel()
-        self.after_idle(self.list._on_inner_configure, None)
+        self.card.after_idle(self.list._on_inner_configure, None)
 
     @staticmethod
     def _meta_text(row: dict[str, Any]) -> str:
@@ -1347,6 +1367,7 @@ class ProxyLibraryOverlay(_Overlay):
         ok_n = int(d.get("ok_count") or 0)
         fail_n = int(d.get("fail_count") or 0)
         summary = f"检测完成：共 {total} 条，可用 {ok_n} 条，不可用 {fail_n} 条"
+        self._summary = summary
         self.set_status(summary, bad=bool(fail_n))
         self.on_log(summary, "warn" if fail_n else "ok")
         self.on_changed()
@@ -1436,7 +1457,7 @@ class PacksOverlay(_Overlay):
         for pack in self._packs:
             self._render_row(pack)
         self.list.bind_wheel()
-        self.after_idle(self.list._on_inner_configure, None)
+        self.card.after_idle(self.list._on_inner_configure, None)
 
     def _render_row(self, pack: dict[str, Any]) -> None:
         theme, fonts = self.theme, self.fonts
@@ -1670,7 +1691,7 @@ class ProfilePanel(tk.Frame):
     def _build(self) -> None:
         theme, fonts = self.theme, self.fonts
         head = tk.Frame(self, bg=theme.card)
-        head.pack(fill="x", padx=12, pady=(8, 6))
+        head.pack(fill="x", padx=12, pady=(8, 4))
         tk.Label(head, text="本机环境", bg=theme.card, fg=theme.ink, font=fonts["bold"],
                  anchor="w").pack(side="left")
         tk.Label(head, textvariable=self.count_var, bg=theme.card, fg=theme.faint,
@@ -1679,14 +1700,21 @@ class ProfilePanel(tk.Frame):
                    command=self.ask_create).pack(side="right")
         ttk.Button(head, text="刷新", style="Tiny.TButton",
                    command=lambda: self.refresh(force=True)).pack(side="right", padx=(0, 6))
-        # 三个"库"入口放在刷新左边：它们都是低频操作，但一旦要用就是"必须先有
-        # 代理/包才能继续"的硬前置，藏进二级菜单只会让人找不到。
-        ttk.Button(head, text="代理库", style="Tiny.TButton",
-                   command=self.ask_proxy_library).pack(side="right", padx=(6, 0))
-        ttk.Button(head, text="导入代理", style="Tiny.TButton",
-                   command=self.ask_import_proxies).pack(side="right", padx=(6, 0))
-        ttk.Button(head, text="扩展包", style="Tiny.TButton",
-                   command=self.ask_packs).pack(side="right", padx=(6, 0))
+
+        # 第二行放"库"类入口。为什么不跟「新建环境 / 刷新」挤同一行：640 宽的
+        # tab 里塞 5 个按钮，pack 会把最后那个压成十几像素 —— 实测「扩展包」
+        # 只剩 13px，字整个消失（点也点不准）。另起一行反而更好找。
+        bar2 = tk.Frame(self, bg=theme.card)
+        bar2.pack(fill="x", padx=12, pady=(0, 6))
+        ttk.Button(bar2, text="导入代理", style="Tiny.TButton",
+                   command=self.ask_import_proxies).pack(side="left")
+        ttk.Button(bar2, text="代理库", style="Tiny.TButton",
+                   command=self.ask_proxy_library).pack(side="left", padx=(6, 0))
+        ttk.Button(bar2, text="扩展包", style="Tiny.TButton",
+                   command=self.ask_packs).pack(side="left", padx=(6, 0))
+        tk.Label(bar2, text="扩展包 = 把某个环境已装好的插件连数据打包",
+                 bg=theme.card, fg=theme.faint, font=fonts["tiny"],
+                 anchor="e").pack(side="right")
 
         # 可滚动列表：Tk 没有"可滚动框架"，标准做法是 Canvas 里放一个 Frame
         wrap = tk.Frame(self, bg=theme.card)
@@ -1877,8 +1905,15 @@ class ProfilePanel(tk.Frame):
 
         row = tk.Frame(self.inner, bg=theme.card2)
         row.pack(fill="x", pady=(0, 4))
-        line = tk.Frame(row, bg=theme.card2, padx=9, pady=5)
+        # 两行布局。为什么不能挤一行：570px 里要塞"名字 + 徽章 + 分组 + 代理串
+        # + 4 个按钮"，pack 会按需压缩，实测「代理」只剩 25px、「应用包」被压成
+        # 1px —— 按钮还在，但点不着。信息一行、按钮一行是唯一稳的排法。
+        # 注意 Frame 的 padx/pady 只收单个整数（收元组是 TclError：
+        # `expected screen distance but got "4 1"`），上下间距交给 pack 给。
+        line = tk.Frame(row, bg=theme.card2, padx=9, pady=4)
         line.pack(fill="x")
+        acts = tk.Frame(row, bg=theme.card2, padx=9, pady=0)
+        acts.pack(fill="x", pady=(0, 5))
 
         tk.Label(line, text=_clip(name, self.ROW_LIMIT_NAME), bg=theme.card2, fg=theme.ink,
                  font=fonts["bold"], anchor="w").pack(side="left")
@@ -1895,14 +1930,14 @@ class ProfilePanel(tk.Frame):
                  bg=theme.card2, fg=theme.dim if proxy_text else theme.faint,
                  font=fonts["tiny"], anchor="w").pack(side="left", padx=(7, 0))
 
-        ttk.Button(line, text="删除", style="Danger.TButton",
+        ttk.Button(acts, text="删除", style="Danger.TButton",
                    command=lambda: self.ask_delete(pid, name)).pack(side="right")
         stop_like = state in ("running", "starting")
-        ttk.Button(line, text="停止" if stop_like else "启动", style="Tiny.TButton",
+        ttk.Button(acts, text="停止" if stop_like else "启动", style="Tiny.TButton",
                    command=lambda: self.toggle(pid, name, state)).pack(side="right", padx=(0, 6))
-        ttk.Button(line, text="代理", style="Tiny.TButton",
+        ttk.Button(acts, text="代理", style="Tiny.TButton",
                    command=lambda: self.ask_proxy(pid, name)).pack(side="right", padx=(0, 6))
-        ttk.Button(line, text="应用包", style="Tiny.TButton",
+        ttk.Button(acts, text="应用包", style="Tiny.TButton",
                    command=lambda: self.ask_apply_packs(pid, name)).pack(side="right", padx=(0, 6))
 
     # -- 浮层统一入口 --
