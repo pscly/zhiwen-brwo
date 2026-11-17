@@ -1,5 +1,64 @@
 # CHANGELOG
 
+## 0.7.45 — 2026-11-18
+
+**自检脚本会往你服务器上注册残留设备 —— 已修，并清了已有的两条。**
+
+### 发现
+
+在服务器面板上看到：
+
+```
+zwd_tabscheck1234567890ab    psubs3.6   pending
+zwd_guicheck1234567890abcd   psubs3.6   pending
+zwd_HS4ClQKT...              tianyiyuncd1  active
+```
+
+后两条是我自检脚本留下的垃圾。用户面板里不该出现这种东西。
+
+### 根因（比想象的绕）
+
+两个脚本都写了 `core.start(device_id="zwd_…", hub_url="")`，看起来明确"不连 hub"：
+
+```python
+if hub_url:
+    os.environ["ZW_HUB_URL"] = hub_url
+```
+
+问题在于 —— **空串只是"不覆盖"**。如果外层环境里已经有 `ZW_HUB_URL`
+（比如 `check-all.sh` 为了跑同步那几项导出了它），自检 core 就照样连上 hub、
+拿 `ZW_DEVICE_ID` 注册成一条待批准设备。于是每跑一次自检，服务器多一条垃圾。
+
+这和上一轮 `gui-check` 继承 `ZW_ADMIN_TOKEN` 是**同一类问题**：
+子进程/子进程内的 core 默认继承父环境，而脚本假设了自己是干净的。
+
+### 修法
+
+两个脚本在启动 core **之前**清掉所有会改变行为的 `ZW_*`：
+
+```python
+for k in ("ZW_HUB_URL", "ZW_HUB_TOKEN", "ZW_DEVICE_ID", "ZW_ADMIN_TOKEN",
+          "ZW_SYNC_PASSWORD", "ZW_PORT_POOL_START", "ZW_PORT_POOL_END",
+          "ZW_ALLOWED_CIDRS"):
+    os.environ.pop(k, None)
+```
+
+### 实测
+
+故意用**脏环境**跑（`ZW_HUB_URL` 指向真实 hub、`ZW_DEVICE_ID=zwd_shouldnotappear…`）：
+
+```
+✅ tabs-check：断言通过 13 条，失败 0 条
+服务器设备数：1（只剩 tianyiyuncd1）—— 没有多出来
+```
+
+再跑完整的 `check-all.sh`（它本来就会导出 hub 相关变量），跑完后设备数仍是 1。
+
+### 顺手清理
+
+服务器上那两条残留设备已用 `DELETE /panel/api/devices/{id}` 删掉，现在面板里只有你自己的
+`tianyiyuncd1`。
+
 ## 0.7.44 — 2026-11-18
 
 **新增 `scripts/check-all.sh`：七个门槛一条命令跑完 —— 它立刻抓出三个我自己的问题。**

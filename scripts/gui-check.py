@@ -90,6 +90,8 @@ def main() -> int:
     # 调用，而外层可能导出了 ZW_ADMIN_TOKEN / ZW_HUB_URL / ZW_PORT_POOL_* 等。
     # 继承进来会让本脚本的临时 core 变成"要令牌"或"去连 hub"，于是面板取数全失败、
     # 断言莫名其妙地红（实测过：合并跑挂、单跑过）。
+    # 注意 `ZW_HUB_URL` 必须在列表里：`LocalCore.start(hub_url="")` 只是"不覆盖"，
+    # 环境里原有的值会被继承 → 自检 core 会去 hub 注册一条残留设备（实测发生过）。
     for k in ("ZW_ADMIN_TOKEN", "ZW_HUB_URL", "ZW_HUB_TOKEN", "ZW_DEVICE_ID",
               "ZW_SYNC_PASSWORD", "ZW_PORT_POOL_START", "ZW_PORT_POOL_END",
               "ZW_ALLOWED_CIDRS", "ZW_DEFAULT_PACKS", "ZW_EGRESS_ENDPOINTS",

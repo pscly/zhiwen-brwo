@@ -139,6 +139,15 @@ def main() -> int:
         print("❌ 需要一个真实 Chromium：设 ZW_CHROME=/path/to/chrome")
         return 2
 
+    # 清掉外层可能带进来的 ZW_*：本脚本要的是一个**完全独立**的临时 core。
+    # 特别是 `ZW_HUB_URL` —— `LocalCore.start(hub_url="")` 只是"不覆盖"，
+    # 环境里原有的值会被继承，于是自检 core 真的去 hub 上注册了设备。
+    # 实测后果：服务器面板里堆出两条同名 `psubs3.6` 的 pending 残留设备。
+    for k in ("ZW_HUB_URL", "ZW_HUB_TOKEN", "ZW_DEVICE_ID", "ZW_ADMIN_TOKEN",
+              "ZW_SYNC_PASSWORD", "ZW_PORT_POOL_START", "ZW_PORT_POOL_END",
+              "ZW_ALLOWED_CIDRS"):
+        os.environ.pop(k, None)
+
     srv, base = _serve_pages(3)
     tmp = Path(tempfile.mkdtemp(prefix="zw-tabs-"))
     port = _free_port()
