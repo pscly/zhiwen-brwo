@@ -284,5 +284,13 @@ def test_localcore_binds_all_interfaces_by_default(home, tmp_path, monkeypatch):
 
     _cfg.reset_settings()
     assert bound == "0.0.0.0", f"ZW_HOST 应该是 0.0.0.0，实际 {bound!r}"
+    # 只断言环境变量是不够的：uvicorn.Config 那一层曾经把 host 写死 127.0.0.1，
+    # 于是"配置改了、环境变量也对、实际还是只听回环"。这里直接读源码断言，
+    # 三层（默认值 / 环境变量 / uvicorn 参数）任何一层写死都会被抓到。
+    import inspect as _inspect
+
+    src = _inspect.getsource(LocalCore.start)
+    assert 'host="127.0.0.1"' not in src, "uvicorn 的 host 不能写死回环"
+    assert "get_settings().host" in src, "uvicorn 的 host 必须取 settings.host"
     # 清理后必须回到快照值（全量跑时前面的用例可能已经留下值，所以不能假设是 None）
     assert _os.environ.get("ZW_HOST") == snapshot["ZW_HOST"]

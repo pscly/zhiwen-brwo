@@ -521,6 +521,7 @@ class LocalCore:
         try:
             import uvicorn
 
+            from zw_core.config import get_settings
             from zw_core.main import app as core_app
 
             # log_config=None 很关键：uvicorn 默认会用 dictConfig 重配日志，
@@ -531,7 +532,11 @@ class LocalCore:
             # 我们自己的 setup_logging 已经管好日志，不需要 uvicorn 再配一遍。
             config = uvicorn.Config(
                 core_app,
-                host="127.0.0.1",
+                # **必须取 settings.host，不能写死 127.0.0.1**：
+                # 用户要求控制台监听 0.0.0.0（远程用机器码打开）。
+                # 之前这里硬编码回环，导致"config 改了、环境变量也设了，
+                # 但实际还是只听回环" —— 三层里最后一层没改，最难发现。
+                host=get_settings().host,
                 port=self.port,
                 log_level="info",
                 access_log=False,
