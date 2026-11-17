@@ -412,3 +412,31 @@ def test_public_bind_without_credential_warns_explicitly(home, monkeypatch, capl
     assert d["host"] == "127.0.0.1"
     assert d.get("host_notice"), "meta 必须带出降级原因，否则用户无处可查"
     assert "ZW_ADMIN_TOKEN" in d["host_notice"]
+
+
+def test_uvicorn_does_not_rewrite_client_ip_from_forwarded_header(monkeypatch):
+    """uvicorn 不许替我们信 `X-Forwarded-For` —— 那是一条免令牌通道。
+
+    uvicorn 默认 `proxy_headers=True` 且 `forwarded_allow_ips="127.0.0.1,::1"`：
+    本机反代（nginx / Lucky）连到 127.0.0.1:8730 时，它会把 `request.client.host`
+    换成请求头里的 XFF。而"来自回环 = 免令牌"正是我们的鉴权规则 —— 于是远程
+    攻击者只要经反代发一个 `X-Forwarded-For: 127.0.0.1`，就会被当成"本机"，
+    整个控制台不需要令牌。用户的实际部署就是这个拓扑。
+
+    我们有自己的显式策略（`ZW_TRUST_PROXY_HEADERS` + `api._client_ip()`，
+    默认关闭），所以必须让 uvicorn 别插手。
+    """
+    from zw_core import main as mainmod
+
+    captured = {}
+
+    def fake_run(app, **kw):
+        captured.update(kw)
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    mainmod.run()
+
+    assert captured.get("proxy_headers") is False, (
+        f"proxy_headers 必须显式关掉，实际 {captured.get('proxy_headers')!r}")
+    assert str(captured.get("forwarded_allow_ips") or "") == "", (
+        f"forwarded_allow_ips 必须为空，实际 {captured.get('forwarded_allow_ips')!r}")

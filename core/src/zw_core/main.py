@@ -260,8 +260,20 @@ def run() -> None:
     logger.info("监听 http://%s:%s  数据目录 %s", s.host, s.port, s.root)
     # log_config=None：不让 uvicorn 用 dictConfig 覆盖我们的日志配置
     # （它的 formatter 会碰 sys.stdout，而无控制台环境下那是 None）。
+    # `proxy_headers=False` 是**安全必需**，不是可选优化。
+    #
+    # uvicorn 默认 `proxy_headers=True` 且 `forwarded_allow_ips="127.0.0.1,::1"`：
+    # 只要连过来的是本机地址（例如 nginx / Lucky 反代到 127.0.0.1:8730），
+    # 它就会把 `request.client.host` 换成请求头里的 `X-Forwarded-For`。
+    # 而"来自回环 = 免令牌"是我们的鉴权规则 —— 于是远程攻击者只要经反代发一个
+    # `X-Forwarded-For: 127.0.0.1`，就会被当成"本机"，整个控制台不需要令牌。
+    #
+    # 我们自己已经有一套显式的转发头策略（`ZW_TRUST_PROXY_HEADERS` +
+    # `api._client_ip()`），默认关闭、由运维按实际拓扑打开。所以这里必须让
+    # uvicorn 别插手，否则那套开关形同虚设。
     uvicorn.run(app, host=s.host, port=s.port, log_level=s.log_level.lower(),
-                access_log=False, log_config=None)
+                access_log=False, log_config=None,
+                proxy_headers=False, forwarded_allow_ips="")
 
 
 def main() -> None:

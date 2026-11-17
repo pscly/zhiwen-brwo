@@ -1,5 +1,75 @@
 # CHANGELOG
 
+## 0.7.34 — 2026-11-17
+
+**堵掉一条能免令牌进控制台的路：uvicorn 替我们信了 `X-Forwarded-For`。**
+
+### 漏洞
+
+我们的鉴权规则是「来自回环 → 免令牌」（用户明确要求"本机打开直接进"）。
+而 uvicorn 默认：
+
+```python
+proxy_headers=True
+forwarded_allow_ips="127.0.0.1,::1"
+```
+
+意思是：**只要连过来的是本机地址，它就把 `request.client.host` 换成请求头里的
+`X-Forwarded-For`**。而本机反代（nginx / Lucky）转发到 `127.0.0.1:8730`
+恰好就是"本机地址" —— 于是远程攻击者只要经反代发一个
+
+```
+X-Forwarded-For: 127.0.0.1
+```
+
+就会被 uvicorn 改写成"来自回环"，**整个控制台不需要任何令牌**。
+用户的实际部署正是这个拓扑（3.5 上用 nginx/Lucky 对外）。
+
+### 修法
+
+`uvicorn.run(..., proxy_headers=False, forwarded_allow_ips="")`
+
+我们自己已经有一套显式策略（`ZW_TRUST_PROXY_HEADERS` + `api._client_ip()`，
+默认关闭），让 uvicorn 别插手，否则那套开关形同虚设。
+
+实测（真服务、真局域网 IP）：
+
+```
+修复后 · 从局域网带伪造 XFF：auth_required = True
+修复后 · 从局域网带伪造 XFF 且无令牌：HTTP 401
+```
+
+### 文档
+
+`docs/03-部署指南.md` 新增警告：`ZW_TRUST_PROXY_HEADERS` 与"本机免令牌"是
+危险组合，打开前必须让反代**覆盖**该头：
+
+```nginx
+proxy_set_header X-Forwarded-For $remote_addr;   # 覆盖，不是 $proxy_add_x_forwarded_for
+```
+
+### 顺带修掉 Windows CI 红
+
+0.7.33 的 Windows 构建挂在单元测试上：
+
+```
+FAILED tests/test_proxylib.py::test_hub_patch_edits_in_place_not_insert
+stderr: .../fastapi/routing.py", line 46, in <module>
+```
+
+原因是我给子进程手工构造了 `env`（只有 `PATH=/usr/bin:/bin` 和 `HOME`），
+把 Windows 上的 `SystemRoot` / `PATHEXT` / `TEMP` 全剥掉了，子进程连 fastapi
+都 import 不了（Linux 恰好容忍）。改成继承父环境、只覆盖需要的几个变量。
+**重跑后 Windows 通过。**
+
+> 另外那次 macOS 任务是 GitHub runner 资源不足被取消
+> （`The job was not acquired by Runner of type hosted`），与代码无关，重跑即过。
+
+### 测试
+
+566 → **567 项**。新增 `test_uvicorn_does_not_rewrite_client_ip_from_forwarded_header`：
+monkeypatch `uvicorn.run`，断言 `proxy_headers is False` 且 `forwarded_allow_ips` 为空。
+
 ## 0.7.33 — 2026-11-17
 
 **派子代理做对抗审查，找出 12 条真缺陷并逐条修掉。其中 2 条严重。**
