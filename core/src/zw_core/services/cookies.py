@@ -82,6 +82,22 @@ class CDP:
                 pass
             self._ws = None
 
+    async def close(self) -> None:
+        """断开连接（等价于 `__aexit__`）。
+
+        ## 为什么要有这个方法（真踩过）
+
+        `CDP` 原来只有 `__aenter__`/`__aexit__`，**没有 `close()`**。
+        而 `open_tabs()` 在 `finally:` 里写的是 `await conn.close()` —— 于是每次都抛
+        `AttributeError: 'CDP' object has no attribute 'close'`，整个函数直接失败。
+        这个异常又被 `manager.start` 的 `except` 吞成一条 warning
+        （"补开标签页失败（不影响使用）"），结果是：
+        **无头模式下"恢复上次标签 + 追加检测页"从来没生效过**，而界面上看不出任何异常。
+
+        有界面（headful）时不走这条路，所以只在这台机器上手工验证时才发现不了。
+        """
+        await self.__aexit__(None, None, None)
+
     async def _send_nowait(self, method: str, params: dict[str, Any]) -> None:
         if self._ws is None:
             return
@@ -578,17 +594,16 @@ async def open_tabs(ws_url: str, urls: list[str]) -> dict[str, Any]:
     failed: list[dict[str, Any]] = []
     if not urls:
         return {"opened": opened, "failed": failed}
-    conn = CDP(ws_url)
-    try:
-        await conn.connect()
+    # 用 `async with` 而不是手动 try/finally + close()：
+    # 之前写的 `await conn.close()` 因为类里没有 close() 而每次都抛，
+    # 把整个"补开标签页"变成了静默失败。上下文管理器不会踩这个坑。
+    async with CDP(ws_url) as conn:
         for url in urls:
             try:
                 res = await conn.call("Target.createTarget", {"url": url})
                 opened.append({"url": url, "target_id": res.get("targetId", "")})
             except Exception as exc:  # noqa: BLE001  单个失败不影响其它
                 failed.append({"url": url, "error": f"{type(exc).__name__}: {exc}"})
-    finally:
-        await conn.close()
     return {"opened": opened, "failed": failed}
 
 

@@ -760,3 +760,50 @@ def test_authed_proxy_warning_names_the_relay_not_the_extension():
             else:
                 _os.environ[k] = v
         _cfg.reset_settings()
+
+
+# ── CDP 客户端的 close()（0.7.36）─────────────────────────
+def test_cdp_has_close_and_works_as_context_manager():
+    """`CDP` 必须有 `close()`，且 `async with` 可用。
+
+    ## 真踩过的 bug
+
+    `CDP` 原来只有 `__aenter__`/`__aexit__`，**没有 `close()`**。而
+    `open_tabs()` 在 `finally:` 里写的是 `await conn.close()` —— 每次都抛
+    `AttributeError: 'CDP' object has no attribute 'close'`，整个函数直接失败。
+
+    这个异常又被 `manager.start()` 的 `except` 吞成一条 warning
+    （"补开标签页失败（不影响使用）"），于是
+    **无头模式下"恢复上次标签 + 追加检测页"从来没生效过**，
+    而界面上看不出任何异常 —— 只有翻日志才能发现。
+
+    有界面（headful）时根本不走这条路，所以只在真机手工验证时才发现不了。
+    """
+    import inspect
+
+    from zw_core.services.cookies import CDP
+
+    assert hasattr(CDP, "close"), "CDP 没有 close()，open_tabs 会静默失败"
+    assert inspect.iscoroutinefunction(CDP.close), "close() 必须是 async"
+    assert hasattr(CDP, "__aenter__") and hasattr(CDP, "__aexit__")
+
+    # 源码层面也钉住：不许再出现"手动 close 且没有它"的写法
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parent.parent / "core/src/zw_core/services/cookies.py"
+    text = src.read_text(encoding="utf-8")
+    assert "async with CDP(ws_url) as conn" in text, "open_tabs 应该用上下文管理器"
+
+
+def test_open_tabs_returns_opened_and_failed_shape():
+    """`open_tabs` 的返回形状必须稳定：`{opened: [...], failed: [...]}`。
+
+    空 urls 时直接返回空结果、不建连接 —— 这条也顺带证明它不会因为
+    "没连接却去 close" 而炸。
+    """
+    import asyncio
+
+    from zw_core.services.cookies import open_tabs
+
+    res = asyncio.run(open_tabs("ws://127.0.0.1:1/devtools/browser/x", []))
+    assert res == {"opened": [], "failed": []}, res
