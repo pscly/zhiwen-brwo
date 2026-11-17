@@ -19,6 +19,19 @@
 用法：
   ZW_A=http://192.168.3.6:8730 ZW_TA=... ZW_B=http://192.168.3.5:8731 ZW_TB=... \
   ZW_SYNC_PASSWORD=... python scripts/e2e-cross-machine.py
+
+## 跑之前要满足四件事（不然会看到一堆"看起来像 bug"的失败）
+
+1. **两端都要配 hub**：`ZW_HUB_URL` + `ZW_HUB_TOKEN`。没有 hub 就没法推/拉，
+   后面每一步都会连带失败。
+2. **A 要绑 0.0.0.0**（`ZW_HOST=0.0.0.0`）：脚本会断言 A 的对外网关地址**不是回环**，
+   只绑 127.0.0.1 时这条必然红。
+3. **远程那一端必须给令牌**：从非回环访问 core 要 `ZW_ADMIN_TOKEN`
+   （或客户端机器码）。这是鉴权模型，不是权限问题。
+4. **设备要被服务器批准**：`ZW_DEVICE_AUTO_APPROVE=false` 时新设备是 `pending`，
+   推送会返回 `DEVICE_PENDING`。先去面板点「允许」。
+
+只在本机跑（两个 core 都在 127.0.0.1）也能跑，但那就验不到"真过了一次局域网"。
 """
 
 from __future__ import annotations
@@ -32,8 +45,22 @@ import httpx
 
 A = os.environ.get("ZW_A", "http://192.168.3.6:8730")
 B = os.environ.get("ZW_B", "http://192.168.3.5:8731")
-TA = {"Authorization": "Bearer " + os.environ.get("ZW_TA", "test-token-123")}
-TB = {"Authorization": "Bearer " + os.environ.get("ZW_TB", "core-b-token-3f9a2")}
+def _auth(env_name: str, fallback: str) -> dict[str, str]:
+    """构造鉴权头。
+
+    ## 不能用 "Bearer " + 空串
+
+    本机 core（回环）默认**不需要令牌**，这时 `ZW_TA=` 是空串。
+    拼成 `Authorization: Bearer ` 会被 httpx 直接拒：
+    `Illegal header value b'Bearer '` —— 看起来像"连不上"，其实是请求头非法。
+    所以令牌为空时**完全不带这个头**（依赖 ZW_ADMIN_TOKEN 环境的机器也适用）。
+    """
+    tok = (os.environ.get(env_name) or fallback or "").strip()
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
+TA = _auth("ZW_TA", "")
+TB = _auth("ZW_TB", "")
 PW = os.environ.get("ZW_SYNC_PASSWORD", "zhiwen-test-pass-2026")
 NAME = os.environ.get("ZW_E2E_NAME", "e2e-cross")
 
