@@ -460,6 +460,55 @@ def cmd_proxy_rm(args: argparse.Namespace) -> None:
     _out(_call("DELETE", f"/api/v1/proxies/{args.id}"), args.json)
 
 
+def cmd_proxy_import(args: argparse.Namespace) -> None:
+    """批量导入代理：一行一个，从参数或 stdin 读。
+
+    支持 `socks5://u:p@h:port`、`http://…`、`h:port:u:p`、行尾 `# 备注`，
+    以及链式 `前置,落地`（见 docs/16）。坏行单独报错，不影响其它行。
+    """
+    if args.file:
+        with open(args.file, encoding="utf-8") as f:
+            text = f.read()
+    elif args.text:
+        text = args.text
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
+    else:
+        print("要么给 --text，要么给 --file，要么用管道输入（一行一个）", file=sys.stderr)
+        raise SystemExit(2)
+    data = _call("POST", "/api/v1/proxies/import",
+                 {"text": text, "label_prefix": args.label_prefix or ""})
+    if args.json:
+        _out(data, True)
+        return
+    # `_call` 已经把 {ok,data} 拆开了，这里拿到的就是 data 本体，不要再取一层
+    d = data if isinstance(data, dict) else {}
+    print(f"导入 {d.get('imported', 0)} 条，跳过 {d.get('skipped', 0)} 条，"
+          f"忽略 {d.get('ignored', 0)} 行，失败 {len(d.get('failed') or [])} 条")
+    for f in d.get("failed") or []:
+        print(f"  ❌ {f.get('line')} → {f.get('error')}")
+
+
+def cmd_proxy_sync(args: argparse.Namespace) -> None:
+    """与服务器对齐代理库（上行 + 下行）。
+
+    用户要求"两边都能加、自动同步"，平时是自动的；这个命令用于手动补一次。
+    """
+    data = _call("POST", "/api/v1/proxies/sync")
+    if args.json:
+        _out(data, True)
+        return
+    d = data if isinstance(data, dict) else {}
+    up = d.get("up") or {}
+    down = d.get("down") or {}
+    print(f"上行：{'成功' if up.get('ok') else '失败'}"
+          f"（新增 {up.get('created', 0)} / 更新 {up.get('updated', 0)}）"
+          + (f" {up.get('error') or up.get('skipped') or ''}"))
+    print(f"下行：{'成功' if down.get('ok') else '失败'}"
+          f"（补入 {down.get('added', 0)} / 更新 {down.get('updated', 0)}）"
+          + (f" {down.get('error') or down.get('skipped') or ''}"))
+
+
 # ── 扩展 ──────────────────────────────────────────────────
 def cmd_ext_list(args: argparse.Namespace) -> None:
     data = _call("GET", "/api/v1/extensions")
@@ -475,7 +524,42 @@ def cmd_ext_list(args: argparse.Namespace) -> None:
 
 
 def cmd_ext_install(args: argparse.Namespace) -> None:
-    _out(_call("POST", "/api/v1/extensions/install", {"path": args.path}), args.json)
+    """装扩展：给 --url（商店链接/ID）或 --path（.crx / 目录 / zip）。
+
+    `--default` 顺手设成"新建环境默认带上"（用户要的就是这个效果）。
+    """
+    if not (args.url or args.path):
+        print("要么给 --url（商店链接或扩展 ID），要么给 --path", file=sys.stderr)
+        raise SystemExit(2)
+    payload = {"path": args.path or "", "url": args.url or "",
+               "make_pack": not args.no_pack, "as_default": bool(args.default)}
+    data = _call("POST", "/api/v1/extensions/install", payload)
+    if args.json:
+        _out(data, True)
+        return
+    d = data if isinstance(data, dict) else {}
+    print(f"已装 {d.get('name') or d.get('slug')} {d.get('version') or ''} → {d.get('path') or ''}")
+    if d.get("pack_created"):
+        print(f"  已建扩展包 {d.get('pack_id')}" + ("（已设为默认，新环境会自动带上）"
+                                                    if d.get("is_default") else ""))
+    elif d.get("pack_error"):
+        print(f"  ⚠️ 自动建包失败：{d['pack_error']}")
+
+
+def cmd_ext_updates(args: argparse.Namespace) -> None:
+    """查已装扩展有没有新版（只查带商店 ID 标记的）。"""
+    data = _call("GET", "/api/v1/extensions/updates")
+    if args.json:
+        _out(data, True)
+        return
+    d = data if isinstance(data, dict) else {}
+    items = d.get("items") or []
+    if not items:
+        print("（没有带商店 ID 的扩展，手工导入的包查不了更新）")
+        return
+    for it in items:
+        mark = "⬆️ " if it.get("update_available") else "   "
+        print(f"{mark}{it.get('current')} → {it.get('latest') or '?'}  {it.get('path')}")
 
 
 def cmd_ext_rm(args: argparse.Namespace) -> None:
@@ -799,6 +883,15 @@ def build_parser() -> argparse.ArgumentParser:
     s4.add_argument("id", type=int)
     j(s4)
     s4.set_defaults(func=cmd_proxy_rm)
+    s4 = prsub.add_parser("import", help="批量导入（一行一个，坏行单独报错）")
+    s4.add_argument("--text", help="直接给一行或多行")
+    s4.add_argument("--file", help="从文件读")
+    s4.add_argument("--label-prefix", help="没写备注时用这个前缀编号")
+    j(s4)
+    s4.set_defaults(func=cmd_proxy_import)
+    s4 = prsub.add_parser("sync", help="与服务器对齐代理库（上行 + 下行）")
+    j(s4)
+    s4.set_defaults(func=cmd_proxy_sync)
 
     # page
     sp = sub.add_parser("page", help="页面操作")
@@ -824,10 +917,16 @@ def build_parser() -> argparse.ArgumentParser:
     s6 = esub.add_parser("list", help="列出扩展")
     j(s6)
     s6.set_defaults(func=cmd_ext_list)
-    s6 = esub.add_parser("install", help="安装扩展（目录或 zip）")
-    s6.add_argument("path")
+    s6 = esub.add_parser("install", help="安装扩展（商店链接 / .crx / 目录 / zip）")
+    s6.add_argument("path", nargs="?", default="", help=".crx / 扩展目录 / zip")
+    s6.add_argument("--url", help="Chrome 商店链接或 32 位扩展 ID")
+    s6.add_argument("--default", action="store_true", help="设为新建环境默认带上")
+    s6.add_argument("--no-pack", action="store_true", help="只入库，不建扩展包")
     j(s6)
     s6.set_defaults(func=cmd_ext_install)
+    s6 = esub.add_parser("updates", help="查已装扩展有没有新版")
+    j(s6)
+    s6.set_defaults(func=cmd_ext_updates)
     s6 = esub.add_parser("rm", help="删除扩展")
     s6.add_argument("slug")
     s6.add_argument("version")

@@ -317,3 +317,36 @@ def test_proxy_upstream_keeps_host_port_visible():
     # 无认证时是干净的 scheme+host:port
     row2 = dict(row, username="")
     assert proxy_upstream_of(row2).endswith("66.80.12.66:20000")
+
+
+# ── CLI 新命令（0.7.26）──────────────────────────────────
+def test_cli_has_proxy_import_and_sync():
+    """`zw proxy import` / `zw proxy sync` 必须存在。
+
+    用户要求"AI 也能通过接口操作"，CLI 是最直接的入口；
+    以前只能 list/add/check/rm，批量导入和同步都缺。
+    直接跑 `--help` 断言，最接近用户实际用法。
+    """
+    import subprocess
+    import sys as _sys
+
+    out = subprocess.run([_sys.executable, "-m", "zw_core.cli", "proxy", "--help"],
+                         capture_output=True, text=True, timeout=60).stdout
+    assert "import" in out, out[:400]
+    assert "sync" in out, out[:400]
+
+
+def test_cli_has_extension_install_url_and_updates():
+    """`zw extension install --url …` 与 `zw extension updates` 必须存在。
+
+    商店链接装扩展是纯 API 起步的，CLI 必须能直达；更新检查同理。
+    """
+    import subprocess
+    import sys as _sys
+
+    out = subprocess.run([_sys.executable, "-m", "zw_core.cli", "extension", "--help"],
+                         capture_output=True, text=True, timeout=60).stdout
+    assert "updates" in out, out[:400]
+    out2 = subprocess.run([_sys.executable, "-m", "zw_core.cli", "extension", "install", "--help"],
+                          capture_output=True, text=True, timeout=60).stdout
+    assert "--url" in out2 and "--default" in out2, out2[:500]
