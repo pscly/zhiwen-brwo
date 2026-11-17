@@ -748,3 +748,41 @@ def test_stop_reports_why_tabs_were_not_remembered(client):
     # （走的是 already_stopped 分支，那里也要说明原因，不能只留空字段）
     assert rem.get("saved") == 0, rem
     assert rem.get("reason"), rem
+
+
+def test_default_pack_toggle_on_off_affects_new_profiles(client):
+    """用户要求：「以后创建浏览器时，可以默认就把这些插件的数据都带上
+    （**当然也可以选择关闭**）」。两个开关都要真的生效。
+
+    这条以前只有单元级覆盖，没有"新建环境到底带没带"的端到端验证。
+    """
+    import json as _json
+    import os as _os
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    _os.makedirs(d, exist_ok=True)
+    with open(_os.path.join(d, "manifest.json"), "w") as f:
+        _json.dump({"manifest_version": 3, "name": "SwExt", "version": "1.0.0"}, f)
+    with open(_os.path.join(d, "sw.js"), "w") as f:
+        f.write("//x")
+
+    pid_pack = client.post("/api/v1/packs/import",
+                           json={"path": d, "name": "开关包"}, headers=H).json()["data"]["id"]
+
+    def new_profile_exts(name: str) -> list:
+        r = client.post("/api/v1/profiles", json={"name": name}, headers=H)
+        return r.json()["data"].get("extensions") or []
+
+    # ① 不设默认 → 新环境不带
+    client.post(f"/api/v1/packs/{pid_pack}/default", json={"enabled": False}, headers=H)
+    assert new_profile_exts("关-1") == []
+
+    # ② 设为默认 → 新环境自动带上（用户要的"默认就把插件数据带上"）
+    client.post(f"/api/v1/packs/{pid_pack}/default", json={"enabled": True}, headers=H)
+    on = new_profile_exts("开-1")
+    assert on, "设为默认后新环境没带上扩展"
+
+    # ③ 再取消 → 又回到没有（用户要的"当然也可以选择关闭"）
+    client.post(f"/api/v1/packs/{pid_pack}/default", json={"enabled": False}, headers=H)
+    assert new_profile_exts("关-2") == []

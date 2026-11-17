@@ -612,3 +612,6 @@ def test_apply_works_when_profile_has_no_engine_path(tmp_path, monkeypatch):
     finally:
         config.reset_settings()
         db.reset_db()
+
+
+# ── "默认带上插件数据 + 可以关掉" 这个开关（0.7.43）────────

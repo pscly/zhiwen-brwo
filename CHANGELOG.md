@@ -1,5 +1,37 @@
 # CHANGELOG
 
+## 0.7.43 — 2026-11-18
+
+**把"默认带上插件数据、也可以关掉"这个开关做成端到端验证。**
+
+### 用户要求（原话）
+
+> 这样以后创建浏览器时，可以默认就把这些插件的数据都带上（**当然也可以选择关闭**）
+
+对应的实现其实早就有（`packs.set_default()` + `apply_default_packs()`），
+但**只有单元级覆盖，没有"新建一个环境到底带没带"的验证** ——
+也就是说开关"看起来"存在，没人真的开一遍关一遍。
+
+### 这轮实测
+
+```
+① 不设 is_default            → 新环境 extensions: []
+② 设为默认                    → 新环境 extensions: ['swext']    ← 用户要的"默认带上"
+③ 再取消默认                  → 新环境 extensions: []           ← 用户要的"也可以关闭"
+④ ZW_DEFAULT_PACKS=false + 包标默认 → 新环境 extensions: []      ← 全局开关也生效
+```
+
+两个开关都确认有效：**每个包**的 `is_default` 和**全局**的 `ZW_DEFAULT_PACKS`。
+
+### 测试
+
+578 → **579 项**。新增 `test_default_pack_toggle_on_off_affects_new_profiles`：
+真起 core，导入一个包，开→关→再开，每次新建环境并断言 `extensions` 的实际内容。
+
+> 这是第三次因为 `client` fixture 只在 `tests/test_api_smoke.py` 里而返工了
+> （前两次是 manifest 端点和 stop 的 remembered 字段）。已经养成习惯：
+> 要写用到 `client` 的测试，直接写进那个文件。
+
 ## 0.7.42 — 2026-11-18
 
 **发版流程不再被一个平台的 runner 故障堵死（但不悄悄少发平台）。**
