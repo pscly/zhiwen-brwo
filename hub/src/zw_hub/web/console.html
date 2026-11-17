@@ -1220,7 +1220,9 @@ function fillCard(card, dev){
   else if (pending) bg.push('<span class="badge warn">等待授权</span>');
   else if (online) bg.push('<span class="badge ok">在线</span>');
   else bg.push('<span class="badge">离线</span>');
-  // 终端通道是否就绪：设备最近有没有来拉命令。用户抱怨"下发没反应"时，
+  // 实时通道（WS）：连上就能边跑边出字，且 cd 保持
+  if (dev.realtime === true) bg.push('<span class="badge ok" title="WebSocket 实时通道已连上（输出边产生边显示）">实时</span>');
+  // 队列通道：设备有没有来拉命令。用户抱怨"下发没反应"时，
   // 这个徽章能立刻区分"设备没在拉"还是"命令本身有问题"。
   if (dev.shell_enabled === true && dev.shell_polling === true)
     bg.push('<span class="badge ok">终端就绪</span>');

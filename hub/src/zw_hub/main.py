@@ -740,6 +740,9 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
             # 终端是否就绪：设备最近有没有来拉过命令
             "shell_last_poll_ago": shell_poll_age(d.get("device_id", "")),
             "shell_polling": _shell_polling(d.get("device_id", "")),
+            # 实时通道（WebSocket）是否连着 —— 和上面的"在拉队列"是两回事。
+            # 控制台据此显示「实时」还是「队列」，AI 也能据此判断要不要走 WS。
+            "realtime": term_relay().online(d.get("device_id", "")),
             "browsers": browsers,
         })
 
