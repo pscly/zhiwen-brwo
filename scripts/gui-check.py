@@ -135,8 +135,12 @@ def main() -> int:
         t = tk.Tk()
         t.withdraw()
         theme = gp.Theme()
+        # 字体键必须和 gui.py 里 `_build_style()` 返回的一致：
+        # body / small / tiny / title / bold / big / mono。
+        # 第一版我用了 base/head（并不存在）、漏了 body —— 结果点「代理」时
+        # ProxyOverlay 里 `fonts["body"]` 直接 KeyError，看起来像产品坏了。
         fonts = {k: ("TkDefaultFont", 9) for k in
-                 ("tiny", "bold", "small", "base", "mono", "title", "head")}
+                 ("body", "small", "tiny", "title", "bold", "big", "mono")}
         api = gp.CoreApi(port=port)
         logs: list[str] = []
 
@@ -182,6 +186,42 @@ def main() -> int:
         check("停止态的行显示「启动」（不是「停止」）",
               any("启动" in b for b in btns) and not any(b.strip() == "停止" for b in btns),
               str(btns))
+
+        # ── 真改一次代理（用户明确要求"创建完浏览器之后还可以改代理"）──
+        print("\n— 改代理（真点按钮 → 浮层 → 保存）—")
+        row_with_proxy = None
+        for r in _rows_of(panel):
+            if "66.80.12.66" in _row_text(r):
+                row_with_proxy = r
+                break
+        check("找到带代理的那一行", row_with_proxy is not None)
+        if row_with_proxy is not None:
+            btn = _find_button(row_with_proxy, "代理")
+            check("行里有可点的「代理」按钮", btn is not None)
+            if btn is not None:
+                btn.invoke()
+                t.update()
+                ov = getattr(panel, "_overlay", None)
+                check("点「代理」弹出浮层", ov is not None and ov.is_open())
+                if ov is not None:
+                    # 换成另一条（带认证、无认证各测一次更贵，这里换一条不带认证的）
+                    new_raw = "socks5://9.9.9.9:1080"
+                    ov.on_save(new_raw)
+                    _drive_until(t, lambda: not ov.is_open(), timeout=25.0)
+                    after = [p for p in c.get("/profiles").json()["data"]["profiles"]
+                             if p["name"] == "带代理的环境"][0]
+                    spec = c.get("/proxies").json()["data"]["proxies"]
+                    hit = [x for x in spec if x["host"] == "9.9.9.9"]
+                    check("改代理真的写进了库（9.9.9.9 在库里）", bool(hit),
+                          str([x["host"] for x in spec])[:160])
+                    check("环境已指向新代理", str(after.get("proxy_id") or "") != "",
+                          str(after.get("proxy_id")))
+                    # 行要刷新出新地址，而不是还显示旧的
+                    _drive_until(t, lambda: "9.9.9.9" in " ".join(
+                        _row_text(r) for r in _rows_of(panel)), on_tick=lambda: panel.refresh(force=True),
+                        timeout=25.0)
+                    joined2 = " ".join(_row_text(r) for r in _rows_of(panel))
+                    check("界面上的代理已更新为新地址", "9.9.9.9" in joined2, joined2[:200])
 
         print("\n— 扩展包面板 —")
         packs = gp.PacksOverlay(t, theme, fonts, api=api,
@@ -323,6 +363,23 @@ def _roots_of(widget) -> list:
     if root is not None and hasattr(root, "winfo_children"):
         roots.append(root)
     return roots
+
+
+def _find_button(widget, want: str):
+    """在控件树里找一个文字包含 `want` 的按钮。"""
+    stack = [widget]
+    while stack:
+        w = stack.pop()
+        try:
+            if w.winfo_class() in ("TButton", "Button") and want in str(w.cget("text")):
+                return w
+        except Exception:
+            pass
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+    return None
 
 
 def _button_texts(widget) -> list[str]:
