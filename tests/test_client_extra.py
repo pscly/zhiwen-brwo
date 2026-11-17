@@ -505,3 +505,54 @@ def test_mcp_reports_missing_args_readably():
         if "KeyError" in txt or "TypeError" in txt:
             raw.append(tools[rid - 100]["name"])
     assert not raw, f"这些工具少参数时报裸异常：{raw}"
+
+
+def test_client_entrypoint_forwards_cli_subcommands(monkeypatch, capsys):
+    """单文件产物的入口是 `client.py`，它必须把 CLI 子命令转交给 `cli.py`。
+
+    真踩过：PyInstaller 的入口是 `client.py`（GUI），不是 `cli.py`。
+    于是 `zhiwen-client serve` **根本不生效** —— `serve` 被当成多余参数忽略，
+    程序照样去起图形界面，在没有显示器的服务器上直接
+
+        TclError: no display name and no $DISPLAY environment variable
+
+    而 README 与 docs 里写的是 `zw serve`。这是"用已发布产物跑 e2e"时发现的：
+    产物版 core 在 8850 端口只有 Connection refused。
+    """
+    from zw_core import client as clientmod
+
+    called = {"cli": 0}
+
+    def fake_cli_main():
+        called["cli"] += 1
+
+    monkeypatch.setattr("zw_core.cli.main", fake_cli_main, raising=False)
+    monkeypatch.setattr("zw_core.console.setup_console", lambda: None)
+    monkeypatch.setattr(clientmod, "setup_console", lambda: None, raising=False)
+    monkeypatch.setattr(clientmod.sys, "argv", ["zhiwen-client", "serve"])
+    # 不要让真去起服务
+    rc = clientmod.main()
+    assert called["cli"] == 1, "serve 没有被转交给 cli.main()"
+    assert rc == 0
+
+
+def test_client_entrypoint_explains_missing_display(monkeypatch, capsys):
+    """没有图形环境时不能只抛 TclError，要告诉用户该用哪个子命令。"""
+    import sys as _sys
+
+    from zw_core import client as clientmod
+
+    if _sys.platform == "win32":
+        import pytest as _pytest
+
+        _pytest.skip("这条只在 POSIX 有意义")
+    monkeypatch.setattr("zw_core.console.setup_console", lambda: None)
+    monkeypatch.setattr(clientmod, "setup_console", lambda: None, raising=False)
+    monkeypatch.setattr(clientmod.sys, "argv", ["zhiwen-client"])   # 不带任何子命令
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+    rc = clientmod.main()
+    assert rc == 2, f"应当给出可操作提示并以 2 退出，实际 {rc}"
+    err = capsys.readouterr().err
+    assert "serve" in err and "--selftest" in err, err

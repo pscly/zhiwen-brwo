@@ -1140,6 +1140,40 @@ def main() -> int:
     setup_console()
     if "--selftest" in sys.argv:
         return selftest()
+
+    # ── 子命令转交（打包成单文件后 entrypoint 是 **client.py**，不是 cli.py）
+    #
+    # 于是 `zhiwen-client serve` 这种写法以前**根本不生效**：`serve` 被当成多余
+    # 参数忽略，程序照样去起图形界面 —— 在没有显示器的服务器上直接
+    # `TclError: no display name` 崩掉。而 README 与 docs 里写的是 `zw serve`。
+    #
+    # 这里把已知的 CLI 子命令转给 `cli.main()`，让单文件产物也能当服务端用。
+    _CLI_SUBCOMMANDS = {
+        "serve", "mcp", "doctor", "stats", "manifest", "meta", "events", "shell",
+        "shell-status", "audit", "trim", "cleanup", "reap", "profile", "cookie",
+        "sync", "proxy", "page", "extension",
+    }
+    if len(sys.argv) > 1 and sys.argv[1] in _CLI_SUBCOMMANDS:
+        from zw_core.cli import main as cli_main
+
+        # `cli.main()` 自己读 `sys.argv`，所以**不能**传参进去；
+        # 这里只想在它返回后统一成退出码。
+        cli_main()
+        return 0
+
+    # 无图形环境时不要抛 TclError 了事：直接告诉用户该用哪个子命令。
+    if sys.platform != "win32" and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        print(
+            f"{APP_NAME}：当前没有图形环境（DISPLAY / WAYLAND_DISPLAY 都没设），\n"
+            "桌面客户端起不来。要在这台机器上跑服务端，用：\n"
+            f"  {Path(sys.argv[0]).name} serve          # 起 core（控制台 + API + 网关）\n"
+            f"  {Path(sys.argv[0]).name} --help         # 看所有子命令\n"
+            f"  {Path(sys.argv[0]).name} --selftest     # 只做自检",
+            file=sys.stderr,
+        )
+        return 2
     try:
         return run_gui()
     except SystemExit:

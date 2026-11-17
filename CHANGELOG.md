@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## 0.7.51 — 2026-11-18
+
+**单文件产物里 `zhiwen-client serve` 根本不生效 —— 在无显示器的服务器上直接崩。**
+
+### 怎么发现的
+
+上一轮做了 `verify-release.sh`（下载已发布产物跑自检）。这轮进一步：
+**拿已发布的产物当用户的机器跑完整 e2e**（不是源码，是那个二进制）。结果：
+
+```
+产物版 core → 000
+❌ 服务未就绪：{'code': 'UNREACHABLE', 'message': '[Errno 111] Connection refused'}
+```
+
+看它的日志：
+
+```
+知纹 客户端启动失败：TclError: no display name and no $DISPLAY environment variable
+```
+
+### 根因
+
+PyInstaller 的入口是 **`client.py`（GUI 客户端）**，不是 `cli.py`：
+
+```python
+a = Analysis([str(SRC / "zw_core" / "client.py")], …)
+```
+
+而 `client.py::main()` 只认 `--selftest`，其余参数一概忽略、直接去起图形界面。
+所以 `zhiwen-client serve` 里的 `serve` **从来没被解析过** ——
+在没有显示器的机器上必然 `TclError` 崩掉。
+
+**这是致命场景**：3.5 那台服务器没有桌面环境，`zw serve` 会直接崩。
+我这一路都在源码里跑（`python -m zw_core.cli serve`），完全看不出来。
+
+### 修法
+
+`client.py::main()` 里加两层：
+
+1. **识别 CLI 子命令并转交**：`serve` / `mcp` / `doctor` / `profile` / `proxy` /
+   `sync` / `extension` / … 共 19 个，命中就调 `cli.main()`。
+   单文件产物于是既能当桌面客户端，也能当服务端。
+2. **没有图形环境时给可操作的提示**，而不是抛 `TclError`：
+
+```
+知纹：当前没有图形环境（DISPLAY / WAYLAND_DISPLAY 都没设），
+桌面客户端起不来。要在这台机器上跑服务端，用：
+  zhiwen-client serve          # 起 core（控制台 + API + 网关）
+  zhiwen-client --help         # 看所有子命令
+  zhiwen-client --selftest     # 只做自检
+```
+
+### 实测
+
+```
+$ zhiwen-client serve   （源码形态下 sys.argv 模拟）
+INFO [zw.main] 监听 http://127.0.0.1:8851  数据目录 /tmp/srvtest
+INFO [uvicorn.error] Uvicorn running on http://127.0.0.1:8851
+```
+
+### 测试
+
+586 → **588 项**：`test_client_entrypoint_forwards_cli_subcommands`（serve 真的被转交）、
+`test_client_entrypoint_explains_missing_display`（无 DISPLAY 时给提示且退出码 2）。
+
+> 这一条是"验产物"才抓出来的 —— 源码层面怎么测都测不到，
+> 因为源码里我从来都是 `python -m zw_core.cli serve`。
+> 上一轮加的 `verify-release.sh` 立刻体现了价值。
+
 ## 0.7.50 — 2026-11-18
 
 **新增 `scripts/verify-release.sh`：验证**已发布产物**能不能跑 —— 并已实测通过。**
