@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## 0.7.28 — 2026-11-17
+
+**补齐接口文档：11 个接口从来没写进 `docs/04`，并加了"漏文档就红"的测试。**
+
+### 漏了什么
+
+AGENTS.md 的规矩是「加一个接口 → 文档 04 补一行」，但这条没人守。实际扫描发现
+**11 个接口**文档里一条都没有：
+
+```
+/packs/import  /packs/{pack_id}  /packs/{pack_id}/default
+/profiles/{ref}/packs/apply  /profiles/{ref}/proxy
+/proxies/test  /proxies/test-many
+/shell/status  /shell/exec  /shell/enable  /term
+```
+
+也就是说：扩展包、改环境代理、代理检测、远程命令行、实时终端 —— 这些**用户会直接找**
+的能力，文档里查不到。
+
+### 补的内容
+
+- **扩展包一节**：三种来源（`from_profile` / `from_chrome` / `path`）、
+  `as_default` 语义，以及 `extensions_active` 到底是什么意思（配内核实测表）
+- **代理表**：`test` / `test-many` / `PUT /profiles/{ref}/proxy` / `hide` /
+  `sync` / 设备侧上报与拉取
+- **本机命令行与实时终端一节**：`shell/status|exec|enable`、`WS /api/v1/term`，
+  含消息形状与"不是 PTY"的限制
+- **扩展安装四来源**：`url` / `.crx` / 目录 / zip，以及 `make_pack` / `as_default`
+
+### 顺手修掉一处被实测推翻的旧说法
+
+文档原来写「知纹会自动生成一个 MV3 认证扩展来应答 `onAuthRequired`」——
+Chrome 137 起忽略 `--load-extension`（149/150/157 实测），那条路根本不通。
+改成实话：**真正生效的是本机中继**，扩展代码只在 `ZW_PROXY_RELAY=false` 时才会用到。
+
+### 新增测试 `test_every_public_route_is_documented`
+
+扫 `api.py` 里所有 `@app.<method>` 路由，逐个对 `docs/04`。以后再漏就 CI 红。
+（白名单只有 `/healthz`、`/metrics`、`/mcp`、`/ai/manifest` 这类内部路由。）
+
+### 测试
+
+555 → **556 项**。
+
 ## 0.7.27 — 2026-11-17
 
 **把新能力补进 MCP（28 → 33 个工具）与 AI 清单。**

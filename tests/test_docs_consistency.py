@@ -167,3 +167,42 @@ def test_hub_declares_every_third_party_import():
             if pkg not in declared:
                 missing.add(f"{name} (需要 {pkg}) ← {py.relative_to(root)}")
     assert not missing, "hub 用了未声明的依赖：\n" + "\n".join(sorted(missing))
+
+
+def test_every_public_route_is_documented():
+    """API 源码里注册的路由，必须在 docs/04-接口文档.md 里出现。
+
+    AGENTS.md 的规矩是"加一个接口 → 文档 04 补一行"。但这条规矩以前没人守：
+    0.7.14–0.7.27 之间加的 4 个接口（extensions/updates、proxies/sync、
+    proxies/{id}/hide、devices/proxies）文档里一条都没有 —— 用户和 AI 都查不到。
+
+    白名单：内部/调试用的路由不写文档（`/healthz`、`/metrics`、`/mcp`、`/`）。
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    api_src = (root / "core/src/zw_core/api.py").read_text(encoding="utf-8")
+    doc = (root / "docs/04-接口文档.md").read_text(encoding="utf-8")
+
+    # 抓 @app.<method>(f"{API_PREFIX}/xxx"...)
+    routes = set()
+    for m in re.finditer(r'@app\.(get|post|put|patch|delete|websocket)\(\s*f?"\{API_PREFIX\}(/[^"]*)"', api_src):
+        path = m.group(2)
+        if not path:
+            continue
+        # 源码里 f-string 用 `{{ref}}` 表示字面量花括号，先还原成单个
+        path = path.replace("{{", "{").replace("}}", "}")
+        routes.add(path)
+
+    skip = {"/healthz", "/metrics", "/mcp", "/ai/manifest"}
+    missing = []
+    for path in sorted(routes):
+        if path in skip:
+            continue
+        # 文档里把 {ref}/{id} 写成字面量即可，做宽松匹配
+        probe = re.sub(r"\{[a-z_]+\}", "{", path).rstrip("/")
+        doc_norm = re.sub(r"\{[a-z_]+\}", "{", doc)
+        if probe not in doc_norm:
+            missing.append(path)
+    assert not missing, "这些接口没写进 docs/04：\n" + "\n".join(missing)
