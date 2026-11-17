@@ -92,8 +92,13 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 **提交前必须做**（一条命令跑完全部七项，会自己配好前提条件）：
 
 ```bash
-bash scripts/check-all.sh          # 全绿才算可交付；末尾会给一张总表
+bash scripts/check-all.sh                 # 工作区代码：七项全绿才算可交付（末尾给总表）
+bash scripts/verify-release.sh v0.8.0     # 发布后：**下载产物本身**跑它的 --selftest
 ```
+
+> 第二个别省。`check-all.sh` 验的是源码，用户拿到的是 Releases 上的二进制 ——
+> 打包环节出问题（缺库、glibc 版本、路径写错）源码测试完全看不出来。
+> 历史上踩过：ubuntu-latest 打出来的包要求 GLIBC_2.42，在 Ubuntu 22 上直接跑不起来。
 
 想逐项跑（排错时用）：
 
@@ -129,7 +134,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - 586 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、75 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.49** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- hub **0.7.50** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）

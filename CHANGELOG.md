@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## 0.7.50 — 2026-11-18
+
+**新增 `scripts/verify-release.sh`：验证**已发布产物**能不能跑 —— 并已实测通过。**
+
+### 为什么加这个
+
+`check-all.sh` 验的是**工作区里的源码**。但用户下载到的是 GitHub Releases 上的
+二进制 —— 打包环节出问题（缺库、glibc 版本、路径写错）在源码测试里**完全看不出来**。
+
+历史上就踩过：`ubuntu-latest`（glibc 2.42）打出来的包在 Debian/Ubuntu 22/24 上
+直接报 `libtcl8.6.so: version GLIBC_2.42 not found`。那次是靠人工发现的。
+
+### 这轮实测（v0.7.49 的真实产物）
+
+下载 → 校验大小 → 跑它自己的 `--selftest`：
+
+```
+✅ 下载完整：50786968 字节
+  OK    zw_core 导入: 0.7.49
+  OK    FastAPI/uvicorn: ('0.163.2', '0.54.0')
+  OK    AEAD（pynacl）: 往返一致
+  OK    控制台页面: 196885 字符
+  OK    core 应用可构建: 81 条路由
+  OK    本机服务可启动（无控制台）: 无控制台环境下启动成功（端口 37149）
+  OK    远程命令行执行器: /bin/sh 可用，1ms
+  OK    安装路径为纯英文
+  OK    配置目录可写 / 机器码生成 / 地址规范化
+  全部 14 项通过
+✅ 发布产物自检通过
+```
+
+这比"源码测试全绿"更接近交付真相：**用户会下载到的那个文件，自己说它没问题。**
+
+### 用法
+
+```bash
+bash scripts/verify-release.sh            # 验最新 release
+bash scripts/verify-release.sh v0.7.49    # 验指定 tag
+SKIP_DOWNLOAD=1 bash scripts/verify-release.sh v0.7.49   # 复用已下好的
+```
+
+只验**当前平台**能跑的那个资产；Windows/macOS 的包需要在对应系统上跑，
+脚本会明确说"本平台不适用"，不会假装验过。
+
+`AGENTS.md` 的交付清单已加上这一条，并写清为什么不能省。
+
+### 顺带确认
+
+hub 侧的异常覆盖也是完整的：4 个自定义异常里 3 个有全局处理器，`ProxyError`
+是在每个路由里内联捕获的（逐条查过，唯一没包 try 的 `list_all()` 只读
+`has_password`、不解密，不会抛）；`device_pull_proxies` 对 `secret_of`
+是**按条**兜底的 —— 密钥换了会降级成 `secret_error` 而不是整次同步 500。
+
+### 测试
+
+仍是 586 项（这轮只加脚本与文档），七个门槛全绿。
+
 ## 0.7.49 — 2026-11-18
 
 **5 类业务异常没被接住，全都会冒成 500 + 原始 traceback。**
