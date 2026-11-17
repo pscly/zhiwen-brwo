@@ -1,5 +1,44 @@
 # CHANGELOG
 
+## 0.7.20 — 2026-11-17
+
+**把"商店链接装扩展"的整条链路验到底（真浏览器里插件真的跑起来）。**
+
+### 终点判据
+
+0.7.19 证明了"装完会建包、新建环境会带上"，但没证明**插件在浏览器里真的执行**。
+这次补上，并且固化成集成测试：
+
+```
+装 CRX → 自动建包 → 设默认 → 新建环境（extensions 含 slug）
+      → 启动（命令行带 --load-extension=<库路径>）
+      → CDP 打开页面 → 内容脚本留下标记
+```
+
+实测输出：
+
+```
+slug=cookiemanager ver=1.2.3 建包=True 默认=True
+profiles.extensions = ['cookiemanager']
+--load-extension=/tmp/storechain/extensions/cookiemanager-1.2.3
+页面标记 data-store-installed = 'YES'
+✅ 全链路通
+```
+
+集成测试 `test_installed_extension_actually_runs_in_browser` 会自己找一个
+**真的能加载扩展的内核**（探测 `extensions_loadable`）；找不到就 skip，
+所以官方 Chrome 的 CI 上不会误红。
+
+### 还差哪一步没走真网络
+
+只有"从 Google 下载 CRX"这一段。那一段已单独在云电脑上验证过：
+真实下到 cookiemanager 的 164717 字节 CRX，`Cr24 / ver=3 / header_len=1310 / ZIP@1322`。
+所以链路两端都有证据，中间的逻辑由本地 CRX 覆盖。
+
+### 测试
+
+546 → **547 项**。
+
 ## 0.7.19 — 2026-11-17
 
 **把"商店链接装扩展"接成完整链路，并搬上界面。**

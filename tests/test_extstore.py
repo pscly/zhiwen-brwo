@@ -288,3 +288,103 @@ def test_pack_creation_failure_does_not_lose_the_extension(home, tmp_path, monke
     assert r["pack_created"] is False
     assert "disk full" in r.get("pack_error", "")
     assert Path(r["path"], "manifest.json").is_file(), "扩展本体不能丢"
+
+
+# ── 真浏览器集成（需要支持 --load-extension 的内核，CI 上跳过）──
+def _loadable_engine():
+    """找一个真的能加载扩展的内核（官方 Chrome 137+ 不行，ungoogled 可以）。"""
+    import shutil
+
+    cands = [
+        "/opt/bsm-p0/ungoogled-chromium-150.0.7871.186-1-x86_64_linux/chrome",
+        shutil.which("ungoogled-chromium") or "",
+        shutil.which("chromium") or "",
+    ]
+    from zw_core.services import engines
+
+    for c in cands:
+        if not c or not Path(c).exists():
+            continue
+        ok, _why = engines.extensions_loadable(Path(c))
+        if ok:
+            return c
+    return ""
+
+
+def test_installed_extension_actually_runs_in_browser(home, tmp_path):
+    """装进来的扩展要在**真浏览器**里真的跑起来。
+
+    这条是整条链路的终点判据：CRX 安装 → 建包 → 设默认 → 新建环境 → 内容脚本执行。
+    只断言"文件在磁盘上"是不够的——用户要的是"插件能用"。
+
+    没有支持 --load-extension 的内核时跳过（官方 Chrome 137+ 会明确不加载）。
+    """
+    import json as _json
+    import time as _time
+    import urllib.request
+
+    import pytest as _pytest
+
+    engine = _loadable_engine()
+    if not engine:
+        _pytest.skip("这台机器上没有能加载扩展的内核（官方 Chrome 137+ 不支持）")
+
+    from zw_core import config as _cfg
+    from zw_core.services import extstore as _es, manager as _mgr
+
+    crx = tmp_path / "real.crx"
+    crx.write_bytes(_crx3(_zip({
+        "manifest.json": _json.dumps({
+            "manifest_version": 3, "name": "Runner", "version": "1.0",
+            "content_scripts": [{"matches": ["<all_urls>"], "js": ["cs.js"],
+                                 "run_at": "document_end"}],
+        }).encode(),
+        "cs.js": b"document.documentElement.setAttribute('data-zw-run','OK');",
+    })))
+    import os as _os
+
+    _os.environ["ZW_CHROME_BIN"] = engine
+    _cfg.reset_settings()
+
+    r = _es.install(crx_path=str(crx), as_default=True)
+    assert r["pack_created"] and r["is_default"]
+
+    prof = _mgr.create_profile({"name": "runner"})
+    assert "runner" in (_mgr.get_profile(prof["id"]).get("extensions") or [])
+
+    res = _mgr.start(prof["id"])
+    port = (res.get("local") or {}).get("port")
+    assert port, res
+    try:
+        for _ in range(60):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2)
+                break
+            except Exception:
+                _time.sleep(0.4)
+        _time.sleep(3)
+        targets = _json.load(urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/list", timeout=3))
+        pages = [t for t in targets if t.get("type") == "page"]
+        assert pages, targets
+
+        import websockets.sync.client as _wsc
+
+        with _wsc.connect(pages[0]["webSocketDebuggerUrl"]) as ws:
+            ws.send(_json.dumps({"id": 1, "method": "Page.navigate",
+                                 "params": {"url": "https://example.com/"}}))
+            _time.sleep(5)
+            ws.send(_json.dumps({"id": 2, "method": "Runtime.evaluate",
+                                 "params": {"expression":
+                                     "document.documentElement.getAttribute('data-zw-run')",
+                                     "returnByValue": True}}))
+            got = _json.loads(ws.recv())
+            while got.get("id") != 2:
+                got = _json.loads(ws.recv())
+            marker = got.get("result", {}).get("result", {}).get("value")
+        assert marker == "OK", f"插件没在页面里生效：{marker!r}"
+    finally:
+        try:
+            _mgr.stop(prof["id"], force=True)
+        except Exception:
+            pass
