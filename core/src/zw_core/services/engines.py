@@ -410,7 +410,15 @@ def build_cmdline(
         # 上游地址里绝不能带凭据：Chromium 会把它当成主机名的一部分而连不上。
         # 带凭据的代理改走本机中继（见 services/proxyrelay.py 顶部：
         # Chrome 149 已忽略 --load-extension，扩展那条路会静默失效）。
-        args.append(f"--proxy-server={_proxy_server_for(profile, proxy)}")
+        server = _proxy_server_for(profile, proxy)
+        args.append(f"--proxy-server={server}")
+        # 把"其实指向本机中继"这件事回填给调用方：界面上那条 warning 要说真话
+        # （旧文案说"通过内置认证扩展生效"，而扩展在 137+ 根本没被加载）。
+        if server.startswith("http://127.0.0.1:"):
+            try:
+                profile["_proxy_relay_port"] = int(server.rsplit(":", 1)[1])
+            except (ValueError, IndexError):
+                pass
 
     if profile.get("window_w") and profile.get("window_h"):
         args.append(f"--window-size={int(profile['window_w'])},{int(profile['window_h'])}")

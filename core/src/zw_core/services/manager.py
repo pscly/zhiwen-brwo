@@ -665,8 +665,15 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
     }
     if row.get("_extension_warnings"):
         out["warnings"] = row["_extension_warnings"]
-    if row.get("_proxy_auth"):
-        out.setdefault("warnings", []).append("该环境的代理带用户名密码，已通过内置认证扩展生效（不是命令行参数）")
+    if row.get("_proxy_relay_port"):
+        # 这条文案必须是"实际发生了什么"，不能沿用旧说法。
+        # 旧文案说"通过内置认证扩展生效" —— Chrome 137+ 已忽略 --load-extension
+        # （149/150/157 三种内核实测），那个扩展根本没被加载；
+        # 真正替浏览器补凭据的是**本机中继**。说错会让人误以为出问题时要去看扩展。
+        out.setdefault("warnings", []).append(
+            f"该环境的代理带用户名密码：浏览器连的是本机中继 127.0.0.1:{row['_proxy_relay_port']}，"
+            "由中继代填凭据后转发到真实代理（不是命令行参数，也不依赖浏览器扩展）"
+        )
     return out
 
 

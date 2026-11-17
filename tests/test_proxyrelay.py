@@ -724,3 +724,39 @@ def test_stop_releases_port(http_upstream, relay) -> None:
     assert srv.alive is False
     # 重复 stop 是幂等的（manager 里可能被调用多次）
     srv.stop()
+
+
+def test_authed_proxy_warning_names_the_relay_not_the_extension():
+    """启动返回的 warning 必须说真话：走的是本机中继，不是浏览器扩展。
+
+    旧文案是"已通过内置认证扩展生效" —— 但 Chrome 137+ 忽略 --load-extension
+    （149/150/157 三种内核实测），扩展根本没加载。用户照着这条去排查扩展，
+    只会白费时间。真正替浏览器补凭据的是 proxyrelay。
+    """
+    import os as _os
+
+    from zw_core import config as _cfg
+    from zw_core.services import engines
+    from zw_core.services.proxy import parse_proxy
+
+    snapshot = {k: _os.environ.get(k) for k in ("ZW_ROOT", "ZW_PROXY_RELAY")}
+    _os.environ["ZW_ROOT"] = "/tmp/zw-relay-warn"
+    _os.environ["ZW_PROXY_RELAY"] = "true"
+    _cfg.reset_settings()
+    try:
+        spec = parse_proxy("socks5://user:pw@127.0.0.1:1080")
+        row = {"id": "warn-test", "name": "w", "_proxy_spec": spec,
+               "proxy": spec.upstream, "extensions": []}
+        from pathlib import Path
+
+        # build_cmdline 只用到 chrome 路径拼命令行，不会真的启动它，随便给个存在的文件
+        engines.build_cmdline(Path("/bin/true"), Path("/tmp/udd"), 19999, row, extra_args=[])
+        rel = row.get("_proxy_relay_port")
+        assert isinstance(rel, int) and rel > 0, f"没回填中继端口：{row}"
+    finally:
+        for k, v in snapshot.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+        _cfg.reset_settings()
