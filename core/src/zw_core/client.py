@@ -731,12 +731,37 @@ def run_gui() -> int:
 
 
 def run_cli() -> int:
-    """没有图形界面时的兜底：交互式问答。"""
+    """没有图形界面时的兜底：交互式问答。
+
+    ## 非交互环境要优雅退出
+
+    这条路径会在"tkinter 加载失败"时被走到 —— 例如 Linux 产物在 glibc
+    比构建机旧的系统上运行（`libtcl8.6.so` 要求 GLIBC_2.42 之类的）。
+    此时如果直接 `input()`，stdin 不是 TTY 就抛 EOFError，用户看到的是
+    一个闪过的黑框加一堆栈，完全不知道发生了什么。
+
+    所以：读不到输入就打印**为什么**以及**怎么修**，然后返回非 0。
+    """
     from zw_core import __version__
 
     cfg = load_config()
     print(f"{APP_NAME} 客户端 v{__version__}")
     print(f"机器码：{ensure_device_id()}")
+    try:
+        interactive = bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        interactive = False
+    if not interactive:
+        print()
+        print("当前没有可用的图形界面，也没有可交互的终端，客户端无法继续。")
+        print("常见原因与解决办法：")
+        print("  1. 这台 Linux 的 glibc 比安装包构建机旧（tkinter 起不来）")
+        print("     → 用源码运行：uv pip install -e ./core && zw-client")
+        print("     → 或换用与系统匹配的包（我们按 Ubuntu 22.04 打 Linux 包）")
+        print("  2. 在纯命令行环境下运行：直接跑 `zw serve` 起服务，再用浏览器开控制台")
+        print()
+        print(f"诊断：跑一次 `{Path(sys.argv[0]).name} --selftest` 看是哪一项不满足")
+        return 3
     raw = input("服务器地址（例如 192.168.3.5:8700）：").strip() or cfg.get("server", "")
     base = normalize_server(raw)
     if not base:
@@ -1032,7 +1057,29 @@ def main() -> int:
     setup_console()
     if "--selftest" in sys.argv:
         return selftest()
-    return run_gui()
+    try:
+        return run_gui()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001  兜底：绝不把英文栈甩给用户
+        # 打包后的程序崩栈时只显示 "Failed to execute script"，用户完全懵。
+        # 这里给一句人话 + 一条自查命令；同时把详情写进配置目录，方便回传。
+        import traceback
+
+        detail = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
+        try:
+            (config_dir() / "crash.txt").write_text(detail, encoding="utf-8")
+        except OSError:
+            pass
+        msg = (
+            f"{APP_NAME} 客户端启动失败：{type(exc).__name__}: {exc}\n\n"
+            "请在本程序的目录里执行一次自检，把输出发给我们：\n"
+            f"  {Path(sys.argv[0]).name} --selftest\n\n"
+            f"详细堆栈已写入：{config_dir() / 'crash.txt'}"
+        )
+        print(msg, file=sys.stderr or sys.stdout)
+        _report_selftest([msg], 1, show_dialog=False)
+        return 1
 
 
 if __name__ == "__main__":

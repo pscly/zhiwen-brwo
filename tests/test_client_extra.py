@@ -270,3 +270,26 @@ def test_macos_autostart_plist_branch(home, monkeypatch, tmp_path):
     ok, msg = C.set_autostart(False)
     assert ok, msg
     assert not plist.exists()
+
+
+def test_run_cli_without_tty_exits_gracefully(home, monkeypatch, capsys):
+    """没有 TTY 时不能抛 EOFError —— 打包产物在 glibc 不匹配时就走这条路。
+
+    真实现场：Linux 包在旧 glibc 上 tkinter 加载失败 → 回退 CLI →
+    stdin 不是 TTY → `input()` 抛 EOFError → PyInstaller 打一句英文
+    "Failed to execute script"，用户完全不知道发生了什么。
+    """
+    import io
+    import sys as _sys
+
+    class NotATty(io.StringIO):
+        def isatty(self):
+            return False
+
+    monkeypatch.setattr(_sys, "stdin", NotATty(""))
+    code = C.run_cli()
+    out = capsys.readouterr()
+    assert code != 0
+    joined = out.out + out.err
+    assert "没有可用的图形界面" in joined or "没有可交互的终端" in joined
+    assert "selftest" in joined, "要告诉用户怎么自查"

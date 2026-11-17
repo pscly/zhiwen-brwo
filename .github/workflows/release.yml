@@ -41,7 +41,13 @@ jobs:
             label: Windows
             # 纯 ASCII：含中文的 artifact 名在多步传递中会被截断成 "-Windows.exe"
             artifact: zhiwen-client-Windows-x64.exe
-          - os: ubuntu-latest
+          # 固定在 22.04：PyInstaller 打出的 Linux 产物会把 glibc 相关库
+          # （含 libtcl/tk）一起带上，**构建机的 glibc 版本就是最低要求**。
+          # 用 ubuntu-latest（已到 26）打出来的包要求 GLIBC_2.42，
+          # 在 Debian/Ubuntu 22/24 上直接跑不起来（实测踩到：
+          # libtcl8.6.so: version GLIBC_2.42 not found）。
+          # 22.04 的 glibc 是 2.35，覆盖面最广。
+          - os: ubuntu-22.04
             label: Linux-x86_64
             artifact: zhiwen-client-Linux-x86_64
           - os: macos-latest
