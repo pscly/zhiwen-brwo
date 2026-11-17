@@ -744,11 +744,19 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
 
         try:
             # 引擎路径的解析统一走 engines.find_chrome()：
-            # 配置项叫 `chrome_bin`（不是 `engine_path`），profile 里那一列才是
+            # 配置项叫 `chrome_bin`（不是 `engine_path`），profile 里那一列才叫
             # `engine_path` 且可能为空 —— 我第一版写成 `s.engine_path`，
             # Windows 上 profile.engine_path 为空时直接 AttributeError。
-            bin_path = Path(str(p.get("engine_path") or "")) if p.get("engine_path") else _engines.find_chrome(s)
+            bin_path = Path(str(p["engine_path"])) if p.get("engine_path") else _engines.find_chrome(s)
             ext_ok, ext_note = _engines.extensions_loadable(bin_path)
+        except _engines.EngineError as exc:
+            # **找不到引擎**不是"判断出错"，它等价于"不知道这是哪个内核" ——
+            # 按"不能加载"告警，但文案要说清是版本未知，而不是把 EngineError
+            # 抖出来当主因（Windows CI 上就是这样：ZW_CHROME_BIN 指向 Linux 路径）。
+            ext_ok, ext_note = False, (
+                f"找不到浏览器可执行文件（{exc.message}），无法确认扩展会被加载；"
+                "扩展的代码与数据已带进这个环境，但浏览器可能不会加载它。"
+            )
         except Exception as exc:  # noqa: BLE001
             # 不能"出错就放行"：那正是"插件没加载但没人告警"的来源。
             ext_ok, ext_note = False, (

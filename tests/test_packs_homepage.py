@@ -551,8 +551,13 @@ def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):
     """
     from zw_core import config, db
 
+    import sys as _sys
+
     monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("ZW_CHROME_BIN", "/usr/bin/google-chrome")
+    # 用当前解释器当"存在的引擎路径"：Linux/macOS/Windows 都成立。
+    # 第一版写死 /usr/bin/google-chrome，Windows CI 上 find_chrome 直接抛
+    # EngineError，于是文案变成"判断出错"而不是真正的原因。
+    monkeypatch.setenv("ZW_CHROME_BIN", _sys.executable)
     config.reset_settings()
     db.reset_db()
     try:
@@ -588,8 +593,10 @@ def test_apply_works_when_profile_has_no_engine_path(tmp_path, monkeypatch):
     """
     from zw_core import config, db
 
+    import sys as _sys
+
     monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
-    monkeypatch.setenv("ZW_CHROME_BIN", "/usr/bin/google-chrome")
+    monkeypatch.setenv("ZW_CHROME_BIN", _sys.executable)
     config.reset_settings()
     db.reset_db()
     try:
