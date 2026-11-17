@@ -549,6 +549,7 @@ def test_connection_limit_rejects_and_counts() -> None:
             second.sendall(
                 b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
             )
+            head, rest = b"", b""
             try:
                 head, rest = _recv_head(second)
             except (ConnectionError, OSError) as exc:

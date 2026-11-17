@@ -280,3 +280,38 @@ def test_local_term_ws_rejects_bad_token_from_remote(tmp_path, monkeypatch):
         config.reset_settings()
         db.reset_db()
         apimod._LOCAL_SESSIONS = None
+
+
+# ── Windows 分支（本机跑不了 cmd，但关键字符串可以钉住）──────────
+def test_windows_session_wrapping_and_env(monkeypatch):
+    """Windows 的标记必须独立一行、用 %errorlevel%，且 PROMPT 为空。
+
+    这三条都是 CI 上真踩过的：
+    - 用 `!errorlevel!` 时 /v:on 没生效 → 标记原样输出 → 解析器一直等 →
+      表现是"命令跑完但界面卡在执行中"
+    - cmd 在管道模式下仍打提示符（`C:\\path>`），每跑一条命令多一行垃圾
+    """
+    from zw_core.services import session as S
+
+    monkeypatch.setattr(S.sys, "platform", "win32")
+    s = S.ShellSession("w", cwd="/tmp")
+    line = s._wrap("echo hello").decode()
+    assert line == f"echo hello\r\necho __ZW{s.token}_%errorlevel%__%CD%__\r\n", line
+    assert "!errorlevel!" not in line, "不能依赖延迟展开"
+    assert s._env().get("PROMPT") == "", "PROMPT 必须清空，否则输出里混提示符"
+    argv = [a.lower() for a in S._shell_argv()]
+    assert "/v:on" not in argv, "不再需要延迟展开"
+
+
+def test_windows_marker_is_parsed(monkeypatch):
+    from zw_core.services import session as S
+
+    monkeypatch.setattr(S.sys, "platform", "win32")
+    s = S.ShellSession("w2", cwd="/tmp")
+    got: list[str] = []
+    s.on_output = lambda d: got.append(d)
+    s.on_done = lambda rc, cwd, timed_out=False: got.append(f"<done {rc} {cwd}>")
+    s._consume(f"hello\r\n__ZW{s.token}_0__C:\\work__\r\n")
+    joined = "".join(got)
+    assert "hello\r\n" in joined
+    assert "<done 0 C:\\work>" in joined

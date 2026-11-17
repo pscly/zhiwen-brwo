@@ -183,6 +183,11 @@ class ShellSession:
         env["NO_COLOR"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        if sys.platform == "win32":
+            # **必须清空 PROMPT**：cmd 在管道模式下仍然会把提示符打到 stdout
+            # （`C:\Users\xxx>`），每跑完一条命令就多一行垃圾。
+            # `/q` 只关命令回显，管不了提示符。清空后输出才是干净的命令结果。
+            env["PROMPT"] = ""
         return env
 
     def close(self) -> None:
