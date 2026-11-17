@@ -1,5 +1,48 @@
 # CHANGELOG
 
+## 0.7.15 — 2026-11-17
+
+**修一个只在真实服务器上才会炸的依赖缺失。**
+
+### 事故
+
+0.7.14 的代理库在本地测试全绿，但部署到 3.5 后 `/v1/proxies` 直接 500：
+
+```json
+{"ok":false,"code":"INTERNAL","message":"ModuleNotFoundError: No module named 'nacl'"}
+```
+
+原因：代理库用 PyNaCl 做密码加密，而 **PyNaCl 是 core 的依赖，不是 hub 的**。
+本地 venv 里因为装了 core 所以有，hub 镜像只装 hub 自己的依赖 → 那里没有。
+本地测试因此完全测不出来。
+
+### 修法
+
+1. `hub/pyproject.toml` 加上 `pynacl>=1.5,<2`
+2. `hub/Dockerfile` 的构建期依赖自检里加上 `nacl` ——
+   缺依赖时**构建阶段就失败**，不要等容器起来在运行期 500
+3. 新增测试 `test_hub_declares_every_third_party_import`：
+   扫 hub 源码的所有第三方 `import`，逐个对 pyproject 的 `dependencies`。
+   以后再有人"本地装了就用"，CI 会直接红。
+
+> 顺手记一个写测试时的坑：第一版按 `dependencies = [` + `]` 手撕 toml，
+> 被 `"uvicorn[standard]>=..."` 里的方括号截断，误报 pydantic 未声明。
+> 改用 `tomllib` 正经解析。
+
+### 真机验证（3.5，部署后）
+
+```
+GET  /v1/proxies                     → 200，空库
+POST /v1/proxies（链式，scheme 填 socks5://）→ socks5://cf1b481103@66.80.12.66:20000 hop=http://127.0.0.1:21080
+POST /v1/proxies/1/hide {hidden:true} → 默认列表 0 条，include_hidden=1 时 1 条
+POST .../hide {hidden:false}          → 恢复显示
+响应里 grep 密码                        → 0 次（明文不外泄）
+```
+
+### 测试
+
+514 → **515 项**。
+
 ## 0.7.14 — 2026-11-17
 
 **代理库变成服务器与用户机共享的一份**（新增需求）。

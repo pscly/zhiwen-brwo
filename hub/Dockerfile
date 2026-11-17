@@ -28,10 +28,14 @@ COPY pyproject.toml ./
 COPY README.md ./
 COPY src ./src
 
+# 依赖自检里带上 nacl：代理库的密码加密用到它，
+# 曾经因为"本地 venv 有、镜像里没有"导致 3.5 上 /v1/proxies 直接 500。
+# 构建阶段就 import 一次，缺了立刻失败，不要等运行期。
+#
 # 网络重试：构建机连 PyPI 偶发断流（实测 355 秒后 BrokenPipe）。
 # 加 retries/timeout 让构建更稳，但**失败必须是失败**，不能静默跳过。
 RUN pip install --no-cache-dir --retries 5 --timeout 60 . \
- && python -c "import fastapi, uvicorn, pydantic; print('deps ok:', fastapi.__version__)"
+ && python -c "import fastapi, uvicorn, pydantic, nacl; print('deps ok:', fastapi.__version__)"
 
 # 双保险：源码路径优先（改代码不用重装）
 ENV PYTHONPATH=/app/src

@@ -119,3 +119,51 @@ def test_ui_does_not_use_native_dialogs():
         # 允许 askText/confirmDanger 这类自定义实现里的同名片段，检查调用形式
         real = [h for h in hits if "function " not in code[max(0, h.start() - 30):h.start()]]
         assert not real, f"控制台用了原生 {fn}，应改自定义弹窗（见 askText / confirmDanger）"
+
+
+def test_hub_declares_every_third_party_import():
+    """hub 的依赖必须在 pyproject 里声明。
+
+    真踩过：代理库用 PyNaCl 加密密码，本地 venv 里装了 pynacl（core 依赖它），
+    所以本地测试全绿；但 hub 镜像只装 hub 自己的依赖 → 3.5 上 `/v1/proxies`
+    直接 500（`ModuleNotFoundError: No module named 'nacl'`）。
+    这条测试扫描 hub 源码的第三方 import，逐个对 pyproject 的 dependencies。
+    """
+    import re
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    hub_src = root / "hub" / "src" / "zw_hub"
+    # 用 tomllib 正经解析，别手撕字符串：
+    # `"uvicorn[standard]>=..."` 里带方括号，按 "]" 切会把后半段依赖全丢掉
+    # （第一版就是这么错的，报"pydantic 未声明"）。
+    import tomllib
+
+    meta = tomllib.loads((root / "hub" / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = set()
+    for spec in meta.get("project", {}).get("dependencies", []):
+        m = re.match(r"([A-Za-z0-9_.\-]+)", spec)
+        if m:
+            declared.add(m.group(1).lower())
+
+    # import 名 → 发行包名 的已知差异
+    alias = {"nacl": "pynacl", "jwt": "pyjwt", "yaml": "pyyaml", "dotenv": "python-dotenv"}
+    stdlib = set(sys.stdlib_module_names)
+    # 本项目自己的模块 + 明确可选的
+    local = {"zw_hub", "zw_core"}
+    optional = {"pytest", "httpx"}
+
+    missing: set[str] = set()
+    for py in hub_src.rglob("*.py"):
+        for line in py.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+            if not m:
+                continue
+            name = m.group(1)
+            if name in stdlib or name in local or name in optional or name.startswith("_"):
+                continue
+            pkg = alias.get(name, name).lower()
+            if pkg not in declared:
+                missing.add(f"{name} (需要 {pkg}) ← {py.relative_to(root)}")
+    assert not missing, "hub 用了未声明的依赖：\n" + "\n".join(sorted(missing))
