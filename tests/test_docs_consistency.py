@@ -229,3 +229,42 @@ def test_every_config_env_var_is_documented():
     assert len(envs) >= 40, f"只解析出 {len(envs)} 个变量，正则可能过时了"
     missing = [e for e in envs if e not in doc]
     assert not missing, "这些配置项没写进 docs/03：\n  " + "\n  ".join(missing)
+
+
+def test_no_dead_config_fields():
+    """`config.py` 里的配置字段，必须在**别处**真的被读过。
+
+    这条抓到过三个"声明了但没生效"的：
+      - `engine_autofetch`：注释说"缺内核时自动下载"，而自动下载**从未实现**
+      - `internal_token`：注释说"gateway ↔ core 内部令牌"，但网关鉴权只用
+        `admin_token` / `device_id`，没有任何地方读它
+      - `gw_public_base`：与真正生效的 `gateway_public_base` property 撞名，
+        两处并存只会让人改错一处
+
+    它们都已删除。文档漏写只是让人不知道；**死配置**是让人知道了也被骗，
+    而且会让排错时"我明明设了"变成一句假话。
+
+    豁免（合理存在、只在 config.py 内部或经 getattr 使用）：
+      - `force_token_on_public`：被 config 自己的 validator 读
+      - `shell_cwd`：经 `getattr(s, "shell_cwd")` 读取（grep 抓不到点号形式）
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    cfg = (root / "core/src/zw_core/config.py").read_text(encoding="utf-8")
+    fields = set(re.findall(
+        r"^\s{4}([a-z_][a-z0-9_]*)\s*:\s*[^=]+=\s*field\(", cfg, re.M))
+
+    others = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in list((root / "core/src").rglob("*.py")) + list((root / "hub/src").rglob("*.py"))
+        if p.name != "config.py")
+
+    exempt = {"force_token_on_public", "shell_cwd"}
+    dead = [f for f in sorted(fields)
+            if f not in exempt and not re.search(rf"\.{f}\b", others)]
+    assert not dead, (
+        "这些配置字段除 config.py 外没有任何地方读取（设了不生效）：\n  "
+        + "\n  ".join(dead)
+        + "\n要么接上实现，要么删掉并同步 docs/03。")

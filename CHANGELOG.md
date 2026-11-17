@@ -1,5 +1,53 @@
 # CHANGELOG
 
+## 0.7.47 — 2026-11-18
+
+**删掉三个"声明了但根本不生效"的配置项（比死开关更彻底：连语义都不成立）。**
+
+### 怎么找的
+
+上一轮修了 `ZW_ALLOW_ROOT` / `ZW_GATEWAY_ENABLED` 两个死开关。这轮改成**系统扫描**：
+把 `config.py` 里 53 个字段逐个查"除 config.py 外有没有任何代码读过它"。
+
+结果三个零引用：
+
+| 字段 | 注释声称的作用 | 真相 |
+|---|---|---|
+| `engine_autofetch` | 「找不到内核时允许自动下载」 | **自动下载从来没实现**。缺内核直接报 `ENGINE_NOT_FOUND` |
+| `internal_token` | 「gateway ↔ core 的内部令牌」 | 网关鉴权只用 `admin_token` / `device_id`（`api.py::require_auth`），**没有任何内部鉴权** |
+| `gw_public_base` | 对外网关地址 | 与真正生效的 `gateway_public_base` **property 撞名**，这个字段纯属多余 |
+
+### 为什么必须删而不是"补上实现"
+
+- 前两个要实现是**新功能**（自动下载二进制、内部鉴权），不在用户需求里，
+  留着开关只会让人以为"设了就有用"。
+- 第三个是**重复定义**：property 才是真相源，两处并存只会让人改错一处。
+
+### 处理
+
+- 三个字段删掉，原位留注释说明"这里曾经有什么、为什么删"
+- `gateway_public_base` property 改成直接读 `ZW_GATEWAY_PUBLIC_BASE`（唯一真相源）
+- `docs/03` 删掉 `ZW_ENGINE_AUTOFETCH` 和 `ZW_INTERNAL_TOKEN` 两行说明
+
+实测（显式配置 + 未配置两条路都验）：
+
+```
+显式 ZW_GATEWAY_PUBLIC_BASE=http://10.0.0.9:8730/ → 生效且去掉尾斜杠
+不配置                                          → 自动探测出 http://192.168.3.6:8730
+三个字段确实已不存在：engine_autofetch / gw_public_base / internal_token 全部 True
+```
+
+### 新增测试 `test_no_dead_config_fields`
+
+扫 `config.py` 的所有字段，逐个要求在**别处**被读过；零引用就红。
+豁免只有两个（`force_token_on_public` 被 config 自己的 validator 读、
+`shell_cwd` 经 `getattr` 读所以 grep 抓不到）。以后再有人加"声明了不生效"的
+配置项，CI 会直接拦住。
+
+### 测试
+
+582 → **583 项**，七个门槛全绿（583 / 73 / 13 / 20 / 75 / 23 / 32）。
+
 ## 0.7.46 — 2026-11-18
 
 **又抓到两个"死开关"：`ZW_ALLOW_ROOT` 和 `ZW_GATEWAY_ENABLED` 设了完全没效果。**

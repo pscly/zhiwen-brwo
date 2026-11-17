@@ -99,8 +99,9 @@ class Settings:
 
     # 管理令牌。留空 = 只允许本机回环且不校验（开发模式）
     admin_token: str = field(default_factory=lambda: _env("ZW_ADMIN_TOKEN", ""))
-    # 内部令牌：gateway ↔ core
-    internal_token: str = field(default_factory=lambda: _env("ZW_INTERNAL_TOKEN", ""))
+    # （这里曾经有个 `internal_token`：注释说"gateway ↔ core 的内部令牌"，
+    #   但**没有任何代码读它** —— 网关鉴权只用 `admin_token` / `device_id`
+    #   （见 api.py 的 require_auth）。已删除，避免让人以为存在内部鉴权。）
 
     # ── 引擎 ────────────────────────────────────────────
     engine_dir: Path = field(default_factory=lambda: Path(_env("ZW_ENGINE_DIR", "")) if _env("ZW_ENGINE_DIR") else Path(""))
@@ -117,8 +118,9 @@ class Settings:
     # 直接起不来（实测：本机 uid=0 时 21 个测试全红）。
     # 设成 **false** 才是"我拒绝以 root 跑浏览器"的显式选择。
     allow_root: bool = field(default_factory=lambda: _env_bool("ZW_ALLOW_ROOT", True))
-    # 找不到内核时是否允许"自动下载"（默认关闭：不想替用户从网络上拉二进制）
-    engine_autofetch: bool = field(default_factory=lambda: _env_bool("ZW_ENGINE_AUTOFETCH", False))
+    # （这里曾经有个 `engine_autofetch`：注释说"找不到内核时允许自动下载"，
+    #   但自动下载**从来没实现** —— 全项目零引用。留着就是骗人，已删除。
+    #   缺内核时直接报 `ENGINE_NOT_FOUND` 并提示设 ZW_CHROME_BIN。）
 
     # ── 远程命令行 ──────────────────────────────────────
     # 默认开启：用户要求"默认就能被服务器/网页调命令"，
@@ -175,7 +177,9 @@ class Settings:
 
     # ── 网关 ────────────────────────────────────────────
     gateway_enabled: bool = field(default_factory=lambda: _env_bool("ZW_GATEWAY_ENABLED", True))
-    gw_public_base: str = field(default_factory=lambda: _env("ZW_GATEWAY_PUBLIC_BASE", ""))
+    # 注意：这里**没有** `gw_public_base` 字段。真正生效的是下面的
+    # `gateway_public_base` property（它直接读 ZW_GATEWAY_PUBLIC_BASE 并做回落）。
+    # 曾经有个同名字段，除了制造"有两个配置、到底哪个生效"的困惑外毫无作用。
     # CDP 令牌默认有效期。900 秒（15 分钟）实测太短：一轮调试里反复取令牌，
     # 经常是"刚连上就过期"，报错还容易误判成代理/CDP 挂了。
     # 改 3600 秒（1 小时）——够一轮调试，又不至于长期有效。上限仍是 7200。
@@ -265,10 +269,6 @@ class Settings:
                 "已自动降级为只监听 127.0.0.1（避免把控制台暴露给全网段）"
             )
             self.host = "127.0.0.1"
-        if self.host not in ("127.0.0.1", "localhost", "::1") and not self.internal_token:
-            self.internal_token = self.admin_token  # 单机部署常见情形，网关与核心共用
-        if not self.internal_token:
-            self.internal_token = "dev-internal-token"
         return self
 
     @property
@@ -279,8 +279,11 @@ class Settings:
         所以优先用 ZW_GATEWAY_PUBLIC_BASE，其次用主机名解析出的局域网地址，
         最后才退回回环（只有本机可用，但这种情况下客户端本来也只在本机）。
         """
-        if self.gw_public_base:
-            return self.gw_public_base.rstrip("/")
+        # 直接读环境变量：这条 property 才是唯一真相源
+        # （以前还有个同名字段 `gw_public_base`，两处并存容易改错一处）
+        explicit = _env("ZW_GATEWAY_PUBLIC_BASE", "").strip()
+        if explicit:
+            return explicit.rstrip("/")
         if self.host in ("0.0.0.0", "::"):
             return f"http://{_lan_ip()}:{self.port}"
         return f"http://{self.host}:{self.port}"
