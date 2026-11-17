@@ -1423,8 +1423,19 @@ function renderMachines(){
 }
 
 /* ── 浏览器视图 ─────────────────────────────────────────────────────────── */
-function stateBadge(st){
+// `stale=true` 表示"这台机器现在离线，这个状态是它**最后一次上报**的"。
+//
+// 为什么必须区分：机器离线后设备清单（inventory）还是旧的，
+// 直接渲染就会出现"离线的机器下面挂着一个绿色 running" —— 用户以为
+// 还有东西在跑（实测：tianyiyuncd1 离线，控制台仍显示 running: 1）。
+// 状态本身没变，但**可信度变了**，必须让用户看出来。
+function stateBadge(st, stale){
   const s = String(st || '');
+  if (stale){
+    const label = s ? ('上次：' + s) : '上次状态未知';
+    return '<span class="badge" title="这台机器当前离线，显示的是它最后一次上报的状态">' +
+      '<i class="dot"></i>' + esc(label) + '</span>';
+  }
   if (s === 'running') return '<span class="badge ok"><i class="dot ok"></i>running</span>';
   if (s === 'stopped') return '<span class="badge"><i class="dot"></i>stopped</span>';
   if (s === 'starting' || s === 'stopping') return '<span class="badge warn"><i class="dot warn"></i>' + esc(s) + '</span>';
@@ -1467,7 +1478,7 @@ function renderBrowsers(){
       return '<tr>' +
         '<td><div class="cell-main">' + esc(b.name || b.id || '未命名环境') + '</div>' +
         '<div class="cell-sub">' + esc(b.id) + '</div></td>' +
-        '<td>' + stateBadge(b.state) + '</td>' +
+        '<td>' + stateBadge(b.state, !dev.online || dev.status === 'revoked') + '</td>' +
         '<td>' + (b.group ? '<span class="badge">' + esc(b.group) + '</span>' : '<span class="muted">—</span>') + '</td>' +
         '<td>' + proxyCell(b.proxy) + '</td>' +
         '<td>' + httpCell + '</td>' +

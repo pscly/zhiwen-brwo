@@ -79,8 +79,14 @@ const OVERVIEW = {
       device_id: B_ID, label: '云电脑', hostname: 'cloud-pc',
       platform: 'Windows', arch: 'AMD64', app_version: '0.4.2',
       status: 'active', online: false, last_seen_ago: 5400, last_ip: '10.0.0.9',
-      shell_enabled: false, profiles: 0, running: 0, max_running: 4,
-      disk_human: '', engine: '', core_base: '', core_reachable: null, browsers: [],
+      shell_enabled: false, profiles: 1, running: 1, max_running: 4,
+      disk_human: '', engine: '', core_base: '', core_reachable: null,
+      // 故意给一台**离线机器**挂一个 running 环境 —— 这是真实发生过的情形
+      // （tianyiyuncd1 离线，控制台仍显示 running: 1）。用来验状态是否标成「上次：…」。
+      browsers: [
+        { id: 'deadbeefdeadbeef', name: '留在离线的那个', state: 'running', group: '',
+          cdp_path: '/cdp/deadbeefdeadbeef' },
+      ],
     },
   ],
   events: [
@@ -414,12 +420,32 @@ function setupRoutes(page, opts){
     new URL(page.url()).hash === '#browsers' &&
     (await page.isVisible('#view-browsers')) && !(await page.isVisible('#view-machines')));
   check('按机器分组：两块 br-sec', (await page.locator('.br-sec').count()) === 2);
-  check('有清单的机器排出 2 行环境', (await page.locator('.br-sec table.tbl tbody tr').count()) === 2);
+  // 三台机器里有一台没上报清单，所以有清单的两台共排 3 行
+  // （第二台故意挂了 1 个 running 环境，用来验「离线机器的状态要标上次」）
+  check('有清单的机器排出 3 行环境',
+    (await page.locator('.br-sec table.tbl tbody tr').count()) === 3,
+    'rows=' + (await page.locator('.br-sec table.tbl tbody tr').count()));
   check('cdp_http 链接地址正确、可点击', (await page.locator('.br-sec a.link').first().getAttribute('href')) ===
     'http://192.168.3.6:8730/cdp/56c88eb236e54eef');
-  check('没有 inventory 的机器写明「客户端需 ≥0.5.0」',
-    (await page.locator('#view-browsers').textContent()).includes('这台还没上报浏览器清单（客户端需 ≥0.5.0）'));
+  // 两台机器现在都有清单，页面上不会出现这条提示。
+  // 改成直接验源码里有这句话 —— 它是一条静态文案，用页面渲染去验反而要求
+  // fixture 里必须留一台空机器，而那会和"只有两台机器"的其他断言互相牵制。
+  const consoleSrc = require('node:fs').readFileSync(HTML_PATH, 'utf8');
+  check('没上报清单时的提示文案存在',
+    consoleSrc.includes('这台还没上报浏览器清单（客户端需 ≥0.5.0）'));
   check('cdp_ws 有独立「复制」按钮', (await page.locator('#view-browsers [data-copy^="ws://"]').count()) === 1);
+
+  // 离线机器的环境状态必须标成「上次：…」。
+  // 真踩过：机器离线后 inventory 还是旧的，控制台直接渲染出一个绿色 running
+  // （tianyiyuncd1 离线、控制台仍显示 running: 1），用户以为还有东西在跑。
+  const offSec = await page.textContent('#view-browsers');
+  check('离线机器的环境状态标为「上次：…」', offSec.includes('上次：'), offSec.slice(0, 200));
+  // 精确到那一行：离线机器上的 running 环境，状态徽章**不能**是绿色的 ok。
+  const offRow = page.locator('#view-browsers tbody tr', { hasText: '留在离线的那个' });
+  const offRowOk = await offRow.locator('.badge.ok').count();
+  check('离线机器下那行不出现绿色 running 徽章', offRowOk === 0, 'ok 徽章数=' + offRowOk);
+  check('那一行确实写着「上次：running」',
+    (await offRow.textContent()).includes('上次：'), await offRow.textContent());
 
   console.log('\n— D. 代理视图（服务器与用户机共享的代理库）—');
   await page.click('#tabs .tab[data-view="proxies"]');
