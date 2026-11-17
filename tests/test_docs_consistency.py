@@ -273,3 +273,38 @@ def test_no_dead_config_fields():
         "这些配置字段除 config.py 外没有任何地方读取（设了不生效）：\n  "
         + "\n  ".join(dead)
         + "\n要么接上实现，要么删掉并同步 docs/03。")
+
+
+def test_every_custom_exception_has_a_handler():
+    """项目里每个自定义异常类，都必须在 `api.py` 里有对应的 exception_handler。
+
+    否则它会一直冒到 `@app.exception_handler(Exception)`，变成 500 + 原始堆栈 ——
+    用户和 AI 拿到的是 traceback，不是 `{ok:false, code, message}`。
+
+    真踩过：`api.py` 只注册了 8 个处理器，而项目里有 14 个自定义异常类，
+    `PackError` / `StoreError` / `ShellError` / `SessionError` / `RelayError`
+    全都没接住。是全量扫 AI 清单端点时从日志里的 "未处理异常" 发现的。
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    # 只扫 **core/src**：core 通过 HTTP 跟 hub 打交道，hub 那边的异常
+    # 永远不会传播进来（hub 自己有自己的处理器）。
+    # 第一版把 hub/src 也扫了，于是要求 core 给 `DeviceError`（hub 的类）注册处理器 ——
+    # 那是错的，测试写错了。
+    classes = set()
+    for f in (root / "core/src").rglob("*.py"):
+        for m in re.finditer(r"class\s+([A-Za-z_]+Error)\s*\(Exception\)", f.read_text(encoding="utf-8")):
+            classes.add(m.group(1))
+
+    api_src = (root / "core/src/zw_core/api.py").read_text(encoding="utf-8")
+    handled = set(re.findall(r"exception_handler\(\s*(?:[a-z_]+\s*,\s*)?(?:mgr\.|syncsvc\.|proxysvc\.|bundle\.|engines\.|ck\.|packs\.|extstore\.|shellsvc\.|sessionsvc\.|relaysvc\.)?([A-Za-z_]+Error)\s*\)", api_src))
+
+    # `ApiError` 自己有处理器；`CryptoError` 只在 bundle 内部抛并被包成 BundleError。
+    exempt = {"CryptoError"}
+    missing = sorted(classes - handled - exempt)
+    assert classes, "没扫到任何自定义异常类，正则可能过时了"
+    assert not missing, (
+        "这些异常类没有 exception_handler，会冒成 500 + traceback：\n  "
+        + "\n  ".join(missing) + "\n在 api.py 里补上（照 _pack_error 的写法）。")

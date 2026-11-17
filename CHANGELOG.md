@@ -1,5 +1,60 @@
 # CHANGELOG
 
+## 0.7.49 — 2026-11-18
+
+**5 类业务异常没被接住，全都会冒成 500 + 原始 traceback。**
+
+### 怎么发现的
+
+这轮做"AI 清单里 65 个端点是否真的存在"的扫描（结论：**全部存在**，
+没有一个是清单瞎写的）。但扫的过程中日志里冒出：
+
+```
+ERROR [zw.api] 未处理异常 POST /api/v1/packs/import
+Traceback …
+zw_core.services.packs.PackError: 要么给 src_path（扩展目录或 zip），要么给 from_profile
+```
+
+`api.py` 只注册了 **8 个** exception_handler，而项目里有 **14 个**自定义异常类。
+漏掉的是：
+
+| 异常 | 谁抛 | 本该返回 |
+|---|---|---|
+| `PackError` | 扩展包（导入/设默认/删除） | 400/404 + `PACK_*` |
+| `StoreError` | 商店装扩展 | 400 + `EXT_STORE_*` |
+| `ShellError` | 远程命令行 | 400 + `SHELL_*` |
+| `SessionError` | 实时终端 | 400 |
+| `RelayError` | 本机代理中继 | 502 |
+
+后果：用户和 AI 拿到的是**原始堆栈**，不是 `{ok:false, code, message}` ——
+既看不懂，也没法按错误码处理。
+
+### 修法与实测
+
+五类全部注册处理器（状态码取各自的 `status`，并给可操作 hint）。
+
+```
+POST /api/v1/packs/import            → 400 PACK_INVALID_SOURCE   （原 500 + traceback）
+POST /api/v1/packs/nope/default      → 404 PACK_NOT_FOUND
+POST /api/v1/extensions/install      → 400 PATH_NOT_FOUND
+```
+
+### 两条防回归测试
+
+- `test_business_errors_are_structured_not_500`：五种场景逐个断言
+  `status < 500` 且 `ok is False` 且有 `code`。
+- `test_every_custom_exception_has_a_handler`：**扫 `core/src` 里所有
+  `class XxxError(Exception)`，逐个要求 `api.py` 里有对应 handler**，缺一个就红。
+  以后再新增异常类忘了注册，CI 直接拦住。
+
+> 写第二条时我自己错了一次：第一版把 `hub/src` 也扫了，于是要求 core 给
+> `DeviceError`（hub 的类）注册处理器 —— core 通过 HTTP 跟 hub 打交道，
+> hub 的异常永远不会传播进来。测试改成只扫 `core/src`。
+
+### 测试
+
+584 → **586 项**，七个门槛全绿（586 / 73 / 13 / 20 / 75 / 23 / 32）。
+
 ## 0.7.48 — 2026-11-18
 
 **MCP 工具少给参数时报裸 `KeyError`（32 个里 21 个这样），AI 完全没法用。**

@@ -786,3 +786,31 @@ def test_default_pack_toggle_on_off_affects_new_profiles(client):
     # ③ 再取消 → 又回到没有（用户要的"当然也可以选择关闭"）
     client.post(f"/api/v1/packs/{pid_pack}/default", json={"enabled": False}, headers=H)
     assert new_profile_exts("关-2") == []
+
+
+def test_business_errors_are_structured_not_500(client):
+    """所有自定义异常都必须被接住，返回 `{ok:false, code, message}`，不能冒 500 + traceback。
+
+    真踩过：全量扫 AI 清单端点时，日志里出现
+
+        ERROR [zw.api] 未处理异常 POST /api/v1/packs/import
+        Traceback … zw_core.services.packs.PackError: 要么给 src_path…
+
+    原因是 `api.py` 只注册了 8 个异常处理器，而项目里有 14 个自定义异常类 ——
+    `PackError` / `StoreError` / `ShellError` / `SessionError` / `RelayError`
+    全都没接住。用户和 AI 拿到的是原始堆栈而不是错误码，既看不懂也没法按码处理。
+    """
+    # 每一种都要给出 4xx + 可读 code（不是 500、不是堆栈）
+    cases = [
+        ("POST", "/api/v1/packs/import", {}, "PACK_INVALID_SOURCE"),
+        ("POST", "/api/v1/packs/definitely-missing/default", {"enabled": True}, "PACK_NOT_FOUND"),
+        ("POST", "/api/v1/extensions/install", {"path": "/definitely/not/here"}, None),
+    ]
+    for method, path, body, expect_code in cases:
+        r = client.request(method, path, headers=H, json=body)
+        assert r.status_code < 500, f"{path} 冒成 {r.status_code}（应该是 4xx）"
+        d = r.json()
+        assert d.get("ok") is False, f"{path} 不是结构化错误：{d}"
+        assert d.get("code"), f"{path} 没有错误码：{d}"
+        if expect_code:
+            assert d["code"] == expect_code, f"{path} 错误码是 {d['code']}，期望 {expect_code}"

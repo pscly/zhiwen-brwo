@@ -36,8 +36,9 @@ from starlette.websockets import WebSocket
 from . import __version__, gateway
 from .config import get_settings
 from .db import get_db
-from .services import (bundle, cookies as ck, engines, manager as mgr, proxy as proxysvc,
-                       proxylib, sync as syncsvc)
+from .services import (bundle, cookies as ck, engines, extstore, manager as mgr, packs,
+                       proxy as proxysvc, proxylib, proxyrelay as relaysvc,
+                       session as sessionsvc, shell as shellsvc, sync as syncsvc)
 from .services.hub import HubClient, HubError
 from .services.leases import LocalLease
 
@@ -414,6 +415,37 @@ def build_app() -> FastAPI:
     @app.exception_handler(ck.CDPError)
     async def _cdp_error(_: Request, exc: ck.CDPError) -> JSONResponse:
         return _err(exc.code, exc.message, 502, hint="浏览器还活着吗？看该环境的日志与状态")
+
+    # ── 下面这几个以前**没接住**，会冒成 500 + 完整 traceback ────────────
+    #
+    # 用户/AI 拿到的是原始堆栈而不是 `{ok:false, code, message}`，
+    # 既看不懂也没法按错误码处理。是全量扫清单端点时发现的：
+    # `POST /packs/import` 参数不对 → 日志里出现 "未处理异常" + 堆栈。
+    #
+    # 这几个都是业务错误（参数不对 / 找不到），本来就该是 4xx + 可读原因。
+    @app.exception_handler(packs.PackError)
+    async def _pack_error(_: Request, exc: packs.PackError) -> JSONResponse:
+        return _err(exc.code, exc.message, status=getattr(exc, "status", 400) or 400)
+
+    @app.exception_handler(extstore.StoreError)
+    async def _store_error(_: Request, exc: extstore.StoreError) -> JSONResponse:
+        return _err(exc.code, exc.message,
+                    status=getattr(exc, "status", 400) or 400,
+                    hint="商店装扩展需要这台机器能访问 clients2.google.com；"
+                         "国内网络请先给客户端配好代理")
+
+    @app.exception_handler(shellsvc.ShellError)
+    async def _shell_error(_: Request, exc: shellsvc.ShellError) -> JSONResponse:
+        return _err(exc.code, exc.message, status=getattr(exc, "status", 400) or 400)
+
+    @app.exception_handler(sessionsvc.SessionError)
+    async def _session_error(_: Request, exc: sessionsvc.SessionError) -> JSONResponse:
+        return _err(exc.code, exc.message, status=getattr(exc, "status", 400) or 400)
+
+    @app.exception_handler(relaysvc.RelayError)
+    async def _relay_error(_: Request, exc: relaysvc.RelayError) -> JSONResponse:
+        return _err(exc.code, exc.message, status=getattr(exc, "status", 502) or 502,
+                    hint="本地代理中继起不来时，带认证或链式代理会连不上")
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
