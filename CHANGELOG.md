@@ -1,5 +1,50 @@
 # CHANGELOG
 
+## 0.7.42 — 2026-11-18
+
+**发版流程不再被一个平台的 runner 故障堵死（但不悄悄少发平台）。**
+
+### 起因
+
+今晚 GitHub 的 macOS arm64 runner 反复抢不到（`The job was not acquired by Runner
+of type hosted`），v0.7.36 起被取消 4 次。而发布 job 是 `needs: build`：
+
+```
+X 构建 macOS (cancelled)  →  发布到 Releases (skipped)
+✓ 构建 Windows
+✓ 构建 Linux-x86_64
+```
+
+**Windows 和 Linux 明明构建成功了，却因为 Mac 机器抢不到而发不出去。**
+
+### 改法（两道闸，缺一不可）
+
+1. **必需平台缺一就明确失败**（`::error::` 并 exit 1）：
+   `zhiwen-client-Windows-x64.exe` / `...-setup.exe` / `zhiwen-client-Linux-x86_64`
+   —— 避免"发出一个残缺的正式版"。
+2. **macOS 允许缺失**，但必须**大声说明**：
+   - 打 `::warning::`
+   - 发布说明**最前面**插一行：
+     > ⚠️ **本次发布不含 macOS 包**：构建 Mac 版的那台机器（GitHub 托管 runner）当时抢不到；
+     > Windows 与 Linux 均已正常构建并通过自检。需要 macOS 版请稍后重跑那个 job，或自行从源码构建。
+
+发布 job 从 `needs: build` + 默认成功条件，改成 `if: always() && startsWith(github.ref, 'refs/tags/v')`。
+
+### 为什么这样取舍
+
+用户实际要的是 **Windows（云电脑）+ Linux（服务器）**，macOS 他们从没提过。
+因为一个 macOS runner 抢不到，把用户真正要用的两个平台一起扣着，代价不对等。
+但"悄悄少发"同样不可接受 —— 所以缺 macOS 时说明里会写得非常明确。
+
+### 实测
+
+在本地复刻了那两段 shell：
+
+```
+（Windows/Linux 齐、缺 macOS）→ ✅ 必需齐全 → ⚠️ 说明最前面插入 macOS 缺失提示
+（缺 Windows 安装包）        → ❌ 必需缺失：zhiwen-client-Windows-x64-setup.exe → 拒绝发版
+```
+
 ## 0.7.41 — 2026-11-18
 
 **又抓到一个"字段漏给"的 bug：链式代理的 `hop` 从来不出现在接口里。**

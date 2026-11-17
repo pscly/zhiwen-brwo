@@ -272,7 +272,18 @@ jobs:
   release:
     name: 发布到 Releases
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # `always()` + 下面显式检查：**不再让某一个平台的 runner 故障堵死全部发版**。
+    #
+    # 起因（真实发生过）：GitHub 的 macOS arm64 runner 经常抢不到
+    # （`The job was not acquired by Runner of type hosted`），一晚上被取消 4 次。
+    # 而发布 job 原来 `needs: build`，任一平台被取消 → 整个发布跳过，
+    # **Windows 和 Linux 明明构建成功了也发不出去**。
+    #
+    # 现在：必需平台（Windows / Linux）缺一个就**明确失败**；
+    # macOS 允许缺失，但会在发布说明和日志里用醒目的一行写清楚缺了它。
+    # 换句话说：宁可少一个平台并大声说明，也不要因为你抢不到 macOS 机器
+    # 就把用户真正要用的 Windows/Linux 一起扣着。
+    if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -282,6 +293,26 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: 检查必需平台是否齐全
+        run: |
+          set -e
+          echo "拿到的产物："
+          ls -la artifacts || true
+          MISSING=""
+          for f in zhiwen-client-Windows-x64.exe zhiwen-client-Windows-x64-setup.exe \
+                   zhiwen-client-Linux-x86_64; do
+            [ -f "artifacts/$f" ] || MISSING="$MISSING $f"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::必需平台产物缺失：$MISSING —— 这次不发版（避免发出残缺的正式版）"
+            exit 1
+          fi
+          if [ ! -f "artifacts/zhiwen-client-macOS.zip" ]; then
+            echo "::warning::macOS 产物缺失（runner 抢不到？）。本次发布只含 Windows/Linux，"\
+                 "发布说明里会写明。"
+            echo "MACOS_MISSING=1" >> "$GITHUB_ENV"
+          fi
 
       - name: 生成校验和
         run: |
@@ -325,6 +356,17 @@ jobs:
 
           详见仓库里的 `docs/11-客户端与服务器端.md`。
           EOF
+          # 缺 macOS 时在说明最前面加一行醒目提示（不能悄悄少发一个平台）
+          if [ -n "${MACOS_MISSING:-}" ]; then
+            {
+              echo "> ⚠️ **本次发布不含 macOS 包**：构建 Mac 版的那台机器（GitHub 托管 runner）当时抢不到；"
+              echo "> Windows 与 Linux 均已正常构建并通过自检。需要 macOS 版请稍后重跑那个 job，或自行从源码构建。"
+              echo
+              cat NOTES.md
+            } > NOTES.tmp
+            mv NOTES.tmp NOTES.md
+          fi
+          head -20 NOTES.md
 
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
