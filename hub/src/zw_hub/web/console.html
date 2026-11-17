@@ -982,6 +982,12 @@ function normMachine(m){
     engine: m.engine || '',
     core_base: m.core_base || '',
     core_reachable: reach,
+    // 本机服务是否活着。三态：true / false / null（旧客户端没上报）。
+    // **必须列在这里** —— 这个白名单已经连续漏过 proxy、invalid/problem，
+    // 每次表现都是"界面永远不显示那个状态"，很难查。
+    core_alive: (m.core_alive === true) ? true : (m.core_alive === false ? false : null),
+    realtime: m.realtime === true,
+    shell_polling: (m.shell_polling === true) ? true : (m.shell_polling === false ? false : null),
     browsers: (Array.isArray(m.browsers) ? m.browsers : []).map(normBrowser).filter(b => b.id || b.name),
   };
 }
@@ -1250,6 +1256,12 @@ function fillCard(card, dev){
   else if (pending) bg.push('<span class="badge warn">等待授权</span>');
   else if (online) bg.push('<span class="badge ok">在线</span>');
   else bg.push('<span class="badge">离线</span>');
+  // 本机服务（core）是否活着。进程活着 ≠ 服务活着：
+  // core 死了，远程命令和远程控制台都不可用，光看"在线"会误判。
+  // 三态：true=活 / false=死（红色，最要紧）/ null=旧客户端没上报（不显示）
+  if (dev.core_alive === false)
+    bg.push('<span class="badge bad" title="客户端进程在跑，但它本机的服务没起来：远程命令和本机控制台都不可用。' +
+      '常见原因：端口被占（0.7.12 起会自动换端口）、防火墙拦了、杀软拦截。到那台机器上看客户端界面上的提示。">本机服务未运行</span>');
   // 实时通道（WS）：连上就能边跑边出字，且 cd 保持
   if (dev.realtime === true) bg.push('<span class="badge ok" title="WebSocket 实时通道已连上（输出边产生边显示）">实时</span>');
   // 队列通道：设备有没有来拉命令。用户抱怨"下发没反应"时，

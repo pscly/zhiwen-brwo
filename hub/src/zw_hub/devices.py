@@ -230,6 +230,9 @@ class DeviceStore:
             # 主控台要展示"这台有哪些浏览器、CDP 地址是什么"，
             # 所以设备把清单随心跳上报，hub 原样存 JSON 文本（不解析、不改写）。
             ("core_base", "TEXT NOT NULL DEFAULT ''"),
+            # 本机服务（core）是否活着。旧客户端不上报 → 保持 NULL（未知），
+            # 不能默认成 1，否则"没上报"会被显示成"正常"。
+            ("core_alive", "INTEGER"),
             ("inventory", "TEXT NOT NULL DEFAULT ''"),
         ):
             try:
@@ -313,12 +316,14 @@ class DeviceStore:
                     " engine=COALESCE(NULLIF(?,''),engine),"
                     " shell_enabled=COALESCE(?,shell_enabled),"
                     " core_base=COALESCE(NULLIF(?,''),core_base),"
+                    " core_alive=COALESCE(?,core_alive),"
                     " inventory=COALESCE(NULLIF(?,''),inventory) WHERE device_id=?",
                     (now, ip,
                      _as_int(st.get("profiles")), _as_int(st.get("running")),
                      str(st.get("disk_human") or ""), str(st.get("engine") or ""),
                      _as_bool(st.get("shell_enabled")),
                      str(st.get("core_base") or ""),
+                     _as_bool(st.get("core_alive")),
                      _dump_inventory(st.get("inventory")),
                      device_id),
                 )
@@ -556,5 +561,8 @@ class DeviceStore:
         # 库里存 0/1，出参给布尔 —— 面板直接显示"开/关"，不用再猜 0 和 1 的含义
         d["shell_enabled"] = bool(d.get("shell_enabled") or 0)
         d["core_base"] = str(d.get("core_base") or "")
+        # 三态：1=活 / 0=死 / None=旧客户端没上报（界面显示"未知"）
+        ca = d.get("core_alive")
+        d["core_alive"] = None if ca is None else bool(ca)
         d["inventory"] = _load_inventory(d.get("inventory"))
         return d

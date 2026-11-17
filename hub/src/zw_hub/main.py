@@ -745,6 +745,10 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
             # 实时通道（WebSocket）是否连着 —— 和上面的"在拉队列"是两回事。
             # 控制台据此显示「实时」还是「队列」，AI 也能据此判断要不要走 WS。
             "realtime": term_relay().online(d.get("device_id", "")),
+            # 进程活着 ≠ 本机服务活着。core 死了，远程命令和控制台都不可用，
+            # 必须在界面上看出来（2026-11-17 云电脑上真踩到：看着"在线"却什么都连不上）。
+            # 三态：True=活 / False=死 / None=旧客户端没上报
+            "core_alive": d.get("core_alive"),
             "browsers": browsers,
         })
 

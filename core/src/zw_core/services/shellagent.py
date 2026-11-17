@@ -318,12 +318,16 @@ class HeartbeatThread:
                 "last_error": self.last_error}
 
     def _payload(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"shell_enabled": self.enabled}
+        # `core_alive` 一定给：没有客户端外壳时，core 自己就是"本体"，
+        # 只要这个线程还在跑，core 必然是活的（同一进程）。
+        out: dict[str, Any] = {"shell_enabled": self.enabled, "core_alive": True}
         try:
             from zw_core.services import manager as mgr
 
             st = mgr.stats()
             out.update({
+                "core_port": int(st.get("port") or 0),
+                "core_base": str(st.get("gateway_public_base") or ""),
                 "profiles": int(st.get("profiles") or 0),
                 "running": int(st.get("running") or 0),
                 "max_running": int(st.get("max_running") or 0),

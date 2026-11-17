@@ -1,5 +1,48 @@
 # CHANGELOG
 
+## 0.7.13 — 2026-11-17
+
+**"进程活着但本机服务死了"现在看得见了。**
+
+### 为什么必须做
+
+0.7.11 那次事故里最难查的一点：主控台显示设备**在线**、版本号也是新的，
+但远程命令和远程控制台**全都连不上**。因为心跳和 core 是两条命：
+
+- 心跳跑在客户端进程里，`local_summary()` 里原本写着 `if not st: return {}` ——
+  core 不在就返回空，**心跳本身照样成功**
+- 而 shell agent 和本机控制台端口都活在 **core 的 lifespan** 里，core 起不来就一起没有
+
+结果：看的人完全不知道发生了什么，只能跑到机器前处理。
+
+### 改了什么
+
+客户端两条心跳路径都会上报三态字段：
+
+```json
+{"core_alive": false, "core_error": "端口 8730-8739 全被占用", "core_port": 8730}
+```
+
+- `gui.local_summary()`：core 不在时**也返回**（带上死因与端口），不再返回空
+- `shellagent._payload()`：无客户端外壳时 core 就是本体，恒为 true
+
+hub 侧：`devices` 表加 `core_alive INTEGER`（可空），`heartbeat` 用 `COALESCE` 写入，
+`/v1/console/overview` 输出。**旧客户端不上报时是 `null`**，不能默认成"正常"。
+
+控制台：设备卡新增红色徽章「本机服务未运行」，鼠标悬停说明常见原因
+（端口被占 / 防火墙 / 杀软）与去那台机器上看哪里。
+
+### 又踩了一次白名单
+
+`normMachine` 是字段白名单，这次漏了 `core_alive` —— 表现是"徽章永远不出现"。
+同一个坑这个项目已经踩过三次（`proxy`、`invalid/problem`、现在 `core_alive`），
+所以顺手把 `realtime` / `shell_polling` 也一起补进白名单，并写了注释警告后来者。
+
+### 测试
+
+503 → **505 项**。新增：core_alive=false 能被 overview 读出、恢复上报后能翻回 true、
+旧客户端不上报时是 null（不是 False/True）。
+
 ## 0.7.11 — 2026-11-17
 
 **端口被占时自动回退 + 复用已跑实例**（云电脑上真踩到，代价是远程能力全失）。

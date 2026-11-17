@@ -673,10 +673,25 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             pass
 
     def local_summary() -> dict[str, Any]:
-        """给服务器看的本机概况。取不到就返回空（心跳照常）。"""
+        """给服务器看的本机概况。
+
+        ## core 不在时**也必须上报**
+
+        原来这里 `if not st: return {}` —— 心跳本身照常成功，于是服务器上
+        一直显示"在线"，而后台的 core 已经死了（远程命令、远程控制台全废）。
+        2026-11-17 在云电脑上真踩到：看着在线，实则什么都连不上，只能跑到机器前处理。
+
+        所以现在无论 core 在不在，都返回一份带 `core_alive` 的字典，
+        让主控台能把"进程活着但服务死了"这个状态显示出来。
+        """
         st = core.stats() if state.get("core_on") else None
         if not st:
-            return {}
+            return {
+                "core_alive": False,
+                "core_error": str(getattr(core, "error", "") or "")[:500],
+                "core_port": int(getattr(core, "port", 0) or 0),
+                "shell_enabled": bool(state.get("shell_var").get()),
+            }
         # 告诉服务器"从哪能连到我这台机器"。
         # core 在首选端口被占时会自动回退（client.LocalCore），
         # 所以这里必须用**实际端口**拼，否则服务器会一直按 8730 去连、永远连不上。
@@ -717,6 +732,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         except Exception:
             core_base = ""
         return {
+            "core_alive": True,
+            "core_error": "",
+            "core_port": int(core.live_port),
             "core_base": core_base,
             "inventory": inv,
             "profiles": int(st.get("profiles") or 0),

@@ -257,3 +257,40 @@ def test_hub_strips_password_from_inventory_proxy(hub):
                                  "scheme": "socks5", "password": "REALPASSWORD"}}]})
     raw = hub.get("/v1/console/overview", params={"probe": False}).text
     assert "REALPASSWORD" not in raw, "hub 把代理密码存下来/返回了"
+
+
+def test_overview_exposes_core_alive(hub):
+    """进程活着 ≠ 本机服务活着，主控台必须能区分。
+
+    现场（2026-11-17 云电脑）：core 起不来，但心跳照常发，
+    服务器上一直显示"在线"，而远程命令和远程控制台全废 ——
+    看的人完全不知道发生了什么，只能跑到机器前处理。
+    """
+    login(hub)
+    dev = "zwd_corealive1112223334"
+    hub.post("/v1/devices/enroll", json={"device_id": dev, "hostname": "cx-pc"})
+    hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": dev},
+             json={"core_alive": False, "core_error": "端口被占", "core_port": 8730})
+
+    d = hub.get("/v1/console/overview", params={"probe": False}).json()["data"]
+    m = next(x for x in d["machines"] if x["device_id"] == dev)
+    # 重点：core_alive 独立于 online 反映真实情况。
+    # （online 还受审批状态影响，那条由审批用例覆盖，这里不混进来。）
+    assert m["core_alive"] is False
+
+    # 恢复上报后要能翻回来
+    hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": dev}, json={"core_alive": True})
+    d = hub.get("/v1/console/overview", params={"probe": False}).json()["data"]
+    m = next(x for x in d["machines"] if x["device_id"] == dev)
+    assert m["core_alive"] is True
+
+
+def test_overview_core_alive_unknown_for_old_clients(hub):
+    """旧客户端不上报 core_alive → 必须是 None（未知），不能默认成"正常"。"""
+    login(hub)
+    dev = "zwd_corealiveunknown5566"
+    hub.post("/v1/devices/enroll", json={"device_id": dev, "hostname": "old-pc"})
+    hub.post("/v1/devices/heartbeat", headers={"X-ZW-Device": dev}, json={"profiles": 1})
+    d = hub.get("/v1/console/overview", params={"probe": False}).json()["data"]
+    m = next(x for x in d["machines"] if x["device_id"] == dev)
+    assert m["core_alive"] is None
