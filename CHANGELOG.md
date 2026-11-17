@@ -1,5 +1,108 @@
 # CHANGELOG
 
+## 0.7.33 — 2026-11-17
+
+**派子代理做对抗审查，找出 12 条真缺陷并逐条修掉。其中 2 条严重。**
+
+> 教训先行：前面二十几轮都是我给自己打分（"我测过了、都过了"）。
+> 这次让另一个 agent 专门去找错，**第一条就是可写任意目录的漏洞**，
+> 而且现有测试是绿的 —— 因为它只覆盖了 zip 成员名，没覆盖 manifest 字段。
+
+### 1. [严重] 扩展 manifest 的 `version` 能写出任意目录
+
+`version` 直接拼进 `ext_dir / f"{slug}-{version}"`。装一个
+`"version": "../../../../tmp/pwn/escaped"` 的 CRX，`copytree` 会正常解析 `..` ——
+**能往系统任意目录写文件**。`name` 早就有 `_slugify()`，`version` 一个字都没过滤。
+
+修：`_safe_version()` 白名单（只认字母数字点下划横线，长度 ≤32，含 `..` 一律退 `0`）
+＋落盘前 `dest.resolve().relative_to(ext_dir.resolve())` 兜底。
+
+实测（真跑一次攻击 CRX）：
+
+```
+落盘路径: /tmp/pwncheck/root/extensions/evilext-0
+version 被规范成: 0
+外部仍有 pwn.txt? False          ← 修好了
+```
+
+### 2. [高] 主控台「编辑代理」实际是「新增代理」
+
+我上一轮加的功能是**坏的**：payload 与「新增」逐字节相同、不带 id，而后端只有
+`POST /v1/proxies`（按 `scheme+host+port+username+hop` 去重，不含 id）。
+改主机/端口时新键不存在 → 走 INSERT → **多出一条**：
+① 用户以为改了，环境仍指向旧那条；② 新那条没密码（编辑框留空）不可用；
+③ `origin` 被覆写成 `panel`，"哪台机器加的"丢了。
+
+修：新增 `PATCH /v1/proxies/{id}` + `proxies.update_by_id()`（按 id 就地改，
+保留密码与 `origin`，与另一条重复时返回 409 `PROXY_DUPLICATE` 而不是静默合并）。
+
+实测（真 hub）：
+
+```
+① 建好: 1 | 条目数: 1 | 有密码: True
+② 改主机/端口: 200 | id 还是 1
+   条目数（必须还是 1）: 1
+   密码保住了: True | origin 保留: panel
+③ 改成与另一条重复 → 409   ④ 改不存在的 id → 404
+```
+
+### 3. [高] `zw_hide_proxy` 100% 失败
+
+本地 `proxies` 表**没有 `hidden` 列**（隐藏是服务器侧概念），工具直接
+`UPDATE proxies SET hidden=?` → `no such column: hidden`。**已移除**，
+并在代码里写明为什么不该有这个工具（永远失败的工具比没有更糟）。
+
+### 4. [中] `zw_install_extension` 说支持目录，实际必然报"文件不存在"
+
+`install()` 只认 `p.is_file()`。已支持目录（内存打包走同一条解包路径）。
+
+### 5. [中] 错误消息回显任意文件前 60 字节
+
+`crx_path` 是调用方给的任意路径，把开头内容打进错误消息，等于给
+CLI / MCP / AI 代理开了一个"读本机任意文件片段"的口子。已改成只给可判定的提示。
+
+### 6. [中] 配了令牌的机器，本机打开仍然弹登录框
+
+`auth_required` 原来是「配没配 `ZW_ADMIN_TOKEN`」，不是「这次请求要不要令牌」。
+所以配了令牌的机器即使从回环访问（接口已放行、返回 200），页面还是弹框 ——
+**正是用户抱怨的那个现象**，我之前只在没配令牌的机器上验过。
+
+修成按请求算（`not is_loopback_request(request)`）。实测：
+
+```
+本机回环 → auth_required: False   （不弹框）
+局域网   → auth_required: True
+```
+
+### 7. 其他修正
+
+- `host_notice`（绑定降级原因）以前**赋值后没人读**，用户设了 `0.0.0.0` 却只监听
+  本机、日志一个字不说。现在启动打 WARNING，并暴露在 `/api/v1/meta`。
+- `scripts/gui-check.py` 里 `bool(logs) or True` 是恒真假断言，已改成真检查。
+- 控制台读错误用 `b.error.message`，而 hub 返回扁平 `{ok,code,message}` ——
+  所以"端口非法"这类可读原因永远显示不出来。已兼容三种信封。
+- 对话框 `onOk` 返回 `false` 时仍然关窗，用户输入全丢。已改成保留。
+- AI 清单里 `/extensions/install` 重复两条、`if False` 残留、`ExtInstallBody`
+  死代码（定义在 `build_app()` 内且无人引用）—— 已清。
+- **删掉 `zw_core_src_tmp/`**（2.5MB / 24640 行的过期源码副本，
+  由 `2ea35ca` 误提交、`.gitignore` 未忽略）。它会污染 `git grep`/IDE/AI 的搜索结果，
+  命中的还是错的那份。已加 `.gitignore`。
+
+### 我自己在修的过程中犯的两个错（都已修）
+
+1. `str.replace()` 没限次数，把「新增」也改成了 PATCH —— 全量测试前就发现并修回。
+2. 新的 hub 测试在**进程内**改 `sys.modules`/环境变量没还原，连累
+   `test_sync_integration` 挂 9 项；改成子进程跑。另外 `ZW_DEVICE_ID` 泄漏
+   导致 8 项报「设备未注册」，已加环境变量快照/还原。
+
+### 测试
+
+560 → **566 项**。新增：路径穿越×2、PATCH 就地编辑、目录安装、不回显文件内容、
+`auth_required` 按请求、`host_notice` 可见。
+
+全量：**566 passed / 2 skipped**；单机 65/0/6；主控台 75/0；客户端控制台 23/0；
+客户端 GUI 32/0。
+
 ## 0.7.32 — 2026-11-17
 
 **主控台代理库补「编辑」——凑齐增/改/删/隐藏四件，并把 CRUD 全验一遍。**

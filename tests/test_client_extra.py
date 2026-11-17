@@ -374,6 +374,8 @@ def test_mcp_exposes_new_capabilities():
             continue
         if d.get("id") == 1:
             names = {t["name"] for t in d["result"]["tools"]}
-    want = {"zw_import_proxies", "zw_sync_proxies", "zw_hide_proxy",
+    # 注意：**故意不包含** zw_hide_proxy —— 本地库没有 hidden 列，
+    # 隐藏是服务器侧概念；曾经有过一个永远报 "no such column" 的工具，已移除。
+    want = {"zw_import_proxies", "zw_sync_proxies",
             "zw_install_extension", "zw_check_extension_updates"}
     assert want <= names, f"缺工具：{sorted(want - names)}（现有 {len(names)} 个）"

@@ -715,6 +715,39 @@ def create_or_update_proxy(body: ProxyBody) -> dict[str, Any]:
     return ok(item)
 
 
+@app.patch("/v1/proxies/{proxy_id}", dependencies=[PanelAuth])
+def patch_proxy(proxy_id: int, body: ProxyBody) -> dict[str, Any]:
+    """**就地修改**一条代理（编辑用）。
+
+    ## 为什么需要这个路由（而不是继续用 POST）
+
+    `POST /v1/proxies` 走 `upsert()`，去重键是 `scheme+host+port+username+hop`。
+    界面上"编辑"改主机/端口时，新键在库里不存在 → 结果**多出一条新记录**，
+    旧那条还在，环境仍指向旧的，新那条还因为编辑框留空而没有密码。
+    也就是说"编辑"实际变成了"新增"。
+
+    这个路由按 `id` 定位、原地更新，并保留 `origin` 与未填写的密码；
+    新键若与另一条记录冲突则返回 409 `PROXY_DUPLICATE`，不做静默合并。
+    """
+    from . import proxies as px
+
+    s = get_settings()
+    if not body.host.strip():
+        raise HubError(400, "PROXY_INVALID", "主机不能为空")
+    if not (0 < int(body.port) < 65536):
+        raise HubError(400, "PROXY_INVALID_PORT", "端口应在 1-65535")
+    try:
+        item = px.update_by_id(
+            s, proxy_id,
+            scheme=body.scheme, host=body.host.strip(), port=int(body.port),
+            username=body.username, password=body.password,
+            hop=body.hop, label=body.label, note=body.note,
+        )
+    except px.ProxyError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    return ok(item)
+
+
 @app.post("/v1/proxies/{proxy_id}/hide", dependencies=[PanelAuth])
 def hide_proxy(proxy_id: int, body: ProxyHideBody) -> dict[str, Any]:
     """隐藏/取消隐藏。不影响已经在用它的环境（删除才会）。"""

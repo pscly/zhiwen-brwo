@@ -279,6 +279,68 @@ def delete(s: Settings, proxy_id: int) -> dict[str, Any]:
     return {"deleted": True, "id": int(proxy_id)}
 
 
+def update_by_id(
+    s: Settings,
+    proxy_id: int,
+    *,
+    scheme: str,
+    host: str,
+    port: int,
+    username: str = "",
+    password: str = "",
+    hop: str = "",
+    label: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    """按 id **就地修改**一条代理。
+
+    ## 为什么不能复用 `upsert()`
+
+    `upsert()` 的去重键是 `scheme+host+port+username+hop`。用它在编辑场景里改主机
+    或端口时，新键在库里不存在 → 它走 INSERT 分支，于是**多出一条新记录**，而旧那条
+    原封不动。实测后果：① 用户以为改了，实际环境仍指向旧代理（`profiles.proxy_id`
+    没变）；② 新记录因为没有密码（编辑框留空＝不改）而不可用；③ `origin` 被覆写成
+    `panel`，"这条是哪台机器加的"信息丢了。
+
+    所以编辑必须走"按 id 定位、原地 UPDATE"，并且：
+      - `password` 传空串 = **保持原密码**（和 upsert 一致）
+      - `origin` **不动**（保留来源），只更新用户能改的字段
+      - 新键若与**另一条**已有记录冲突 → 明确报错，而不是悄悄合并
+
+    冲突检测的意义：两条不同 id 记录不允许变成同一个键，否则下次 upsert
+    会随机命中其中一条，行为不可预期。
+    """
+    ensure_schema(s)
+    scheme = norm_scheme(scheme)
+    now = time.time()
+    pid = int(proxy_id)
+    with _conn(s) as c:
+        row = c.execute("SELECT * FROM proxies WHERE id=?", (pid,)).fetchone()
+        if row is None:
+            raise ProxyError("PROXY_NOT_FOUND", f"没有这个代理：{pid}", 404)
+        clash = c.execute(
+            "SELECT id FROM proxies WHERE scheme=? AND host=? AND port=? AND username=? AND hop=? AND id<>?",
+            (*_key_of(scheme, host, port, username, hop), pid),
+        ).fetchone()
+        if clash is not None:
+            raise ProxyError(
+                "PROXY_DUPLICATE",
+                f"库里已有一条相同上游（id={int(clash['id'])}），"
+                "不能把这条改成与它重复；要合并请删掉其中一条",
+                409,
+            )
+        c.execute(
+            "UPDATE proxies SET scheme=?, host=?, port=?, username=?,"
+            " password_enc=CASE WHEN ?<>'' THEN ? ELSE password_enc END,"
+            " hop=?, label=?, note=?, updated_at=? WHERE id=?",
+            (scheme, host, int(port), username or "",
+             password, seal(s, password), hop or "", label or "", note or "", now, pid),
+        )
+    got = get_by_key_id(s, pid)
+    logger.info("服务器修改代理 id=%s upstream=%s", pid, _upstream(got) if got else "?")
+    return got or {}
+
+
 def merge_from_device(s: Settings, items: list[dict[str, Any]], *, origin: str) -> dict[str, Any]:
     """把某台设备上报的代理合并进来（客户端 → 服务器）。
 

@@ -55,3 +55,6 @@ nul
 con
 aux
 prn
+
+# 临时源码副本（rsync 到别的机器用，别提交）
+zw_core_src_tmp/

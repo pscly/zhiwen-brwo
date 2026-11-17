@@ -378,3 +378,37 @@ def test_localcore_attaches_to_running_instance(tmp_path, monkeypatch):
             else:
                 _os.environ[k] = v
         _cfg.reset_settings()
+
+
+def test_public_bind_without_credential_warns_explicitly(home, monkeypatch, caplog):
+    """绑 0.0.0.0 但没有凭据 → 降级为回环，**必须给出可见提示**。
+
+    真踩过：配置层会静默降级（安全上是对的），并把原因写进 `s.host_notice`，
+    但**全项目没有任何地方读它** —— 用户设了 ZW_HOST=0.0.0.0，实际只能本机访问，
+    日志一个字都不说，`/api/v1/meta` 里也查不到，只能自己猜为什么局域网连不上。
+    现在两处都补上了出口，这条测试钉住它们。
+    """
+    from zw_core import config
+
+    monkeypatch.setenv("ZW_HOST", "0.0.0.0")
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    monkeypatch.delenv("ZW_DEVICE_ID", raising=False)
+    config.reset_settings()
+    s = config.get_settings()
+
+    assert s.host == "127.0.0.1", "对外监听无凭据时必须降级"
+    assert s.host_notice, "降级必须留下可显示的说明"
+    assert "ZW_ADMIN_TOKEN" in s.host_notice and "127.0.0.1" in s.host_notice
+
+    # ① meta 里有出口
+    from fastapi.testclient import TestClient
+
+    from zw_core.main import create_app
+
+    # TestClient 默认来源是 "testclient"（非回环）→ 会被鉴权挡住。
+    # 显式指定来源为本机回环，才是"本机打开控制台"的真实情形。
+    with TestClient(create_app(), client=("127.0.0.1", 50000)) as c:
+        d = c.get("/api/v1/meta").json()["data"]
+    assert d["host"] == "127.0.0.1"
+    assert d.get("host_notice"), "meta 必须带出降级原因，否则用户无处可查"
+    assert "ZW_ADMIN_TOKEN" in d["host_notice"]

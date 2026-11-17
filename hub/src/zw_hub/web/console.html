@@ -930,8 +930,10 @@ $('#dlg-ok').addEventListener('click', async () => {
   if (!fn){ closeDialog(); return; }
   btn.disabled = true;
   try {
-    await fn(val);
-    closeDialog();
+    // 回调返回 false = "没成功，别关窗"：保留用户刚填的内容，
+    // 否则端口写错一次就得全部重填（这是用户能直接感觉到的体验问题）。
+    const r = await fn(val);
+    if (r !== false) closeDialog();
   } catch (e){
     toast(e.message || '操作失败', 'err');
   } finally {
@@ -1614,13 +1616,24 @@ function askEditProxy(p){
         port: Number(val('pxf-port') || 0), username: val('pxf-user'),
         password: val('pxf-pass'), hop: val('pxf-hop'), label: val('pxf-label')
       };
-      const r = await fetch('/v1/proxies', {
-        method:'POST', credentials:'same-origin',
+      // **必须走 PATCH 并带 id**：POST 走 upsert，去重键不含 id，改主机/端口会
+      // 变成"多出一条"，旧那条还在（环境仍指向旧的），新那条还没密码。
+      const r = await fetch('/v1/proxies/' + encodeURIComponent(p.id), {
+        method:'PATCH', credentials:'same-origin',
         headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
       });
       const b = await r.json().catch(()=>({}));
-      if (!r.ok){ toast((b.error && b.error.message) || '保存失败', 'bad'); return false; }
-      closeDialog(); loadProxies(); return true;
+      if (!r.ok){
+        // hub 的错误信封是扁平的 {ok:false, code, message}，
+        // 不是 {error:{message}}；FastAPI 校验错误则是 {detail:[…]}。
+        const msg = b.message || (b.error && b.error.message)
+          || (Array.isArray(b.detail) ? (b.detail[0] && b.detail[0].msg) : b.detail)
+          || '保存失败';
+        toast(String(msg), 'bad');
+        return false;                 // 保持对话框打开
+      }
+      loadProxies();
+      return true;
     }
   });
 }
@@ -1646,13 +1659,22 @@ function askAddProxy(){
         port: Number(val('pxf-port') || 0), username: val('pxf-user'),
         password: val('pxf-pass'), hop: val('pxf-hop'), label: val('pxf-label')
       };
+      // 新增走 POST（服务端 upsert 按 scheme+host+port+username+hop 去重）。
+      // 注意：**编辑不能走这里** —— 那会变成"多出一条"，见 askEditProxy。
       const r = await fetch('/v1/proxies', {
         method:'POST', credentials:'same-origin',
         headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
       });
       const b = await r.json().catch(()=>({}));
-      if (!r.ok){ toast((b.error && b.error.message) || '保存失败', 'bad'); return false; }
-      closeDialog(); loadProxies(); return true;
+      if (!r.ok){
+        const msg = b.message || (b.error && b.error.message)
+          || (Array.isArray(b.detail) ? (b.detail[0] && b.detail[0].msg) : b.detail)
+          || '保存失败';
+        toast(String(msg), 'bad');
+        return false;                 // 保持对话框打开，别丢用户输入
+      }
+      loadProxies();
+      return true;
     }
   });
 }

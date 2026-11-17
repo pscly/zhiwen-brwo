@@ -253,7 +253,10 @@ def main() -> int:
         all_text = " ".join(texts + btns + pbtns + lb)
         check("界面文案里没有英文异常痕迹",
               "Traceback" not in all_text and "Error:" not in all_text, all_text[:200])
-        check("事件流有内容（面板把结果写进去了）", bool(logs) or True)
+        # 之前写的是 `bool(logs) or True` —— 恒真，等于没测。
+        # 真实期望：面板把"改代理成功"写进了事件流（on_log 被调用过）。
+        check("事件流记录下了改代理（on_log 被调用）", len(logs) >= 1,
+              f"logs={logs[:3]}")
 
         t.destroy()
     finally:

@@ -109,10 +109,14 @@ def strip_crx_header(blob: bytes) -> bytes:
         # 有些镜像直接给 zip；也可能商店返回了 HTML 错误页
         if blob[:2] == b"PK":
             return blob
-        head = blob[:200].decode("utf-8", "replace")
+        # **不要回显内容**。`strip_crx_header` 也被"本地文件"这条路调用，
+        # 而路径是调用方给的任意文件：把前 60 字节打进错误消息，等于给上层
+        # （CLI / MCP 客户端 / AI 代理）开了一个"读本机任意文件片段"的口子。
+        # 只说"不是 CRX/ZIP"，必要时给出可判定的魔数信息（固定 4 字节，非内容）。
         raise StoreError(
             "EXT_STORE_BAD_CRX",
-            f"拿到的不是 CRX/ZIP（开头是 {head[:60]!r}）。多半是商店限流或需要代理",
+            "拿到的不是 CRX/ZIP。多半是商店限流、需要代理，或者选错了文件"
+            "（CRX 应以 Cr24 开头，ZIP 应以 PK 开头）",
         )
     if len(blob) < 12:
         raise StoreError("EXT_STORE_BAD_CRX", "CRX 文件被截断（不足 12 字节头）")
@@ -152,6 +156,35 @@ def download_crx(ext_id: str, *, timeout: float = 60.0,
             502 if r.status_code >= 500 else 400,
         )
     return strip_crx_header(r.content)
+
+
+_VER_OK = re.compile(r"^[0-9A-Za-z._-]{1,32}$")
+
+
+def _safe_version(raw: Any) -> str:
+    """把 manifest 里的 `version` 变成"能安全拼进目录名"的字符串。
+
+    ## 为什么必须过滤（安全）
+
+    `version` 来自**扩展自己的 manifest.json**，也就是不可信输入：
+    装一个别人发你的 `.crx`，里面写 `"version": "../../../../tmp/pwn/escaped"`，
+    拼出来的路径就是 `<ext_dir>/slug-../../../../tmp/pwn/escaped` ——
+    会被 `copytree` 正常解析，于是**能往系统任意目录写文件**。
+
+    对比：`name` 早就走了 `packs._slugify()`（只留 alnum/-_.），
+    `version` 却一个字都没过滤，属于漏了。
+
+    规则：只允许 0-9 A-Z a-z 点 下划线 短横，长度 1~32；含斜杠、反斜杠、
+    `..`、空格、控制字符
+    等一律不认，退回 "0"。扩展版本号本来就只是点分数字，
+    这个白名单足够宽，也不会误伤 `1.0.0-beta`、`2.1_rc1` 这类。
+    """
+    text = str(raw or "").strip()
+    if not text or not _VER_OK.match(text) or ".." in text:
+        if text:
+            logger.warning("扩展版本号不合法，已按 0 处理：%r", text[:64])
+        return "0"
+    return text
 
 
 def read_manifest(zip_bytes: bytes) -> dict[str, Any]:
@@ -246,24 +279,51 @@ def install(
 
     zip_bytes: bytes | None = None
     ext_id = ""
+    src_dir_err = ""
     if url:
         ext_id = parse_extension_id(url)
         zip_bytes = download_crx(ext_id, timeout=timeout)
         logger.info("从商店下载扩展 %s（%s 字节 ZIP）", ext_id, len(zip_bytes))
     else:
         p = Path(crx_path).expanduser()
-        if not p.is_file():
-            raise StoreError("EXT_STORE_NO_SOURCE", f"文件不存在：{p}")
-        raw = p.read_bytes()
-        zip_bytes = strip_crx_header(raw)
-        logger.info("从本地文件装扩展 %s（%s 字节）", p.name, len(zip_bytes))
+        if p.is_dir():
+            # 已解包的扩展目录：打成内存 zip 走同一条路（保序、不改调用方代码）。
+            # 之前这里只认文件，而 CLI/MCP/工具描述都说"支持目录" —— 传目录必然
+            # 报"文件不存在"，描述与行为不符。
+            if not (p / "manifest.json").is_file():
+                raise StoreError(
+                    "EXT_STORE_NO_MANIFEST",
+                    f"{p} 里没有 manifest.json，不像解包后的扩展目录")
+            import io as _io
+            import zipfile as _zipfile
+
+            buf = _io.BytesIO()
+            with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+                for f in sorted(p.rglob("*")):
+                    if f.is_file():
+                        zf.write(f, f.relative_to(p).as_posix())
+            zip_bytes = buf.getvalue()
+            logger.info("从本地目录装扩展 %s（打包 %s 字节）", p.name, len(zip_bytes))
+        elif p.is_file():
+            raw = p.read_bytes()
+            zip_bytes = strip_crx_header(raw)
+            logger.info("从本地文件装扩展 %s（%s 字节）", p.name, len(zip_bytes))
+        else:
+            raise StoreError("EXT_STORE_NO_SOURCE", f"路径不存在：{p}")
 
     manifest = read_manifest(zip_bytes)
     slug = packs._slugify(str(manifest.get("name") or (ext_id or "ext"))) or "ext"
-    version = str(manifest.get("version") or "0")
+    version = _safe_version(manifest.get("version"))
     s = packs.get_settings()
     s.ext_dir.mkdir(parents=True, exist_ok=True)
     dest = s.ext_dir / f"{slug}-{version}"
+    # 兜底断言：不管上游怎么过滤，落盘目标必须真的在 ext_dir 下面。
+    # 这条不是重复劳动 —— 它是"以后有人再往路径里塞东西"时的最后一道闸。
+    try:
+        dest.resolve().relative_to(s.ext_dir.resolve())
+    except (ValueError, OSError) as exc:
+        raise StoreError("EXT_STORE_UNSAFE_PATH",
+                         f"扩展要装到的位置不在扩展库里（{dest}），已拒绝") from exc
 
     existed = dest.is_dir()
     if existed and not update:

@@ -221,6 +221,18 @@ function setupRoutes(page, opts){
         upstream: (body.scheme || 'http') + '://' + body.host + ':' + body.port,
       } });
     }
+    // PATCH = 编辑：就地改一条。记录到 m.patched，**不进 m.added** ——
+    // 这样若页面错把编辑做成"新增"（老 bug），断言会立刻发现。
+    if (/^\/v1\/proxies\/\d+$/.test(p) && method === 'PATCH'){
+      let body = {};
+      try { body = JSON.parse(req.postData() || '{}'); } catch (_) {}
+      const id = Number(p.split('/')[3]);
+      m.patched = m.patched || [];
+      m.patched.push(Object.assign({ id: id }, body));
+      if (!body.host) return bad(route, 400, 'PROXY_INVALID', '主机不能为空');
+      return json(route, { ok: true, data: Object.assign(
+        { id: id, has_password: true, hidden: false, origin: 'panel' }, body) });
+    }
     if (/^\/v1\/proxies\/\d+\/hide$/.test(p) && method === 'POST'){
       let body = {};
       try { body = JSON.parse(req.postData() || '{}'); } catch (_) {}
@@ -481,10 +493,20 @@ function setupRoutes(page, opts){
   await page.fill('#pxf-label', '改过的标签');
   await page.click('#dlg-ok');
   await page.waitForTimeout(600);
-  const edited = (pxMocks.added || []).find(x => x.label === '改过的标签') || {};
-  check('编辑保存发出 host/port/label', edited.host === '66.80.12.66' && Number(edited.port) === 20000,
-    JSON.stringify(edited));
-  check('编辑时密码为空（表示不修改）', (edited.password || '') === '', JSON.stringify(edited.password));
+  // 编辑必须走 **PATCH 且带 id**。老 bug 是走 POST（upsert），改主机/端口时
+  // 会变成"多出一条"，旧那条还在、新那条还没密码 —— 所以这两条断言很关键。
+  const patches = pxMocks.patched || [];
+  const lastPatch = patches[patches.length - 1] || {};
+  check('编辑走 PATCH 且带 id', patches.length === 1 && lastPatch.id === 1,
+    JSON.stringify(patches));
+  check('编辑 PATCH 带对 host/port/label',
+    lastPatch.host === '66.80.12.66' && Number(lastPatch.port) === 20000 &&
+    lastPatch.label === '改过的标签', JSON.stringify(lastPatch));
+  check('编辑时密码为空（表示不修改）', (lastPatch.password || '') === '',
+    JSON.stringify(lastPatch.password));
+  const addedBefore = (pxMocks.added || []).filter(x => x.label === '改过的标签');
+  check('编辑**不会**变成新增（没有多出一条同名记录）', addedBefore.length === 0,
+    JSON.stringify(addedBefore));
 
   console.log('\n— D2. 令牌视图 —');
   await page.click('#tabs .tab[data-view="secrets"]');

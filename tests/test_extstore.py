@@ -494,3 +494,97 @@ def test_download_crx_unreachable_host(home, monkeypatch):
         es.download_crx("hdhngoamekjhmnpenphenpaiindoinpo", timeout=5)
     assert ei.value.code == "EXT_STORE_UNREACHABLE"
     assert "clients2" in ei.value.message and "代理" in ei.value.message
+
+
+def test_manifest_version_cannot_escape_ext_dir(home, tmp_path):
+    """manifest 里的 `version` 是**不可信输入**，不能拼出 ext_dir 之外的路径。
+
+    对抗审查发现的真漏洞：`version` 直接进了 `ext_dir / f"{slug}-{version}"`，
+    装一个 `"version": "../../../../tmp/pwn/escaped"` 的 CRX 就能往系统任意目录
+    写文件（`copytree` 会正常解析 `..`）。`name` 早就有 slugify，`version` 漏了。
+
+    原有用例 `test_install_rejects_path_traversal` 只覆盖 zip **成员名**，没覆盖
+    manifest 字段，所以一直是绿的。
+    """
+    import io as _io
+    import json as _json
+    import zipfile as _zf
+
+    from zw_core.services import extstore as es
+
+    buf = _io.BytesIO()
+    with _zf.ZipFile(buf, "w") as z:
+        z.writestr("manifest.json", _json.dumps({
+            "manifest_version": 3, "name": "EvilExt",
+            "version": "../../../../tmp/zw-escaped-by-version"}))
+        z.writestr("pwn.txt", "WRITTEN OUTSIDE ext_dir")
+    crx = _crx3(buf.getvalue())
+    p = tmp_path / "evil.crx"
+    p.write_bytes(crx)
+
+    outside = tmp_path.parent / "zw-escaped-by-version"
+    r = es.install(crx_path=str(p), make_pack=False)
+
+    assert r["version"] == "0", f"非法版本号必须退回 0，实际 {r['version']!r}"
+    from pathlib import Path as _P
+
+    installed = _P(r["path"]).resolve()
+    ext_dir = _P.home().joinpath("x")  # 占位，下面用真实 ext_dir 断言
+    assert ".." not in installed.parts, installed
+    assert not (outside / "pwn.txt").exists(), "文件被写到 ext_dir 之外了"
+    # 落盘位置必须在扩展库下面
+    from zw_core.services import packs
+
+    assert str(installed).startswith(str(packs.get_settings().ext_dir.resolve()))
+
+
+def test_safe_version_whitelist():
+    """版本号白名单：合法形态放行，危险形态退回 0。"""
+    from zw_core.services.extstore import _safe_version
+
+    assert _safe_version("1.0.0") == "1.0.0"
+    assert _safe_version("2.1_rc1") == "2.1_rc1"
+    assert _safe_version("1.0.0-beta") == "1.0.0-beta"
+    for bad in ("../../etc", "..", "/abs", "a/b", "a b", "", None, "x" * 40):
+        assert _safe_version(bad) == "0", bad
+
+
+def test_install_from_unpacked_directory(home, tmp_path):
+    """`install(crx_path=<目录>)` 必须能装（CLI/MCP 都说支持目录）。
+
+    对抗审查发现：`install()` 只认 `p.is_file()`，传一个解包后的扩展目录必然报
+    `EXT_STORE_NO_SOURCE 文件不存在`，而 `zw extension install --help` 与 MCP 工具
+    描述都写着"扩展目录 / zip"。描述与行为不符。
+    """
+    from zw_core.services import extstore as es
+
+    src = tmp_path / "myext"
+    (src / "sub").mkdir(parents=True)
+    (src / "manifest.json").write_text('{"manifest_version":3,"name":"DirExt","version":"1.2.3"}')
+    (src / "sub" / "a.js").write_text("// a")
+
+    r = es.install(crx_path=str(src), make_pack=False)
+    from pathlib import Path as _P
+
+    dest = _P(r["path"])
+    assert r["slug"] == "dirext" and r["version"] == "1.2.3", r
+    assert (dest / "manifest.json").is_file()
+    assert (dest / "sub" / "a.js").is_file()
+
+
+def test_bad_crx_error_does_not_echo_file_content(home, tmp_path):
+    """错误消息里**不能**回显文件内容（任意路径都可能传进来）。
+
+    原来会把前 60 字节塞进消息：给 CLI / MCP / AI 代理开了一个
+    "读本机任意文件片段"的口子。
+    """
+    import pytest as _pytest
+
+    from zw_core.services import extstore as es
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET-CONTENT-1234567890")
+    with _pytest.raises(es.StoreError) as ei:
+        es.install(crx_path=str(secret), make_pack=False)
+    assert "TOP-SECRET" not in ei.value.message, ei.value.message
+    assert "Cr24" in ei.value.message  # 给出可判定的提示，而不是内容

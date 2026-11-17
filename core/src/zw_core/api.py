@@ -444,7 +444,7 @@ def build_app() -> FastAPI:
 
     # ── 元信息与 AI 自描述 ────────────────────────────────
     @app.get(f"{API_PREFIX}/meta", tags=["运维"], dependencies=[Auth, Cidr], summary="服务元信息")
-    def meta() -> dict[str, Any]:
+    def meta(request: Request) -> dict[str, Any]:
         s = get_settings()
         eng = mgr._engine_summary()
         return ok(
@@ -456,7 +456,18 @@ def build_app() -> FastAPI:
                 "host": s.host,
                 "port": s.port,
                 "gateway_public_base": s.gateway_public_base,
-                "auth_required": bool(s.admin_token),
+                # **按这次请求算**，不是"配没配令牌"。
+                #
+                # 原来写的是 `bool(s.admin_token)`：配了令牌的机器，即使从本机
+                # 回环访问（已经被放行、接口返回 200），页面也会因为
+                # auth_required=true 而弹出登录框 —— 正是用户抱怨的那个现象。
+                # 页面只需要知道"这一次要不要我输令牌"，所以这里直接问
+                # 本请求是否来自回环。
+                "auth_required": not is_loopback_request(request),
+                # 绑定地址被降级时的原因（例如设了 0.0.0.0 但没有凭据）。
+                # 以前这个字段只在 config 里被赋值，没有任何出口，
+                # 用户只能自己猜"为什么局域网连不上"。
+                "host_notice": getattr(s, "host_notice", ""),
                 "hub_url": s.hub_url,
                 "hub_token_set": bool(s.hub_token),
                 "hub_configured": bool(s.hub_url),
@@ -586,7 +597,6 @@ def build_app() -> FastAPI:
                         {"method": "POST", "path": f"{API_PREFIX}/profiles/batch", "说明": "批量启停"},
                         {"method": "POST", "path": f"{API_PREFIX}/profiles/import", "说明": "导入单文件"},
                         {"method": "GET", "path": f"{API_PREFIX}/extensions", "说明": "扩展库"},
-                        {"method": "POST", "path": f"{API_PREFIX}/extensions/install", "说明": "装扩展"},
                         {"method": "GET", "path": f"{API_PREFIX}/proxies", "说明": "代理库"},
                         {"method": "POST", "path": f"{API_PREFIX}/proxies/import", "说明": "批量导入（一行一个，socks5/http 带认证都支持）"},
                         {"method": "POST", "path": f"{API_PREFIX}/proxies/test", "说明": "测一个代理的出口 IP"},
@@ -778,7 +788,7 @@ def build_app() -> FastAPI:
                 raise ApiError(exc.code, exc.message, status=exc.status) from exc
 
         if src is None:
-            raise ApiError("PROXY_INVALID" if False else "PATH_NOT_FOUND",
+            raise ApiError("PATH_NOT_FOUND",
                            "要么给 url（商店链接/扩展 ID），要么给 path（.crx / 扩展目录 / zip）")
         if not src.exists():
             raise ApiError("PATH_NOT_FOUND", f"路径不存在：{src}")
@@ -922,23 +932,6 @@ def build_app() -> FastAPI:
 
     # ══ 代理库：批量导入 / 批量检测 ════════════════════════════
     # ── 从 Chrome 应用商店装扩展（用户：输入商店链接就能添加）────────
-    class ExtInstallBody(BaseModel):
-        """从商店链接 / 扩展 ID / 本地 .crx 路径装一个扩展。
-
-        - `url`：`https://chromewebstore.google.com/detail/<slug>/<id>?hl=zh-CN`
-          或直接 32 位扩展 ID
-        - `path`：用户手动拖进来的 `.crx` / `.zip` 的本机路径
-        - `update`：库里已有其它版本时是否装新版（默认 True）
-        """
-
-        url: str = ""
-        path: str = ""
-        name: str = ""
-        update: bool = True
-        # 装完顺手做成扩展包（默认开）；as_default 再标成"新建环境自动带上"
-        make_pack: bool = True
-        as_default: bool = False
-
     @app.get(f"{API_PREFIX}/extensions/updates", tags=["扩展"], dependencies=[Auth],
              summary="检查已装扩展有没有新版")
     def extensions_updates() -> dict[str, Any]:

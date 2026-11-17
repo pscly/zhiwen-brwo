@@ -321,3 +321,54 @@ def test_client_console_page_skips_login_when_auth_not_required():
     body = m.group(1)
     assert "loadMeta()" in body, f"没先问 meta 就弹登录框：{body[:200]}"
     assert "hideLogin()" in body, "auth_required=false 时没有隐藏登录层"
+
+
+def test_meta_auth_required_is_per_request_not_per_config():
+    """`auth_required` 必须是"**这次请求**要不要令牌"，不是"配没配令牌"。
+
+    真踩过：原来是 `bool(s.admin_token)`。于是配了令牌的机器，即使从本机回环访问
+    （接口已经放行、返回 200），页面也会因为 `auth_required=true` 弹出登录框 ——
+    正是用户抱怨的「打开控制台还要输访问密码」。之前只在没配令牌的机器上验证过，
+    所以漏了这条常见配置。
+    """
+    import os
+    import shutil
+    import tempfile
+
+    from fastapi.testclient import TestClient
+
+    from zw_core import db
+
+    tmp = tempfile.mkdtemp()
+    # **不要**设 ZW_DEVICE_ID：它会被后续测试继承（host 心跳/同步按设备号注册），
+    # 第一版设了没还原，导致 test_sync_integration 里 8 项报
+    # 「设备未注册：zwd_metapertest…」。这里只需要"配了 admin_token"这一个条件。
+    # 顺手把改动过的环境变量快照下来，结束时还原。
+    keys = ("ZW_ROOT", "ZW_ADMIN_TOKEN", "ZW_DEVICE_ID")
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["ZW_ROOT"] = tmp
+        os.environ["ZW_ADMIN_TOKEN"] = "secret123"   # 关键：**配了**令牌
+        os.environ.pop("ZW_DEVICE_ID", None)
+
+        from zw_core import config
+
+        config.reset_settings()
+        db.reset_db()
+        from zw_core.main import create_app
+
+        H = {"Authorization": "Bearer secret123"}
+        with TestClient(create_app(), client=("127.0.0.1", 50001)) as c:
+            d = c.get("/api/v1/meta", headers=H).json()["data"]
+        assert d["auth_required"] is False, "本机回环不该要求令牌（否则页面会弹登录框）"
+
+        with TestClient(create_app(), client=("192.168.3.99", 50002)) as c:
+            d2 = c.get("/api/v1/meta", headers=H).json()["data"]
+        assert d2["auth_required"] is True, "远程必须要求令牌"
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)

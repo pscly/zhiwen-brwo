@@ -321,25 +321,13 @@ def _sync_proxies(_: dict[str, Any]) -> Any:
     return proxysync.sync()
 
 
-@tool(
-    "zw_hide_proxy",
-    "隐藏/取消隐藏一条代理。隐藏后不出现在列表与客户端拉取里，但**不删除**、"
-    "不影响已经在用它的环境 —— 适合「先收起来别弄丢」。",
-    _obj({
-        "id": {"type": "integer", "description": "代理 id"},
-        "hidden": {"type": "boolean", "description": "true 隐藏 / false 取消隐藏"},
-    }, ["id"]),
-)
-def _hide_proxy(args: dict[str, Any]) -> Any:
-    from .db import get_db
-
-    hidden = 1 if args.get("hidden", True) else 0
-    with get_db().conn() as c:
-        cur = c.execute("UPDATE proxies SET hidden=? WHERE id=?", (hidden, int(args["id"])))
-        if cur.rowcount == 0:
-            raise RuntimeError(f"代理不存在：{args['id']}")
-    return {"ok": True, "id": int(args["id"]), "hidden": bool(hidden)}
-
+# 注：这里**故意没有** `zw_hide_proxy`。
+#
+# "隐藏"是**服务器侧**的概念（`hub/src/zw_hub/proxies.py` 的 `hidden` 列），
+# 本机库 `proxies` 表没有这一列。曾经加过一个 `zw_hide_proxy` 直接
+# `UPDATE proxies SET hidden=?`，结果 100% 报 `no such column: hidden` ——
+# 一个永远失败的工具比没有这个工具更糟（AI 会反复试、用户以为坏了）。
+# 要隐藏代理，请用主控台（`POST /v1/proxies/{id}/hide`）或客户端 GUI。
 
 @tool(
     "zw_install_extension",

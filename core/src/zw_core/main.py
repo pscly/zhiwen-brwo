@@ -247,6 +247,16 @@ def run() -> None:
     import uvicorn
 
     s = get_settings()
+    # 降级提示必须在**启动时打出来**。
+    #
+    # 真踩过：配置层在"绑 0.0.0.0 但既没有 ZW_ADMIN_TOKEN 也没有 ZW_DEVICE_ID"
+    # 时会静默降级成只监听 127.0.0.1（安全上是对的），并把原因写进
+    # `s.host_notice` —— 但**全项目没人读它**。
+    # 于是用户设了 ZW_HOST=0.0.0.0，实际只能本机访问，日志一个字都不说，
+    # 只能自己去猜为什么局域网连不上。这里把它打出来（用 WARNING，
+    # 因为对用户来说这几乎总是"不是我想要的结果"）。
+    if getattr(s, "host_notice", ""):
+        logger.warning("%s", s.host_notice)
     logger.info("监听 http://%s:%s  数据目录 %s", s.host, s.port, s.root)
     # log_config=None：不让 uvicorn 用 dictConfig 覆盖我们的日志配置
     # （它的 formatter 会碰 sys.stdout，而无控制台环境下那是 None）。

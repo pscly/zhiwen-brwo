@@ -1021,3 +1021,71 @@ def test_bad_proxy_blocks_start_with_readable_error(tmp_path, monkeypatch):
     finally:
         config.reset_settings()
         db.reset_db()
+
+
+# ── 服务器侧"按 id 编辑"（0.7.33）────────────────────────
+def test_hub_patch_edits_in_place_not_insert(tmp_path):
+    """PATCH /v1/proxies/{id} 必须**就地改**，不能变成新增。
+
+    对抗审查发现的老 bug：界面的"编辑"走 `POST /v1/proxies`，而 upsert 的去重键是
+    `scheme+host+port+username+hop`（不含 id）。改主机/端口时新键在库里不存在 →
+    走 INSERT → **多出一条**：旧那条还在（环境仍指向它）、新那条没密码（编辑框留空）、
+    `origin` 被覆写成 panel。等于"编辑"实际是"新增"。
+
+    注意：**必须放在子进程里跑**。第一版在本进程内 `del sys.modules['zw_hub*']`
+    ＋改 `ZW_DATA_DIR`，把全局状态改脏了，全量跑时连累
+    `test_sync_integration.py`（真起 hub）挂掉 9 项。
+    """
+    import subprocess
+    import sys as _sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import sys
+        sys.path.insert(0, %r)
+        sys.path.insert(0, %r)
+        from fastapi.testclient import TestClient
+        from zw_hub.main import app
+        with TestClient(app) as c:
+            c.post("/panel/api/login", json={"username": "a", "password": "b"})
+            r1 = c.post("/v1/proxies", json={"scheme": "socks5", "host": "66.80.12.66",
+                                             "port": 20000, "username": "u",
+                                             "password": "p1", "label": "A"}).json()
+            pid = r1["data"]["id"]
+            assert r1["data"]["has_password"] is True, r1
+            r2 = c.patch("/v1/proxies/%%d" %% pid, json={
+                "scheme": "socks5", "host": "66.80.12.67", "port": 20001,
+                "username": "u", "password": "", "label": "A2"})
+            assert r2.status_code == 200, r2.text
+            assert r2.json()["data"]["id"] == pid, "必须是同一条，不能新建"
+            rows = c.get("/v1/proxies").json()["data"]["proxies"]
+            assert len(rows) == 1, "编辑后不该多出条目：%%r" %% (rows,)
+            row = rows[0]
+            assert (row["host"], row["port"], row["label"]) == ("66.80.12.67", 20001, "A2"), row
+            assert row["has_password"] is True, "密码留空表示不改，不能丢"
+            assert row.get("origin") == "panel", "origin 不能被吞"
+            c.post("/v1/proxies", json={"scheme": "http", "host": "9.9.9.9", "port": 1080})
+            dup = c.patch("/v1/proxies/%%d" %% pid,
+                          json={"scheme": "http", "host": "9.9.9.9", "port": 1080})
+            assert dup.status_code == 409, dup.text
+            assert dup.json()["code"] == "PROXY_DUPLICATE", dup.text
+            assert c.patch("/v1/proxies/9999", json={"scheme": "http",
+                          "host": "1.2.3.4", "port": 80}).status_code == 404
+            print("OK")
+        """
+    ) % (
+        str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hub" / "src"),
+        str(__import__("pathlib").Path(__file__).resolve().parent.parent / "core" / "src"),
+    )
+    env = {
+        "ZW_DATA_DIR": str(tmp_path / "hubdata"),
+        "ZW_PANEL_USER": "a",
+        "ZW_PANEL_PASSWORD": "b",
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+    }
+    r = subprocess.run([_sys.executable, "-c", script], capture_output=True, text=True,
+                       timeout=180, env=env)
+    assert r.returncode == 0, f"stdout={r.stdout[-1500:]}\nstderr={r.stderr[-1500:]}"
+    assert "OK" in r.stdout
