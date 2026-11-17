@@ -576,3 +576,40 @@ def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):
     finally:
         config.reset_settings()
         db.reset_db()
+
+
+def test_apply_works_when_profile_has_no_engine_path(tmp_path, monkeypatch):
+    """`profile.engine_path` 可能为空（Windows CI 上就是），这时要回落到
+    `engines.find_chrome(settings)`。
+
+    我第一版写成 `s.engine_path` —— `Settings` 上根本没这个字段（叫 `chrome_bin`），
+    于是 Windows 上 profile.engine_path 为空时抛 AttributeError，
+    被 except 吞成"按不加载处理"，警告文案里全是异常信息而不是真正的原因。
+    """
+    from zw_core import config, db
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("ZW_CHROME_BIN", "/usr/bin/google-chrome")
+    config.reset_settings()
+    db.reset_db()
+    try:
+        from zw_core.services import engines, manager as mgr, packs
+
+        monkeypatch.setattr(engines, "engine_version", lambda _p: "Google Chrome 149.0.7827.53")
+        src = tmp_path / "ext2"
+        src.mkdir()
+        (src / "manifest.json").write_text(
+            '{"manifest_version":3,"name":"Probe2","version":"1.0"}', encoding="utf-8")
+        pack = packs.import_pack(src_path=str(src), name="探针包2")
+        prof = mgr.create_profile({"name": "空引擎路径"})
+        # 明确清掉 engine_path，模拟 Windows CI 的情形
+        mgr._update(prof["id"], engine_path="")
+        out = packs.apply_to_profile(prof["id"], [pack["id"]])
+        assert out["applied"]
+        assert out["extensions_active"] is False
+        note = out["extensions_note"]
+        assert "137" in note, note
+        assert "出错" not in note, f"不该靠异常兜底：{note}"
+    finally:
+        config.reset_settings()
+        db.reset_db()

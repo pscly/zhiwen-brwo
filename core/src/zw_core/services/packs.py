@@ -743,10 +743,16 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
         from . import engines as _engines
 
         try:
-            ext_ok, ext_note = _engines.extensions_loadable(Path(p.get("engine_path") or s.engine_path))
+            # 引擎路径的解析统一走 engines.find_chrome()：
+            # 配置项叫 `chrome_bin`（不是 `engine_path`），profile 里那一列才是
+            # `engine_path` 且可能为空 —— 我第一版写成 `s.engine_path`，
+            # Windows 上 profile.engine_path 为空时直接 AttributeError。
+            bin_path = Path(str(p.get("engine_path") or "")) if p.get("engine_path") else _engines.find_chrome(s)
+            ext_ok, ext_note = _engines.extensions_loadable(bin_path)
         except Exception as exc:  # noqa: BLE001
             # 不能"出错就放行"：那正是"插件没加载但没人告警"的来源。
-            ext_ok, ext_note = False, f"判断扩展能否被加载时出错（{type(exc).__name__}: {exc}），已按不加载处理"
+            ext_ok, ext_note = False, (
+                f"判断扩展能否被加载时出错（{type(exc).__name__}: {exc}），已按不加载处理")
 
     fresh = manager.get_profile(p["id"])
     return {
