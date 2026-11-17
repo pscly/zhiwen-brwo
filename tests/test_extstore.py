@@ -388,3 +388,109 @@ def test_installed_extension_actually_runs_in_browser(home, tmp_path):
             _mgr.stop(prof["id"], force=True)
         except Exception:
             pass
+
+
+# ── 真 HTTP 下载路径（本地假商店，不需要外网）───────────────
+def _serve_store(crx_bytes: bytes, *, status: int = 200, redirect: bool = True):
+    """起一个本地"假 Chrome 商店"。
+
+    为什么要它：`download_crx` 之前一直被 monkeypatch 掉，等于**真实的 HTTP 路径
+    从没被测过** —— URL 拼错、不跟随重定向、状态码没判断，这些都测不出来。
+    商店真实行为是：`/service/update2/crx` 返回 302，再跳到实际文件。
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path.startswith("/service/update2/crx"):
+                if redirect:
+                    self.send_response(302)
+                    self.send_header("Location", "/actual.crx")
+                    self.end_headers()
+                    return
+                self.send_response(status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if self.path.startswith("/actual.crx"):
+                if status != 200:
+                    self.send_response(status)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(len(crx_bytes)))
+                self.end_headers()
+                self.wfile.write(crx_bytes)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_a):
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, int(srv.server_address[1])
+
+
+def test_download_crx_over_real_http_with_redirect(home, monkeypatch):
+    """真发一次 HTTP：跟随 302 → 拿到 CRX → 去头解包 → 建包。
+
+    这条补的是"输入商店链接就能装"里唯一没测过的一环。
+    """
+    import io
+    import json as _json
+    import zipfile as _zf
+
+    from zw_core.services import extstore as es
+
+    buf = io.BytesIO()
+    with _zf.ZipFile(buf, "w") as z:
+        z.writestr("manifest.json",
+                   _json.dumps({"manifest_version": 3, "name": "HttpExt", "version": "3.1.4"}))
+        z.writestr("sw.js", "// x")
+    crx = _crx3(buf.getvalue())
+
+    srv, port = _serve_store(crx, redirect=True)
+    try:
+        # 把商店地址指到本地假服务器
+        monkeypatch.setattr(es, "UPDATE_URL", f"http://127.0.0.1:{port}/service/update2/crx")
+        r = es.install(url="hdhngoamekjhmnpenphenpaiindoinpo", as_default=True)
+        assert r["slug"] == "httpext" and r["version"] == "3.1.4", r
+        assert r["pack_created"] is True and r["is_default"] is True, r
+        from pathlib import Path
+
+        assert (Path(r["path"]) / "manifest.json").is_file()
+        assert (Path(r["path"]) / "sw.js").is_file()
+    finally:
+        srv.shutdown()
+
+
+def test_download_crx_http_error_is_readable(home, monkeypatch):
+    """商店回 404（扩展下架/ID 写错）时要给出可读错误，而不是烂在 zipfile 里。"""
+    from zw_core.services import extstore as es
+
+    srv, port = _serve_store(b"", status=404)
+    try:
+        monkeypatch.setattr(es, "UPDATE_URL", f"http://127.0.0.1:{port}/service/update2/crx")
+        with pytest.raises(es.StoreError) as ei:
+            es.download_crx("hdhngoamekjhmnpenphenpaiindoinpo", timeout=10)
+        assert ei.value.code in ("EXT_STORE_HTTP_ERROR", "EXT_STORE_BAD_CRX"), ei.value.code
+        assert "404" in ei.value.message or "下架" in ei.value.message, ei.value.message
+    finally:
+        srv.shutdown()
+
+
+def test_download_crx_unreachable_host(home, monkeypatch):
+    """连不上时要说清"需要能访问 clients2.google.com"，并建议配代理。"""
+    from zw_core.services import extstore as es
+
+    # 127.0.0.1:1 基本不可能有服务
+    monkeypatch.setattr(es, "UPDATE_URL", "http://127.0.0.1:1/service/update2/crx")
+    with pytest.raises(es.StoreError) as ei:
+        es.download_crx("hdhngoamekjhmnpenphenpaiindoinpo", timeout=5)
+    assert ei.value.code == "EXT_STORE_UNREACHABLE"
+    assert "clients2" in ei.value.message and "代理" in ei.value.message

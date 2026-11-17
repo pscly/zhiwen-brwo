@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## 0.7.29 — 2026-11-17
+
+**商店下载的真实 HTTP 路径终于被测到了（用本地假商店，不需要外网）。**
+
+### 此前的空洞
+
+`download_crx` 一直被 monkeypatch 掉，等于这条链里**最关键的一环从没被测过**：
+URL 拼错、不跟随 302、状态码没判断、拿到 HTML 错误页 —— 全都测不出来。
+而它正是"输入商店链接就能装"的入口。
+
+### 新增 3 条真 HTTP 测试
+
+起一个本地"假 Chrome 商店"（`ThreadingHTTPServer`）：
+
+- `/service/update2/crx` 返回 **302** → `/actual.crx` 才是文件
+  （复刻商店真实行为，同时验证 `follow_redirects` 真的生效）
+- 验证完整链路：跟随重定向 → 拿到 CRX → 去头 → 解包 → 入库 → 建包 → 设默认
+- 404 时给出可读原因（下架 / ID 写错），不是烂在 `zipfile`
+- 连不上时明确要求"需要能访问 clients2.google.com"并建议配代理
+
+实测：
+
+```
+install(url=<32位ID>, as_default=True)
+  → slug=httpext version=3.1.4
+  → pack_created=True is_default=True
+  → manifest.json / sw.js 都落盘
+```
+
+### 现在"商店链接装扩展"这条链的证据分布
+
+| 环节 | 证据 |
+|---|---|
+| URL 拼装 + 302 跟随 + 状态码 | ✅ 本地假商店真 HTTP 测试 |
+| CRX 去头（CRX2/CRX3/纯 zip/HTML 错误页/截断/坏偏移） | ✅ 单测 |
+| 解包防路径穿越 | ✅ 单测 |
+| 入库 → 建包 → 设默认 → 新环境带上 | ✅ 单测 + 实测 |
+| 插件在真浏览器里执行 | ✅ ungoogled 真机 `data-store-installed='YES'` |
+| 真实 Google 商店 | ✅ 云电脑实测（164717 字节，header_len=1310） |
+
+只剩"在**同一台**机器上从真实 Google 下载并跑完整个流程"没串过 —— 需要云电脑在线。
+
+### 测试
+
+556 → **559 项**。
+
 ## 0.7.28 — 2026-11-17
 
 **补齐接口文档：11 个接口从来没写进 `docs/04`，并加了"漏文档就红"的测试。**
