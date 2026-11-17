@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## 0.7.27 — 2026-11-17
+
+**把新能力补进 MCP（28 → 33 个工具）与 AI 清单。**
+
+### 问题
+
+用户要求「AI 也可以通过这个接口去知道有哪些浏览器和机子在线，并且帮我去控制」。
+MCP 是 AI 真正调用的入口，但本轮新增的能力一个都没在里面：
+
+- 代理库：只能 `list` / `check`，**没有批量导入、没有同步、没有隐藏**
+- 扩展：**完全没有**装扩展、查更新
+
+也就是说 AI 做不到"帮你导一批代理""装个扩展""查更新"。
+
+### 新增 5 个工具
+
+| 工具 | 作用 |
+|---|---|
+| `zw_import_proxies` | 批量导入（一行一个，支持链式；坏行单独返回原因） |
+| `zw_sync_proxies` | 代理库与服务器双向对齐 |
+| `zw_hide_proxy` | 隐藏/取消隐藏（不删除，不影响在用它的环境） |
+| `zw_install_extension` | 商店链接 / `.crx` / 目录 / zip → 可自动建包并设为默认 |
+| `zw_check_extension_updates` | 回商店比对已装扩展版本 |
+
+工具的说明里写清了「什么时候该用它」（项目规矩）。
+
+### AI 清单也补齐
+
+`/api/v1/ai/manifest` 的「端点清单」加了 4 条：
+`proxies/{id}/hide`、`extensions/install`、`extensions/updates`、`proxies/sync`。
+
+### 实测
+
+```
+$ tools/list → 33 个工具
+  zw_import_proxies ✅  zw_sync_proxies ✅  zw_hide_proxy ✅
+  zw_install_extension ✅  zw_check_extension_updates ✅
+
+$ tools/call zw_import_proxies
+  {"ok": true, "data": {"total": 2, "imported": 1, "skipped": 0,
+   "failed": [{"line": "socks5://66.80.12 0.66:20000",
+               "error": "代理主机名里有空格：…"}]}}
+```
+
+### 测试
+
+553 → **555 项**：MCP 工具存在性（真跑 `zw mcp` 读 `tools/list`）、
+manifest 端点清单含新接口。
+
+> 写测试时踩了两下：`client` fixture 只在 `test_api_smoke.py` 里有（先写错文件导致
+> `fixture 'client' not found`）；manifest 的键名是中文「端点清单」而不是 `endpoints`。
+
 ## 0.7.26 — 2026-11-17
 
 **补齐 CLI：批量导入代理、代理库同步、商店链接装扩展、扩展更新检查。**

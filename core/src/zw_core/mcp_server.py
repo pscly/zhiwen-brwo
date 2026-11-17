@@ -296,6 +296,93 @@ def _check_proxy(args: dict[str, Any]) -> Any:
     return proxysvc.check_egress(spec) if spec else {"ok": False, "error": "代理配置不完整"}
 
 
+@tool(
+    "zw_import_proxies",
+    "批量导入代理（一行一个）。支持 socks5://u:p@h:port、http://…、h:port:u:p、行尾 # 备注，"
+    "以及链式「前置,落地」。坏行单独返回原因，不影响其它行。"
+    "用户可以一次粘几十条，返回里有 imported/skipped/failed 明细。",
+    _obj({"text": {"type": "string", "description": "多行文本，一行一个代理"}}, ["text"]),
+)
+def _import_proxies(args: dict[str, Any]) -> Any:
+    from .services import proxylib
+
+    return proxylib.import_batch(str(args.get("text") or ""))
+
+
+@tool(
+    "zw_sync_proxies",
+    "把本机代理库与服务器对齐（先上行把本机新增的交上去，再下行补服务器新增的）。"
+    "用户要求「两边都能加，自动同步」；平时是自动的，这个工具用于手动补一次。",
+    _obj({}),
+)
+def _sync_proxies(_: dict[str, Any]) -> Any:
+    from .services import proxysync
+
+    return proxysync.sync()
+
+
+@tool(
+    "zw_hide_proxy",
+    "隐藏/取消隐藏一条代理。隐藏后不出现在列表与客户端拉取里，但**不删除**、"
+    "不影响已经在用它的环境 —— 适合「先收起来别弄丢」。",
+    _obj({
+        "id": {"type": "integer", "description": "代理 id"},
+        "hidden": {"type": "boolean", "description": "true 隐藏 / false 取消隐藏"},
+    }, ["id"]),
+)
+def _hide_proxy(args: dict[str, Any]) -> Any:
+    from .db import get_db
+
+    hidden = 1 if args.get("hidden", True) else 0
+    with get_db().conn() as c:
+        cur = c.execute("UPDATE proxies SET hidden=? WHERE id=?", (hidden, int(args["id"])))
+        if cur.rowcount == 0:
+            raise RuntimeError(f"代理不存在：{args['id']}")
+    return {"ok": True, "id": int(args["id"]), "hidden": bool(hidden)}
+
+
+@tool(
+    "zw_install_extension",
+    "安装一个 Chrome 扩展：给 url（商店详情页链接或 32 位扩展 ID）或 path（.crx / 扩展目录 / zip）。"
+    "默认会顺手建成扩展包；as_default=true 则标成「新建环境自动带上」。"
+    "下载在这台机器上做 —— 服务器常常没有外网也没有用户的代理。",
+    _obj({
+        "url": {"type": "string", "description": "商店链接或 32 位扩展 ID"},
+        "path": {"type": "string", "description": ".crx / 扩展目录 / zip 的绝对路径"},
+        "as_default": {"type": "boolean", "description": "设为新建环境默认带上"},
+        "make_pack": {"type": "boolean", "description": "是否顺手建扩展包（默认 true）"},
+    }),
+)
+def _install_extension(args: dict[str, Any]) -> Any:
+    from .services import extstore
+
+    url = str(args.get("url") or "").strip()
+    path = str(args.get("path") or "").strip()
+    if not (url or path):
+        raise RuntimeError("要么给 url（商店链接/ID），要么给 path")
+    try:
+        return extstore.install(
+            url=url, crx_path=path,
+            make_pack=bool(args.get("make_pack", True)),
+            as_default=bool(args.get("as_default", False)),
+        )
+    except extstore.StoreError as exc:
+        raise RuntimeError(f"[{exc.code}] {exc.message}") from exc
+
+
+@tool(
+    "zw_check_extension_updates",
+    "检查已装扩展有没有新版（回 Chrome 商店比对）。只查带商店 ID 标记的；"
+    "手工导入的包没有 ID，会跳过 —— 不瞎猜 ID 去下载别人的扩展。",
+    _obj({}),
+)
+def _check_extension_updates(_: dict[str, Any]) -> Any:
+    from .services import extstore
+
+    items = extstore.check_updates()
+    return {"items": items, "updatable": [i for i in items if i.get("update_available")]}
+
+
 # ── 同步 ──────────────────────────────────────────────────
 @tool(
     "zw_sync_push",

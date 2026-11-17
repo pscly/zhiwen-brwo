@@ -717,3 +717,17 @@ def test_extensions_install_body_accepts_url_and_pack_flags():
     # 老的目录安装仍然可用（path 不再是必填，但给了就要能用）
     b2 = ExtensionInstall(path="/tmp/some-dir")
     assert b2.path == "/tmp/some-dir" and b2.url == ""
+
+
+def test_ai_manifest_lists_new_endpoints(client):
+    """`/api/v1/ai/manifest` 的端点清单要含新增接口。
+
+    AGENTS.md 的规矩：加接口要同时在 manifest 里补一条 —— 那是 AI 发现能力的入口。
+    """
+    # 这个 fixture 设了 ZW_ADMIN_TOKEN，非回环来源必须带令牌
+    d = client.get("/api/v1/ai/manifest", headers=H).json()["data"]
+    # 键名是中文「端点清单」（不是 endpoints）—— 这里跟着实际结构走
+    paths = " ".join(str(e.get("path", "")) for e in (d.get("端点清单") or []))
+    for frag in ("proxies/{id}/hide", "extensions/install",
+                 "extensions/updates", "proxies/sync"):
+        assert frag in paths, f"manifest 里缺 {frag}"

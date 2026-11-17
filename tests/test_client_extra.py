@@ -350,3 +350,30 @@ def test_cli_has_extension_install_url_and_updates():
     out2 = subprocess.run([_sys.executable, "-m", "zw_core.cli", "extension", "install", "--help"],
                           capture_output=True, text=True, timeout=60).stdout
     assert "--url" in out2 and "--default" in out2, out2[:500]
+
+
+def test_mcp_exposes_new_capabilities():
+    """MCP 必须暴露本轮新增的能力，否则"AI 也能控制"是空话。
+
+    之前 28 个工具里没有：代理批量导入 / 代理库同步 / 代理隐藏 /
+    装扩展（商店链接）/ 扩展更新检查。用户明确要求 AI 能通过接口知道并控制，
+    缺工具就等于 AI 做不到。
+    """
+    import json as _json
+    import subprocess
+    import sys as _sys
+
+    req = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    out = subprocess.run([_sys.executable, "-m", "zw_core.cli", "mcp"],
+                         input=req + "\n", capture_output=True, text=True, timeout=120).stdout
+    names = set()
+    for line in out.splitlines():
+        try:
+            d = _json.loads(line)
+        except Exception:
+            continue
+        if d.get("id") == 1:
+            names = {t["name"] for t in d["result"]["tools"]}
+    want = {"zw_import_proxies", "zw_sync_proxies", "zw_hide_proxy",
+            "zw_install_extension", "zw_check_extension_updates"}
+    assert want <= names, f"缺工具：{sorted(want - names)}（现有 {len(names)} 个）"
