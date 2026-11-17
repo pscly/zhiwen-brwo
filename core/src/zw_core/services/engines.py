@@ -451,7 +451,26 @@ def build_cmdline(
         args.extend(_POSIX_ONLY_ARGS)
     args.extend(extra_args or [])
     if not IS_WIN and _is_root():
-        # 坑：Linux 上以 root 跑 Chromium 必须加 --no-sandbox，否则直接退出
+        # 坑：Linux 上以 root 跑 Chromium **必须**加 --no-sandbox，否则直接退出。
+        #
+        # `ZW_ALLOW_ROOT` 的语义（修过一次，别改回去）：
+        #   - **默认 true = 保持历史行为**（root 下加 --no-sandbox 照常跑）。
+        #     容器/CI 里就是 root，把它默认设成 false 会让所有这些部署直接起不来。
+        #   - 设成 **false 才是"拒绝以 root 运行"**，并给出明确错误 ——
+        #     这是给"我不接受关沙箱"的部署用的显式选择。
+        #
+        # 为什么不是反过来：这个开关以前只在配置里有定义、**全项目没人读**
+        # （设了等于没设）。第一次修的时候我把它默认设成 false，
+        # 结果本机（uid=0）21 个测试全红 —— 修一个死开关不能顺手把现有部署搞坏。
+        from ..config import get_settings
+
+        if not get_settings().allow_root:
+            raise EngineError(
+                "ENGINE_RUN_AS_ROOT",
+                "当前以 root 身份运行，而 ZW_ALLOW_ROOT=false 表示拒绝这种运行方式"
+                "（以 root 跑浏览器会强制 --no-sandbox，沙箱被关掉）。"
+                "换成普通用户运行，或显式设 ZW_ALLOW_ROOT=true。",
+            )
         args.append("--no-sandbox")
     if IS_WIN and profile.get("_extra_no_sandbox"):
         args.append("--no-sandbox")

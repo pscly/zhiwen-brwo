@@ -1,5 +1,55 @@
 # CHANGELOG
 
+## 0.7.46 — 2026-11-18
+
+**又抓到两个"死开关"：`ZW_ALLOW_ROOT` 和 `ZW_GATEWAY_ENABLED` 设了完全没效果。**
+
+### 怎么发现的
+
+做配置项文档覆盖检查时，发现有 7 个环境变量没写进 `docs/03`，其中 4 个
+**所有文档都没提**。顺着两个最像开关的去查代码引用：
+
+```
+ZW_ALLOW_ROOT       → 除 config.py 里的定义，全项目零引用
+ZW_GATEWAY_ENABLED  → 同上
+```
+
+也就是说用户设了它们，**什么都不会变**。文档漏写只是让人不知道；
+死开关是让人知道了也被骗。
+
+顺带发现：`engines.build_cmdline()` 是「只要以 root 跑就无条件加 `--no-sandbox`」，
+而 `allow_root` 那个开关根本没参与判断。
+
+### 修法
+
+- `ZW_GATEWAY_ENABLED=false` → `ROUTER.register()` 直接不登记（`/cdp/<id>` 一律 404，
+  只能本机直连端口）。适合"这台机器不对外提供 CDP"的部署。
+- `ZW_ALLOW_ROOT=false` → 以 root 启动环境时抛 `ENGINE_RUN_AS_ROOT`，并说明原因。
+
+### 我自己在这里犯的一个错（值得记）
+
+第一版我把 `ZW_ALLOW_ROOT` 的**默认值设成了 false**（"默认不允许 root"），
+跑全量测试：**21 项失败** —— 因为这台机器 uid=0，而容器/CI 基本也都是 root。
+`--no-sandbox` 是历史必需行为，我修一个死开关不能顺手把现有部署搞坏。
+
+改成：**默认 `true`（保持历史行为），设成 `false` 才是"拒绝"**。
+这也是配置项该有的方向——默认值必须让已有部署继续能跑。
+
+### 文档
+
+`docs/03` 补齐 7 个配置项（含 `ZW_ALLOW_ROOT`、`ZW_GATEWAY_ENABLED`、
+`ZW_INTERNAL_TOKEN`、`ZW_DEVICE_ID`、端口池、远程命令行 cwd/timeout）。
+`docs/04` 补 `ENGINE_RUN_AS_ROOT` 错误码。
+
+### 测试
+
+579 → **582 项**：
+`test_allow_root_gate_is_enforced`（拒绝时报错 + 允许时带 --no-sandbox）、
+`test_gateway_enabled_switch_is_enforced`（关掉不登记 / 打开登记）、
+`test_every_config_env_var_is_documented`（46 个环境变量逐个对文档，缺一个就红）。
+
+七个门槛全部通过：582 单测 / 73 / 13 / 20 / 75 / 23 / 32。
+
 ## 0.7.45 — 2026-11-18
 
 **自检脚本会往你服务器上注册残留设备 —— 已修，并清了已有的两条。**

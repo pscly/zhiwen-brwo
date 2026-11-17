@@ -110,8 +110,13 @@ class Settings:
     chrome_extra_args: list[str] = field(
         default_factory=lambda: _env("ZW_CHROME_EXTRA_ARGS").split() if _env("ZW_CHROME_EXTRA_ARGS") else []
     )
-    # 是否允许以 root 运行（仅 Linux 容器内需要）
-    allow_root: bool = field(default_factory=lambda: _env_bool("ZW_ALLOW_ROOT", False))
+    # 是否允许以 root 运行。
+    #
+    # **默认 true**：容器 / CI / 很多服务器上就是 root，Chromium 在 root 下必须加
+    # `--no-sandbox` 才能启动，这是历史行为。把它默认设成 false 会让这些部署
+    # 直接起不来（实测：本机 uid=0 时 21 个测试全红）。
+    # 设成 **false** 才是"我拒绝以 root 跑浏览器"的显式选择。
+    allow_root: bool = field(default_factory=lambda: _env_bool("ZW_ALLOW_ROOT", True))
     # 找不到内核时是否允许"自动下载"（默认关闭：不想替用户从网络上拉二进制）
     engine_autofetch: bool = field(default_factory=lambda: _env_bool("ZW_ENGINE_AUTOFETCH", False))
 

@@ -206,3 +206,26 @@ def test_every_public_route_is_documented():
         if probe not in doc_norm:
             missing.append(path)
     assert not missing, "这些接口没写进 docs/04：\n" + "\n".join(missing)
+
+
+def test_every_config_env_var_is_documented():
+    """`config.py` 里支持的每个 `ZW_*` 环境变量，都要写进 `docs/03-部署指南.md`。
+
+    这条抓到过 7 个漏写的，其中 4 个**所有文档都没提**：
+    `ZW_ALLOW_ROOT`、`ZW_GATEWAY_ENABLED`、`ZW_INTERNAL_TOKEN`、`ZW_DEVICE_ID`。
+
+    更严重的是其中两个是**死开关**：配置层有定义、全项目没人读 ——
+    用户设了完全没效果（`ZW_ALLOW_ROOT` 与 `ZW_GATEWAY_ENABLED` 已修成真的生效）。
+    文档漏写会让人根本不知道有这些开关；死开关会让知道的人也被骗。
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    src = (root / "core/src/zw_core/config.py").read_text(encoding="utf-8")
+    doc = (root / "docs/03-部署指南.md").read_text(encoding="utf-8")
+
+    envs = sorted(set(re.findall(r'_env(?:_bool|_int|_float|_list)?\("(ZW_[A-Z0-9_]+)"', src)))
+    assert len(envs) >= 40, f"只解析出 {len(envs)} 个变量，正则可能过时了"
+    missing = [e for e in envs if e not in doc]
+    assert not missing, "这些配置项没写进 docs/03：\n  " + "\n  ".join(missing)

@@ -379,3 +379,67 @@ def test_mcp_exposes_new_capabilities():
     want = {"zw_import_proxies", "zw_sync_proxies",
             "zw_install_extension", "zw_check_extension_updates"}
     assert want <= names, f"缺工具：{sorted(want - names)}（现有 {len(names)} 个）"
+
+
+# ── 两个死配置项（0.7.46）────────────────────────────────
+def test_allow_root_gate_is_enforced(monkeypatch):
+    """`ZW_ALLOW_ROOT` 必须真的生效。
+
+    它原来只在 `config.py` 里有定义，**全项目没有任何地方读它** ——
+    而 `engines.build_cmdline()` 是"只要以 root 跑就无条件加 --no-sandbox"。
+    等于这个开关设了完全没用，用户以为自己"不允许以 root 跑"，其实照样在跑。
+    """
+    from pathlib import Path
+
+    from zw_core import config
+    from zw_core.services import engines
+
+    # 非 root 环境下这条路径本来就不走，直接验"root + 未授权 → 明确报错"
+    monkeypatch.setattr(engines, "_is_root", lambda: True)
+
+    prof = {"name": "x", "id": "p1", "start_urls": [], "fp_timezone": "", "fp_lang": ""}
+    # 默认是 true（保持历史行为，容器/CI 里 root 照常跑）；
+    # 显式设成 false 才是"拒绝以 root 跑浏览器"。
+    monkeypatch.setenv("ZW_ALLOW_ROOT", "false")
+    config.reset_settings()
+    try:
+        engines.build_cmdline(Path("/usr/bin/chrome"), Path("/tmp/udd"), 12345, prof)
+    except engines.EngineError as exc:
+        assert exc.code == "ENGINE_RUN_AS_ROOT", exc.code
+        assert "ZW_ALLOW_ROOT" in exc.message, exc.message
+    else:
+        raise AssertionError("以 root 跑且未授权时必须报错，而不是静默 --no-sandbox")
+
+    # 授权后应该正常出命令行，且带 --no-sandbox
+    monkeypatch.setenv("ZW_ALLOW_ROOT", "true")
+    config.reset_settings()
+    try:
+        cmd = engines.build_cmdline(Path("/usr/bin/chrome"), Path("/tmp/udd"), 12345, prof)
+        assert "--no-sandbox" in cmd, cmd
+    finally:
+        monkeypatch.delenv("ZW_ALLOW_ROOT", raising=False)
+        config.reset_settings()
+
+
+def test_gateway_enabled_switch_is_enforced(monkeypatch):
+    """`ZW_GATEWAY_ENABLED=false` 时不该登记网关路由。
+
+    同样是个"只在配置里有、没人读"的死开关：关掉之后 `/cdp/<id>` 依然可用。
+    """
+    from zw_core import config, gateway
+
+    monkeypatch.setenv("ZW_GATEWAY_ENABLED", "false")
+    config.reset_settings()
+    try:
+        router = gateway.Router() if hasattr(gateway, "Router") else gateway.ROUTER
+        router.register("pf_deadswitch", 12345, "自检")
+        assert router.get("pf_deadswitch") is None, "网关关闭时不该登记路由"
+    finally:
+        monkeypatch.setenv("ZW_GATEWAY_ENABLED", "true")
+        config.reset_settings()
+
+    router2 = gateway.Router() if hasattr(gateway, "Router") else gateway.ROUTER
+    router2.register("pf_on", 12346, "自检")
+    assert router2.get("pf_on") is not None, "网关打开时应该登记"
+    router2.unregister("pf_on")
+    router2.unregister("pf_deadswitch")

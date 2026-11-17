@@ -72,6 +72,15 @@ class Router:
         self._conns: dict[str, int] = {}
 
     def register(self, profile_id: str, port: int, name: str = "") -> None:
+        # `ZW_GATEWAY_ENABLED=false` 时**不登记路由**。
+        # 这个开关以前只在配置里有定义、全项目没人读（设了等于没设）。
+        # 语义：关掉之后 `/cdp/<id>` 一律 404，只能本机直连 127.0.0.1:<port> ——
+        # 适合"这台机器根本不对外提供 CDP"的部署，少一层暴露面。
+        from .config import get_settings
+
+        if not get_settings().gateway_enabled:
+            logger.info("网关已关闭（ZW_GATEWAY_ENABLED=false），不登记路由 profile=%s", profile_id)
+            return
         self._routes[profile_id] = Route(profile_id=profile_id, port=port, name=name)
         logger.info("网关登记路由 profile=%s port=%s", profile_id, port)
 
