@@ -55,6 +55,30 @@ POST /api/v1/extensions/install      → 400 PATH_NOT_FOUND
 
 584 → **586 项**，七个门槛全绿（586 / 73 / 13 / 20 / 75 / 23 / 32）。
 
+### 补：同一个竞态测试又栽了一次（Windows CI）
+
+上一轮修了 `test_connect_tunnel_adds_basic_auth` 里 `http_upstream.seen` 的竞态，
+但**同一个测试里还有一处**没管：对中继统计的即时断言。
+
+Windows CI 报：
+
+```
+assert stats["bytes_in"] == len(payload)     # 通过
+assert stats["bytes_out"] == len(payload)    # AssertionError: assert 0 == 20
+```
+
+`bytes_out` 是"客户端→上游"方向，中继线程把 20 字节写给上游之后才计数；
+客户端此时已经收到回显，但计数还差一拍。负载高的机器上就会踩到。
+
+修：统计断言也走 `_wait_until`（最多等 5 秒）。同一个文件里另一处
+`stats["rejected"]` 断言也一并加上等待 —— 现在虽然不会踩（计数在应答之前加），
+但写法统一之后，以后中继实现调整（比如改成先回包再计数）也不会再偶发。
+
+连跑 3 次稳定通过。
+
+> 教训：**修竞态要修一整个"类"，不是修被 CI 抓到的那一行**。
+> 上一轮我只修了 `seen`，同一个测试里 `bytes_out` 就接着红。
+
 ## 0.7.48 — 2026-11-18
 
 **MCP 工具少给参数时报裸 `KeyError`（32 个里 21 个这样），AI 完全没法用。**

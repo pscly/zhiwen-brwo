@@ -364,6 +364,12 @@ def test_connect_tunnel_adds_basic_auth(http_upstream, relay) -> None:
         client.sendall(payload)
         assert _recv_exact(client, len(payload)) == payload
 
+        # 统计要**等**，不能立刻断言：`bytes_out` 是"客户端→上游"方向，
+        # 中继线程把那 20 字节写给上游之后才计数，客户端这边可能已经收到了回显、
+        # 但 bytes_out 还差一拍。CI 的 Windows 机器负载高时就踩到了
+        # （`assert 0 == 20`，而 bytes_in 已经对了）。
+        assert _wait_until(lambda: srv.stats()["bytes_out"] == len(payload), timeout=5), \
+            f"bytes_out 一直没涨上来：{srv.stats()}"
         stats = srv.stats()
         assert stats["port"] == srv.port
         assert stats["connections"] == 1
@@ -579,6 +585,9 @@ def test_connection_limit_rejects_and_counts() -> None:
             assert isinstance(last_exc, (ConnectionError, OSError))
         if rest:
             assert "上限" in rest.decode("utf-8", "replace")
+        # 同样等一拍：拒绝计数虽然是在应答之前加的，但让这条断言与上一条
+        # 保持一致的写法，免得以后中继实现调整（比如改成先回包再计数）又偶发。
+        assert _wait_until(lambda: srv.stats()["rejected"] == 1, timeout=5), srv.stats()
         stats = srv.stats()
         assert stats["rejected"] == 1
         assert stats["max_conn"] == 1
