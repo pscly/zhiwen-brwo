@@ -231,36 +231,34 @@ def _major_of(ver: str) -> int:
 def extensions_loadable(bin_path: Path) -> tuple[bool, str]:
     """这个内核能不能通过命令行加载外部扩展。返回 (能?, 原因)。
 
-    Chrome 137 起 `--load-extension` 被 `DisableLoadExtensionCommandLineSwitch`
-    特性关掉，且该特性开关在当前构建里也不起作用（实测）。
+    ## 为什么改成**实测**而不是看版本号
 
-    这里不猜"厂商是不是 Google"——版本号是唯一可靠判据：
-    137 及以上一律当作不支持，宁可多告警也不要让用户以为插件装上了。
+    最初我按"版本 ≥137 就不支持"来判断，结果判错了：
+
+    | 内核 | 版本 | 实际 |
+    |---|---|---|
+    | /usr/bin/google-chrome（正式版） | 149.0.7827.53 | 不加载 |
+    | ungoogled-chromium | 150.0.7871.186 | **正常加载** |
+
+    版本都在 137 以上，结论却相反 —— 正式版被挡住了、ungoogled 照常工作。
+    所以判据只能是"跑一次探针看看"（`services/extprobe.py`）：
+    造一个只改 document.title 的临时扩展，无头启动内核，
+    用本地 http 页面 + CDP 读标题，看到标记就算能加载。
+
+    探针本身跑不起来（内核文件不存在、起不来）时才退回"按不能加载告警"，
+    因为漏告警的代价是用户以为插件装好了、实际没加载。
     """
+    from . import extprobe
+
     try:
-        ver = engine_version(bin_path) or ""
-    except Exception:  # 读版本失败（路径不存在、被占、平台差异…）
-        ver = ""
-    major = _major_of(ver)
-    if not major:
-        # **读不出版本就当"不能加载"**，这是有意的保守选择。
-        # 理由：我们只有确知 ≤136 时才敢说"能加载"；其余情况（未知/读失败）
-        # 一律告警 —— 漏告警的代价是用户以为插件装好了，实际根本没加载，
-        # 而且他会在"为什么插件没反应"上浪费很久。多告警一次只是多读一行字。
-        # 这条也是 macOS CI 上抓到的：那边 `--version` 探测拿不到版本，
-        # 原来的"未知就放行"导致警告在 macOS 上永远不出现。
-        return False, (
-            "读不出这个内核的版本号，无法保证扩展会被加载"
-            "（Chrome 137 起已移除命令行加载扩展的能力）："
-            "扩展的代码与数据会被完整带进这个环境，但浏览器可能不会加载它。"
-        )
-    if major >= EXT_LOAD_MIN_BROKEN_MAJOR:
-        return False, (
-            f"内核版本 {ver}（≥{EXT_LOAD_MIN_BROKEN_MAJOR}）已移除命令行加载扩展的能力："
-            "扩展的代码与数据会被完整带进这个环境，但浏览器不会加载它，"
-            "界面上的插件不会出现。"
-        )
-    return True, ""
+        r = extprobe.probe(bin_path)
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"判断扩展能否被加载时出错（{type(exc).__name__}: {exc}），"
+                       "已按不加载处理")
+    if r.get("loadable"):
+        return True, ""
+    return False, str(r.get("reason") or "无法确认这个内核会不会加载扩展，已按不加载处理")
+
 
 def engine_version(bin_path: Path) -> str:
     """取浏览器版本。

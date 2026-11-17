@@ -474,73 +474,60 @@ def test_profile_name_with_spaces_survives_pack_source(tmp_path):
 
 
 # ── 扩展"能不能真的被加载"必须说清楚 ─────────────────────────────
-def test_major_of_handles_vendor_prefixed_version():
-    """`google-chrome --version` 返回的是 `Google Chrome 149.0.7827.53`。
+def test_extensions_loadable_uses_empirical_probe(tmp_path, monkeypatch):
+    """判定必须靠**实测**，不能靠版本号。
 
-    第一版按 `[.-]` 切了再找第一个纯数字片段，切出来是
-    `["Google Chrome 149", "0", "7827", "53"]`，于是主版本被认成 **0**，
-    "≥137 不支持扩展"这条判断永远不触发（实测踩到：正式版 Chrome
-    被报告成"可以加载扩展"）。
+    踩过的坑：我按"版本 ≥137 不支持"来判，结果
+    google-chrome 149 确实不支持，但 **ungoogled-chromium 150 正常支持** ——
+    版本都 ≥137，结论相反。而且不能用"有没有 chrome-extension:// 目标"判断：
+    ungoogled 上不出现该目标，但内容脚本执行了、扩展确实生效。
+
+    所以这里只钉住契约：把探针结果透出来；探针说不能就返回 False + 原因。
     """
-    from zw_core.services.engines import _major_of
+    from zw_core.services import engines, extprobe
 
-    assert _major_of("Google Chrome 149.0.7827.53") == 149
-    assert _major_of("150.0.7871.186") == 150
-    assert _major_of("Chrome/157.0.8103.79") == 157
-    assert _major_of("137.0.0.0") == 137
-    assert _major_of("") == 0
-    assert _major_of("unknown") == 0
+    monkeypatch.setattr(extprobe, "probe",
+                        lambda *_a, **_k: {"loadable": True, "reason": "实测可加载", "cached": False, "ms": 1})
+    assert engines.extensions_loadable(tmp_path / "chrome") == (True, "")
 
-
-def test_extensions_loadable_rejects_modern_chromium(tmp_path, monkeypatch):
-    """Chrome 137+ 已移除命令行加载扩展的能力 —— 必须判成"不可加载"。
-
-    实测（2026-11-17）：google-chrome 149 / ungoogled-chromium 150 /
-    playwright chromium 三种内核、有界面与无头都试过，`--load-extension`
-    的扩展 ID 从未出现在 chrome-extension:// 目标里；加
-    `--disable-features=DisableLoadExtensionCommandLineSwitch` 也没用。
-    """
-    from zw_core.services import engines
-
-    monkeypatch.setattr(engines, "engine_version", lambda _p: "Google Chrome 149.0.7827.53")
+    monkeypatch.setattr(extprobe, "probe",
+                        lambda *_a, **_k: {"loadable": False, "reason": "实测：忽略 --load-extension",
+                                           "cached": False, "ms": 1})
     ok, why = engines.extensions_loadable(tmp_path / "chrome")
-    assert ok is False
-    assert "137" in why and "不会加载" in why
-
-
-def test_extensions_loadable_allows_old_engine(tmp_path, monkeypatch):
-    from zw_core.services import engines
-
-    monkeypatch.setattr(engines, "engine_version", lambda _p: "128.0.6613.84")
-    ok, why = engines.extensions_loadable(tmp_path / "chrome")
-    assert ok is True and why == ""
-
-
-def test_extensions_loadable_unknown_version_warns(tmp_path, monkeypatch):
-    """版本读不出来时**按"不能加载"告警**，不是默默放行。
-
-    这条是 macOS CI 抓出来的：那边版本探测拿不到值，
-    原来"未知就放行"导致警告在 macOS 上永远不出现（测试 `assert True is False`）。
-    漏告警的代价是用户以为插件装好了、实际没加载，然后在"插件为什么没反应"上耗很久。
-    """
-    from zw_core.services import engines
-
-    monkeypatch.setattr(engines, "engine_version", lambda _p: "")
-    ok, why = engines.extensions_loadable(tmp_path / "chrome")
-    assert ok is False
-    assert "读不出" in why
+    assert ok is False and "忽略" in why
 
 
 def test_extensions_loadable_probe_error_warns(tmp_path, monkeypatch):
-    """探测本身抛异常时同样按"不能加载"处理，绝不静默放行。"""
-    from zw_core.services import engines
+    """探针自己出错时按"不能加载"处理，绝不静默放行。"""
+    from zw_core.services import engines, extprobe
 
-    def boom(_p):
+    def boom(*_a, **_k):
         raise OSError("probe failed")
 
-    monkeypatch.setattr(engines, "engine_version", boom)
+    monkeypatch.setattr(extprobe, "probe", boom)
     ok, why = engines.extensions_loadable(tmp_path / "chrome")
-    assert ok is False and "读不出" in why
+    assert ok is False and "出错" in why
+
+
+def test_extprobe_probe_missing_engine(tmp_path):
+    """内核不存在时探针要立刻返回，不能卡住。"""
+    from zw_core.services import extprobe
+
+    r = extprobe.probe(tmp_path / "no-such-chrome", timeout=3)
+    assert r["loadable"] is False
+    assert "不存在" in r["reason"]
+
+
+def test_extprobe_cache_key_tracks_binary(tmp_path):
+    """缓存键含路径/大小/mtime —— 换了内核版本必须重新探测。"""
+    from zw_core.services import extprobe
+
+    f = tmp_path / "chrome"
+    f.write_bytes(b"v1")
+    k1 = extprobe._cache_key(f)
+    f.write_bytes(b"v2-longer")
+    k2 = extprobe._cache_key(f)
+    assert k1 != k2
 
 
 def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):
@@ -561,9 +548,12 @@ def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):
     config.reset_settings()
     db.reset_db()
     try:
-        from zw_core.services import engines, manager as mgr, packs
+        from zw_core.services import engines, extprobe, manager as mgr, packs
 
-        monkeypatch.setattr(engines, "engine_version", lambda _p: "Google Chrome 149.0.7827.53")
+        # 探针结论：这个内核忽略 --load-extension（正式版 Chrome 的真实行为）
+        monkeypatch.setattr(extprobe, "probe", lambda *_a, **_k: {
+            "loadable": False, "reason": "实测：这个内核忽略 --load-extension（内容脚本没有执行）",
+            "cached": False, "ms": 1})
 
         src = tmp_path / "ext"
         src.mkdir()
@@ -575,7 +565,7 @@ def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):
 
         assert out["applied"], out
         assert out["extensions_active"] is False
-        assert "137" in out["extensions_note"]
+        assert "忽略" in out["extensions_note"]
         # 数据/代码这一半必须照常完成
         assert out["applied"][0]["slug"] == "probe"
     finally:
@@ -600,9 +590,11 @@ def test_apply_works_when_profile_has_no_engine_path(tmp_path, monkeypatch):
     config.reset_settings()
     db.reset_db()
     try:
-        from zw_core.services import engines, manager as mgr, packs
+        from zw_core.services import engines, extprobe, manager as mgr, packs
 
-        monkeypatch.setattr(engines, "engine_version", lambda _p: "Google Chrome 149.0.7827.53")
+        monkeypatch.setattr(extprobe, "probe", lambda *_a, **_k: {
+            "loadable": False, "reason": "实测：这个内核忽略 --load-extension（内容脚本没有执行）",
+            "cached": False, "ms": 1})
         src = tmp_path / "ext2"
         src.mkdir()
         (src / "manifest.json").write_text(
@@ -615,7 +607,7 @@ def test_apply_works_when_profile_has_no_engine_path(tmp_path, monkeypatch):
         assert out["applied"]
         assert out["extensions_active"] is False
         note = out["extensions_note"]
-        assert "137" in note, note
+        assert "忽略" in note, note
         assert "出错" not in note, f"不该靠异常兜底：{note}"
     finally:
         config.reset_settings()
