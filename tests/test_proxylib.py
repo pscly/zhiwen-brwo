@@ -1096,3 +1096,128 @@ def test_hub_patch_edits_in_place_not_insert(tmp_path):
                        timeout=180, env=env)
     assert r.returncode == 0, f"stdout={r.stdout[-1500:]}\nstderr={r.stderr[-1500:]}"
     assert "OK" in r.stdout
+
+
+# ── 代理出口检测：整条路径真跑（0.7.40）──────────────────
+def _echo_and_proxy(exit_ip: str, *, need_auth: str = ""):
+    """起一个"IP 回显服务 + HTTP 正向代理"，返回 (关闭函数, 代理端口, 回显URL)。
+
+    为什么要自己写：`check_egress()` 原来只认三个硬编码的境外 https 地址，
+    所以这条路径**在本机永远跑不到**（e2e 里一直是跳过项）。
+    现在回显地址可配置（`ZW_EGRESS_ENDPOINTS`），就能用本机代理把它真跑一遍。
+
+    正向代理的最小实现：httpx 走 http 代理时会发绝对 URI
+    （`GET http://host:port/path`），把 path 直接转发即可。
+    """
+    import base64
+    import http.server
+    import threading
+
+    import httpx
+
+    class Echo(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps({"ip": exit_ip, "country": "ZZ"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_a):
+            return
+
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if need_auth:
+                got = self.headers.get("Proxy-Authorization", "")
+                want = "Basic " + base64.b64encode(need_auth.encode()).decode()
+                if got != want:
+                    self.send_response(407)
+                    self.send_header("Proxy-Authenticate", 'Basic realm="t"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+            try:
+                # `trust_env=False`：测试进程里可能带着 HTTP(S)_PROXY，
+                # 那会让"代理再走一层代理"，在 CI 上直接 502。
+                r = httpx.get(self.path, timeout=5, trust_env=False)   # self.path 是绝对 URI
+                self.send_response(r.status_code)
+                self.send_header("Content-Type", r.headers.get("content-type", "text/plain"))
+                body = r.content
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:  # noqa: BLE001  502 就够，调用方会看到
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        def log_message(self, *_a):
+            return
+
+    echo = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Echo)
+    px = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    for srv in (echo, px):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{echo.server_address[1]}/ip"
+
+    def close():
+        echo.shutdown()
+        px.shutdown()
+
+    return close, int(px.server_address[1]), url
+
+
+def test_check_egress_through_real_http_proxy(monkeypatch):
+    """真起一个本机 HTTP 代理，验证 `check_egress` 能拿到出口 IP。
+
+    这条以前**从没在本机跑过**：三个回显地址都是硬编码的境外 https。
+    现在可配置了，于是这条路径第一次被真正验证。
+    """
+    from zw_core import config
+    from zw_core.services import proxy as proxysvc
+
+    close, port, url = _echo_and_proxy("203.0.113.9")
+    try:
+        monkeypatch.setenv("ZW_EGRESS_ENDPOINTS", url)
+        config.reset_settings()
+        spec = proxysvc.parse_proxy(f"http://127.0.0.1:{port}")
+        res = proxysvc.check_egress(spec, timeout=10)
+        assert res["ok"] is True, f"error={res.get('error')!r} used={proxysvc._echo_endpoints()}"
+        assert res["exit_ip"] == "203.0.113.9", res
+        assert res["country"] == "ZZ", res
+        assert isinstance(res["latency_ms"], int), res
+    finally:
+        close()
+        monkeypatch.delenv("ZW_EGRESS_ENDPOINTS", raising=False)
+        config.reset_settings()
+
+
+def test_check_egress_reports_wrong_password(monkeypatch):
+    """代理要认证、密码给错时：必须报错（不能假装成功）。
+
+    真实场景：用户粘了一条带密码的代理，密码过期了 —— 他需要知道"密码不对"，
+    而不是看到"检测通过"。
+    """
+    from zw_core import config
+    from zw_core.services import proxy as proxysvc
+
+    close, port, url = _echo_and_proxy("203.0.113.9", need_auth="u:pw")
+    try:
+        monkeypatch.setenv("ZW_EGRESS_ENDPOINTS", url)
+        config.reset_settings()
+        # 密码错
+        bad = proxysvc.parse_proxy(f"http://u:wrong@127.0.0.1:{port}")
+        res = proxysvc.check_egress(bad, timeout=10)
+        assert res["ok"] is False, res
+        assert res["exit_ip"] == "", res
+        # 密码对
+        good = proxysvc.parse_proxy(f"http://u:pw@127.0.0.1:{port}")
+        res2 = proxysvc.check_egress(good, timeout=10)
+        assert res2["ok"] is True, res2
+        assert res2["exit_ip"] == "203.0.113.9", res2
+    finally:
+        close()
+        monkeypatch.delenv("ZW_EGRESS_ENDPOINTS", raising=False)
+        config.reset_settings()

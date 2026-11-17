@@ -127,6 +127,11 @@ class Settings:
     # 用户要的语义是「先恢复上次关闭时的网址，再额外开检测页」，
     # 两个开关分开是为了能单独关掉其中一半（只恢复、不开检测页，或反过来）。
     restore_tabs: bool = field(default_factory=lambda: _env_bool("ZW_RESTORE_TABS", True))
+    # 出口检测用的 IP 回显地址（逗号分隔）。留空 = 用内置那三个境外地址。
+    # 国内网络或自建服务时换成自己的：只要返回 {"ip": "1.2.3.4"} 即可。
+    egress_endpoints: list[str] = field(
+        default_factory=lambda: [u.strip() for u in _env("ZW_EGRESS_ENDPOINTS").split(",") if u.strip()]
+    )
     open_detect_on_start: bool = field(default_factory=lambda: _env_bool("ZW_OPEN_DETECT_ON_START", True))
     # 逗号分隔。留空 = 用 DEFAULT_DETECT_URLS 那三个（而不是"一个都不开"）——
     # 想一个都不开请关 ZW_OPEN_DETECT_ON_START，这样语义不歧义。

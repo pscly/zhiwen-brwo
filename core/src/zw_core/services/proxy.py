@@ -406,6 +406,27 @@ _ECHO_ENDPOINTS = [
 ]
 
 
+def _echo_endpoints() -> list[str]:
+    """出口检测要访问的 IP 回显地址（可配置）。
+
+    ## 为什么要可配置
+
+    1. **国内网络**：这三个都在境外，很可能慢或被拦。用户自己的机器上
+       完全可以换成自建的一个返回 `{"ip": "..."}` 的地址。
+    2. **可测性**：硬编码外网地址意味着这条"代理出口检测"路径**没法在本机验证**
+       —— 之前 `scripts/e2e-check.py` 里它一直是跳过项，等于没跑过。
+
+    配置：`ZW_EGRESS_ENDPOINTS`（逗号分隔）。留空就用上面那三个默认值。
+    """
+    from ..config import get_settings
+
+    try:
+        custom = list(get_settings().egress_endpoints or [])
+    except Exception:  # noqa: BLE001 —— 配置读不出来不该让检测直接崩
+        custom = []
+    return custom or list(_ECHO_ENDPOINTS)
+
+
 def check_egress(spec: ProxySpec, timeout: float = 15.0) -> dict[str, Any]:
     """通过这个代理访问一次出口 IP 接口，返回 {ok, exit_ip, latency_ms, country, error}。
 
@@ -468,7 +489,7 @@ def _check_egress_via_relay(spec: ProxySpec, timeout: float) -> dict[str, Any]:
 def _probe_egress(proxy_url: str, timeout: float) -> dict[str, Any]:
     """真正去轮询出口接口。`proxy_url` 是标准 `scheme://[auth@]host:port` 形态。"""
     last_error = ""
-    for endpoint in _ECHO_ENDPOINTS:
+    for endpoint in _echo_endpoints():
         started = time.perf_counter()
         try:
             with httpx.Client(proxy=proxy_url, timeout=timeout, follow_redirects=True) as client:
