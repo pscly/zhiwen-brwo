@@ -315,7 +315,9 @@ def test_localcore_falls_back_when_port_busy(tmp_path, monkeypatch):
     _cfg.reset_settings()
 
     blocker = _socket.socket()
-    blocker.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    # 不要设 SO_REUSEADDR：Windows 上它会允许重复绑定，探测就测不出"被占用"
+    if __import__("sys").platform == "win32":
+        blocker.setsockopt(_socket.SOL_SOCKET, _socket.SO_EXCLUSIVEADDRUSE, 1)
     blocker.bind(("0.0.0.0", 0))
     blocker.listen(8)
     busy = int(blocker.getsockname()[1])

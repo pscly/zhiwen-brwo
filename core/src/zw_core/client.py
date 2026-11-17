@@ -520,7 +520,14 @@ class LocalCore:
         """
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
-                sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # **Windows 上绝不能设 SO_REUSEADDR**：那边它的语义是"允许另一个
+                # socket 绑同一个正在监听的端口"（绑得成功但不生效），
+                # 于是探测会把"已被占用"误判成"可用"，随后 uvicorn 真去绑就失败 ——
+                # Windows CI 上就是这么红的（探测说 50438 可用，实际起不来）。
+                # Windows 用 SO_EXCLUSIVEADDRUSE 才是准确的"占用"判据；
+                # POSIX 上不设 REUSEADDR 时 bind 本身就会因占用而失败。
+                if sys.platform == "win32":
+                    sk.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 sk.bind(("0.0.0.0", int(port)))
             return True
         except OSError:
