@@ -237,10 +237,23 @@ def extensions_loadable(bin_path: Path) -> tuple[bool, str]:
     这里不猜"厂商是不是 Google"——版本号是唯一可靠判据：
     137 及以上一律当作不支持，宁可多告警也不要让用户以为插件装上了。
     """
-    ver = engine_version(bin_path) or ""
+    try:
+        ver = engine_version(bin_path) or ""
+    except Exception:  # 读版本失败（路径不存在、被占、平台差异…）
+        ver = ""
     major = _major_of(ver)
     if not major:
-        return True, ""          # 版本都读不出来就别拦，交给运行期
+        # **读不出版本就当"不能加载"**，这是有意的保守选择。
+        # 理由：我们只有确知 ≤136 时才敢说"能加载"；其余情况（未知/读失败）
+        # 一律告警 —— 漏告警的代价是用户以为插件装好了，实际根本没加载，
+        # 而且他会在"为什么插件没反应"上浪费很久。多告警一次只是多读一行字。
+        # 这条也是 macOS CI 上抓到的：那边 `--version` 探测拿不到版本，
+        # 原来的"未知就放行"导致警告在 macOS 上永远不出现。
+        return False, (
+            "读不出这个内核的版本号，无法保证扩展会被加载"
+            "（Chrome 137 起已移除命令行加载扩展的能力）："
+            "扩展的代码与数据会被完整带进这个环境，但浏览器可能不会加载它。"
+        )
     if major >= EXT_LOAD_MIN_BROKEN_MAJOR:
         return False, (
             f"内核版本 {ver}（≥{EXT_LOAD_MIN_BROKEN_MAJOR}）已移除命令行加载扩展的能力："

@@ -516,12 +516,31 @@ def test_extensions_loadable_allows_old_engine(tmp_path, monkeypatch):
     assert ok is True and why == ""
 
 
-def test_extensions_loadable_unknown_version_does_not_block(tmp_path, monkeypatch):
-    """版本读不出来就别拦 —— 宁可运行期暴露，也不要无端禁止用户。"""
+def test_extensions_loadable_unknown_version_warns(tmp_path, monkeypatch):
+    """版本读不出来时**按"不能加载"告警**，不是默默放行。
+
+    这条是 macOS CI 抓出来的：那边版本探测拿不到值，
+    原来"未知就放行"导致警告在 macOS 上永远不出现（测试 `assert True is False`）。
+    漏告警的代价是用户以为插件装好了、实际没加载，然后在"插件为什么没反应"上耗很久。
+    """
     from zw_core.services import engines
 
     monkeypatch.setattr(engines, "engine_version", lambda _p: "")
-    assert engines.extensions_loadable(tmp_path / "chrome") == (True, "")
+    ok, why = engines.extensions_loadable(tmp_path / "chrome")
+    assert ok is False
+    assert "读不出" in why
+
+
+def test_extensions_loadable_probe_error_warns(tmp_path, monkeypatch):
+    """探测本身抛异常时同样按"不能加载"处理，绝不静默放行。"""
+    from zw_core.services import engines
+
+    def boom(_p):
+        raise OSError("probe failed")
+
+    monkeypatch.setattr(engines, "engine_version", boom)
+    ok, why = engines.extensions_loadable(tmp_path / "chrome")
+    assert ok is False and "读不出" in why
 
 
 def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):

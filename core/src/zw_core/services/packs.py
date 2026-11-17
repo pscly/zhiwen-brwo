@@ -744,8 +744,9 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
 
         try:
             ext_ok, ext_note = _engines.extensions_loadable(Path(p.get("engine_path") or s.engine_path))
-        except Exception:  # 读不到版本就当能用，运行期会暴露
-            ext_ok, ext_note = True, ""
+        except Exception as exc:  # noqa: BLE001
+            # 不能"出错就放行"：那正是"插件没加载但没人告警"的来源。
+            ext_ok, ext_note = False, f"判断扩展能否被加载时出错（{type(exc).__name__}: {exc}），已按不加载处理"
 
     fresh = manager.get_profile(p["id"])
     return {
