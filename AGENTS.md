@@ -89,7 +89,14 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 | 改包格式 | 提升 `bundle.FORMAT_VERSION`，并在 `docs/06-同步与加密.md` 同步字节表 |
 | 改配置项 | 同时更新 `docs/03-部署指南.md` 的配置表 |
 
-**提交前必须做**：
+**提交前必须做**（一条命令跑完全部七项，会自己配好前提条件）：
+
+```bash
+bash scripts/check-all.sh          # 全绿才算可交付；末尾会给一张总表
+```
+
+想逐项跑（排错时用）：
+
 ```bash
 .venv/bin/python -m pytest tests -q            # 579 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
@@ -122,7 +129,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - 579 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、75 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.43** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- hub **0.7.44** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）

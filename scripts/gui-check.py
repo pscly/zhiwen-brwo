@@ -86,6 +86,16 @@ def main() -> int:
         print("❌ 没有可用的 X（DISPLAY 未设置）。加 --xvfb 让脚本自己拉一个。")
         return 2
 
+    # **先把自己不需要的 ZW_* 清掉**：这个脚本经常被 check-all.sh 之类的外层
+    # 调用，而外层可能导出了 ZW_ADMIN_TOKEN / ZW_HUB_URL / ZW_PORT_POOL_* 等。
+    # 继承进来会让本脚本的临时 core 变成"要令牌"或"去连 hub"，于是面板取数全失败、
+    # 断言莫名其妙地红（实测过：合并跑挂、单跑过）。
+    for k in ("ZW_ADMIN_TOKEN", "ZW_HUB_URL", "ZW_HUB_TOKEN", "ZW_DEVICE_ID",
+              "ZW_SYNC_PASSWORD", "ZW_PORT_POOL_START", "ZW_PORT_POOL_END",
+              "ZW_ALLOWED_CIDRS", "ZW_DEFAULT_PACKS", "ZW_EGRESS_ENDPOINTS",
+              "ZW_DETECT_URLS", "ZW_RESTORE_TABS", "ZW_OPEN_DETECT_ON_START"):
+        os.environ.pop(k, None)
+
     tmp = Path(tempfile.mkdtemp(prefix="zw-gui-check-"))
     port = _free_port()
     os.environ.update({
@@ -404,4 +414,12 @@ def _button_texts(widget) -> list[str]:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:  # noqa: BLE001
+        # 抛异常时**必须把栈打出来**：否则外层拿到的只是"失败项："后面空空一行，
+        # 看不出是断言失败还是脚本崩了（合并跑时就是这样，多花了一轮才定位）。
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)

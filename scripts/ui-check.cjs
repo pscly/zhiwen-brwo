@@ -81,8 +81,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     document.getElementById('login').classList.contains('show'));
   check('本机打开不弹登录层（auth_required=false 时直接进）', loginShown === false,
     'login 层被显示了');
+  // 注意：本脚本自己会用 `addInitScript` 把 ZW_ADMIN_TOKEN 预置进 localStorage
+  // （为了让"配了令牌的机器"也能免登录跑完整个界面）。所以断言不能是
+  // "localStorage 里没有令牌" —— 那和脚本自己的行为矛盾，配了令牌时必然红
+  // （这个假失败被 check-all.sh 抓出来过）。
+  // 真正要验的是：**页面没有额外写入/改写令牌**。
   const tokInStore = await page.evaluate(() => localStorage.getItem('zw_token') || '');
-  check('本机免令牌时不需要往 localStorage 写令牌', tokInStore === '', 'token=' + tokInStore);
+  check('页面没有擅自改写本地令牌', tokInStore === T, `store=${tokInStore} expected=${T}`);
 
   console.log('== 逐视图 ==');
   for (const v of ['overview', 'profiles', 'data', 'extensions', 'proxies', 'sync', 'ops']) {
