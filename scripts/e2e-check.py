@@ -281,6 +281,69 @@ def main() -> int:
         st, dele = call("DELETE", f"/api/v1/proxies/{px_id}")
         check("删除代理", st == 200, str(dele)[:200])
 
+    print("== 9.5 代理串校验 / 链式（0.7.5 + 0.7.4 新增）==")
+    # 用户真实踩过：带空格、IP 五段。以前静默接受然后连不上。
+    st, bad = call("POST", "/api/v1/proxies/import",
+                   {"text": "socks5://u:p@66.80.12 0.66:20000"})
+    # 注意：变量名不能叫 failed —— 脚本里 `failed` 是"失败项列表"，
+    # 重名会把它遮蔽，最后打印的失败项变成这里的数据（排查了半天的坑）。
+    bad_rows = (bad.get("data") or {}).get("failed") or []
+    check("坏代理串被拒（带空格）",
+          bool(bad_rows) and "空格" in str(bad_rows[0].get("error", "")), str(bad)[:260])
+    check("坏代理串的密码已脱敏",
+          bool(bad_rows) and "***" in str(bad_rows[0].get("line", "")), str(bad_rows)[:200])
+
+    st, chain = call("POST", "/api/v1/proxies/import",
+                     {"text": "http://127.0.0.1:21080,socks5://u:p@5.5.5.5:1080 # 链式自检"})
+    check("链式代理可导入", (chain.get("data") or {}).get("imported") == 1, str(chain)[:260])
+    st, lst2 = call("GET", "/api/v1/proxies")
+    row2 = next((x for x in (lst2.get("data") or {}).get("proxies", [])
+                 if (x.get("label") or "") == "链式自检"), {})
+    check("链式保留前置（is_chain）", row2.get("is_chain") is True, str(row2)[:260])
+    if row2.get("id"):
+        call("DELETE", f"/api/v1/proxies/{row2['id']}")
+
+    print("== 9.6 代理库同步接口（0.7.14 新增）==")
+    st, syncst = call("GET", "/api/v1/proxies/sync")
+    check("同步状态接口可用", st == 200, str(syncst)[:200])
+
+    print("== 9.7 从商店链接装扩展（0.7.17/0.7.19 新增）==")
+    slug2 = ""
+    try:
+        import io
+        import zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("manifest.json",
+                        '{"manifest_version":3,"name":"E2E Store Ext","version":"1.0.0"}')
+            zf.writestr("sw.js", "// noop")
+        crx = (b"Cr24" + (3).to_bytes(4, "little") + (1310).to_bytes(4, "little")
+               + b"\x00" * 1310 + buf.getvalue())
+        crx_file = Path(os.environ.get("TMPDIR", "/tmp")) / "zw-e2e-store.crx"
+        crx_file.write_bytes(crx)
+        st, inst2 = call("POST", "/api/v1/extensions/install",
+                         {"path": str(crx_file), "as_default": True})
+        d2 = inst2.get("data") or {}
+        slug2 = d2.get("slug") or ""
+        check("CRX 安装成功", st == 200 and bool(slug2), str(inst2)[:300])
+        check("装完自动建包", d2.get("pack_created") is True, str(d2)[:260])
+        check("可设为默认（新环境自动带）", d2.get("is_default") is True, str(d2)[:260])
+        st, upds = call("GET", "/api/v1/extensions/updates", timeout=120)
+        check("扩展更新检查可用", st == 200, str(upds)[:200])
+    except Exception as exc:  # noqa: BLE001
+        skip("从商店链接装扩展", f"{type(exc).__name__}: {exc}")
+
+    print("== 9.8 CDP 令牌有效期（0.7.18：默认 3600 秒）==")
+    # 取 CDP 地址要环境在跑；上面第 6 节的页面操作已经把它启动了，
+    # 但如果中途被停掉，这里补一次启动再取。
+    st, cur = call("GET", f"/api/v1/profiles/{pid}")
+    if (cur.get("data") or {}).get("state") != "running":
+        call("POST", f"/api/v1/profiles/{pid}/start")
+    st, tk = call("GET", f"/api/v1/profiles/{pid}/cdp")
+    d = tk.get("data") or {}
+    check("CDP 令牌默认 3600 秒", int(d.get("token_ttl") or 0) == 3600, str(tk)[:260])
+
     print("== 10. 导出 / 导入 ==")
     if PW:
         # 密码显式放进 body：服务端进程不一定有 ZW_SYNC_PASSWORD，

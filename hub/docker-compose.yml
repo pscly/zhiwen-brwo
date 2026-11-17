@@ -7,7 +7,7 @@ name: zw-hub
 services:
   hub:
     build: .
-    image: zw-hub:0.7.20
+    image: zw-hub:0.7.21
     # 目标机器上可能没有外网（或很慢）。镜像由 deploy 脚本用
     # docker save/load 送过去，所以这里禁止 compose 去 registry 拉。
     pull_policy: never

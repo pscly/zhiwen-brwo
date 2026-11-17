@@ -686,3 +686,34 @@ def test_cdp_token_ttl_can_still_be_overridden(client, monkeypatch):
     finally:
         monkeypatch.delenv("ZW_CDP_TOKEN_TTL", raising=False)
         reset_settings()
+
+
+def test_extensions_install_has_exactly_one_route(client):
+    """`/api/v1/extensions/install` 只能有一条路由。
+
+    真踩过：我新加了一条同路径同方法的装饰器（商店安装），
+    FastAPI 用**先注册**的那条，于是新功能在 HTTP 上完全不可达 ——
+    表现为带 `url` 调过去报 `body.path Field required`，
+    `make_pack`/`as_default` 被静默忽略。本地单测直接调 `extstore.install()`
+    绕过了 HTTP，所以没发现，是验收脚本抓出来的。
+    """
+    from zw_core import api as apimod
+
+    app = apimod.build_app()
+    hits = [(r.path, tuple(sorted(getattr(r, "methods", []) or [])))
+            for r in app.routes
+            if getattr(r, "path", "") == "/api/v1/extensions/install"]
+    assert len(hits) == 1, f"重复注册了 {len(hits)} 次：{hits}"
+    assert "POST" in hits[0][1]
+
+
+def test_extensions_install_body_accepts_url_and_pack_flags():
+    """入参必须同时支持四种来源（url / .crx / 目录 / zip）与建包开关。"""
+    from zw_core.api import ExtensionInstall
+
+    b = ExtensionInstall(url="https://chromewebstore.google.com/detail/x/"
+                             "hdhngoamekjhmnpenphenpaiindoinpo", as_default=True)
+    assert b.path == "" and b.url and b.as_default is True and b.make_pack is True
+    # 老的目录安装仍然可用（path 不再是必填，但给了就要能用）
+    b2 = ExtensionInstall(path="/tmp/some-dir")
+    assert b2.path == "/tmp/some-dir" and b2.url == ""

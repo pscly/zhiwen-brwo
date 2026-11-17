@@ -36,7 +36,8 @@ from starlette.websockets import WebSocket
 from . import __version__, gateway
 from .config import get_settings
 from .db import get_db
-from .services import bundle, cookies as ck, engines, manager as mgr, proxy as proxysvc, sync as syncsvc
+from .services import (bundle, cookies as ck, engines, manager as mgr, proxy as proxysvc,
+                       proxylib, sync as syncsvc)
 from .services.hub import HubClient, HubError
 from .services.leases import LocalLease
 
@@ -233,7 +234,18 @@ class ResetFingerprintBody(BaseModel):
 
 
 class ExtensionInstall(BaseModel):
-    path: str = Field(description="扩展所在目录或 zip 文件的绝对路径")
+    """装扩展的入参（四种来源共用一个入口）。
+
+    - `url`：Chrome 商店详情页链接或 32 位扩展 ID → 客户端下载 CRX
+    - `path`：`.crx` 文件 / 已解包的扩展目录 / `.zip`
+    - `make_pack` / `as_default`：装完是否顺手建扩展包、是否设为默认
+      （"以后新建环境默认带上"就是 as_default）
+    """
+
+    path: str = Field(default="", description="扩展所在目录 / .zip / .crx 的绝对路径")
+    url: str = Field(default="", description="Chrome 应用商店链接或 32 位扩展 ID")
+    make_pack: bool = Field(default=True, description="装完自动建成扩展包")
+    as_default: bool = Field(default=False, description="把包设为“新建环境默认带上”")
 
 
 class ExtBindBody(BaseModel):
@@ -725,10 +737,45 @@ def build_app() -> FastAPI:
             r["bound_to"] = used.get(r["slug"], [])
         return ok({"extensions": rows, "total": len(rows)})
 
-    @app.post(f"{API_PREFIX}/extensions/install", tags=["扩展"], dependencies=[Auth], summary="安装扩展到中央库")
+    @app.post(f"{API_PREFIX}/extensions/install", tags=["扩展"], dependencies=[Auth],
+              summary="安装扩展（商店链接 / .crx / 扩展目录 / zip）")
     def extensions_install(body: ExtensionInstall) -> dict[str, Any]:
+        """一个入口，四种来源。
+
+        ## 为什么合并成一个路由（踩过的坑）
+
+        曾经这里有**两个**同路径同方法的装饰器：一个是"从目录/zip 装进中央库"
+        （老功能），另一个是我新加的"从商店链接装"。FastAPI 用先注册的那个，
+        所以**新的一直没生效** —— 表现为带上 `url` 调过去报
+        `body.path Field required`，而 `make_pack`/`as_default` 被完全忽略。
+        本地单测直接调 `extstore.install()` 绕过了 HTTP，因此没发现。
+
+        现在按来源分流，两条路都走这一个入口：
+          - `url` 非空 → 商店链接/ID（下载 CRX）
+          - `path` 是 `.crx` → 本地 CRX 文件
+          - `path` 是目录或 `.zip` → 老行为，装进中央库（顺便也能建包）
+        """
         s = get_settings()
-        src = Path(body.path).expanduser()
+        src = Path(body.path).expanduser() if body.path else None
+
+        # ① 商店链接 / 本地 .crx → 交给 extstore（它负责 CRX 去头、建包、设默认）
+        looks_like_crx = src is not None and src.suffix.lower() == ".crx"
+        if (body.url or "").strip() or looks_like_crx:
+            from zw_core.services import extstore as _es
+
+            try:
+                return ok(_es.install(
+                    url=(body.url or "").strip(),
+                    crx_path=str(src) if looks_like_crx else "",
+                    make_pack=getattr(body, "make_pack", True),
+                    as_default=getattr(body, "as_default", False),
+                ))
+            except _es.StoreError as exc:
+                raise ApiError(exc.code, exc.message, status=exc.status) from exc
+
+        if src is None:
+            raise ApiError("PROXY_INVALID" if False else "PATH_NOT_FOUND",
+                           "要么给 url（商店链接/扩展 ID），要么给 path（.crx / 扩展目录 / zip）")
         if not src.exists():
             raise ApiError("PATH_NOT_FOUND", f"路径不存在：{src}")
         import hashlib
@@ -818,22 +865,18 @@ def build_app() -> FastAPI:
     # ══ 代理库 ════════════════════════════════════════════
     @app.get(f"{API_PREFIX}/proxies", tags=["代理"], dependencies=[Auth], summary="代理库列表")
     def proxies_list() -> dict[str, Any]:
-        with get_db().conn() as c:
-            rows = [dict(r) for r in c.execute("SELECT * FROM proxies ORDER BY id DESC")]
-        used: dict[int, list[str]] = {}
-        for p in mgr.list_profiles():
-            if p.get("proxy_id"):
-                used.setdefault(int(p["proxy_id"]), []).append(p["name"])
-        out = []
-        for r in rows:
-            r.pop("password", None)  # 绝不回显密码
-            r["has_password"] = bool(
-                (get_db().get_setting(f"proxy_pw_{r['id']}", "") != "") or r.get("username")
-            )
-            r["upstream"] = f"{r['scheme']}://{r['host']}:{r['port']}"
-            r["used_by"] = used.get(r["id"], [])
-            out.append(r)
-        return ok({"proxies": out, "total": len(out)})
+        """代理库列表。
+
+        ## 必须走 proxylib.list_all()，别在这里自己拼
+
+        这里原来有一段内联实现：直接 SELECT *、pop 掉 password、手工拼 upstream。
+        结果它**漏掉了 `is_chain` / `chain`**（链式代理的前置信息），
+        界面上就画不出"前置 → 落地"；而且还拿一个根本不存在的
+        `proxy_pw_<id>` 设置项去判断有没有密码。
+        `_row_to_public()` 才是唯一该维护字段形状的地方。
+        """
+        items = proxylib.list_all()
+        return ok({"proxies": items, "total": len(items)})
 
     @app.post(f"{API_PREFIX}/proxies", tags=["代理"], dependencies=[Auth], summary="新增代理")
     def proxies_create(body: ProxyBody) -> dict[str, Any]:
@@ -891,24 +934,6 @@ def build_app() -> FastAPI:
         # 装完顺手做成扩展包（默认开）；as_default 再标成"新建环境自动带上"
         make_pack: bool = True
         as_default: bool = False
-
-    @app.post(f"{API_PREFIX}/extensions/install", tags=["扩展"], dependencies=[Auth],
-              summary="从 Chrome 商店链接或 .crx 文件安装扩展")
-    def extensions_install(body: ExtInstallBody) -> dict[str, Any]:
-        """下载（或读取本地文件）→ 去掉 CRX 头 → 解包 → 存进本机扩展库。
-
-        为什么在客户端下载而不是服务器：服务器常常没有外网，也没有用户的代理；
-        客户端才有。所以这个能力只在这里。
-        """
-        from zw_core.services import extstore
-
-        try:
-            return ok(extstore.install(url=body.url, crx_path=body.path,
-                                       name=body.name, update=body.update,
-                                       make_pack=body.make_pack,
-                                       as_default=body.as_default))
-        except extstore.StoreError as exc:
-            raise ApiError(exc.code, exc.message, status=exc.status) from exc
 
     @app.get(f"{API_PREFIX}/extensions/updates", tags=["扩展"], dependencies=[Auth],
              summary="检查已装扩展有没有新版")
