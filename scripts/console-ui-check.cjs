@@ -104,6 +104,8 @@ const SECRETS = {
 
 // 代理库（服务器与用户机共享的那份）。三条覆盖三种展示形态：
 // 普通单跳 / 链式（前置 → 落地）/ 已隐藏
+const PROXY_XSS_LABEL = '<img src=x onerror="window.__xss=1">代理';
+
 const PROXIES = [
   { id: 1, scheme: 'socks5', host: '66.80.12.66', port: 20000, username: 'cf1b081103',
     has_password: true, hop: '', label: '落地A', note: '', hidden: false,
@@ -115,6 +117,12 @@ const PROXIES = [
     hidden: false, origin: 'panel', upstream: 'http://1.2.3.4:8080',
     is_chain: true, chain: 'http://127.0.0.1:21080 → http://1.2.3.4:8080',
     created_at: 1794836001, updated_at: 1794836001 },
+  // 第 4 条专门放 XSS 载荷：代理库里的 label/host 来自**设备上报**（不可信来源），
+  // 主控台渲染时必须转义。用 img onerror 探针，注入成功就会设 window.__xss。
+  { id: 4, scheme: 'socks5', host: '<img src=x onerror="window.__xss=1">1.1.1.1',
+    port: 1080, username: '', has_password: false, hop: '', label: PROXY_XSS_LABEL,
+    note: '', hidden: false, origin: 'zwd_evil', upstream: 'socks5://x:1080',
+    is_chain: false, chain: '', created_at: 1794836003, updated_at: 1794836003 },
   { id: 3, scheme: 'http', host: '9.9.9.9', port: 3128, username: 'svr',
     has_password: true, hop: '', label: '藏起来的', note: '', hidden: true,
     origin: 'panel', upstream: 'http://9.9.9.9:3128', is_chain: false,
@@ -408,7 +416,8 @@ function setupRoutes(page, opts){
     new URL(page.url()).hash === '#proxies' &&
     (await page.isVisible('#view-proxies')) && !(await page.isVisible('#view-browsers')));
   const pxRows = page.locator('#px-rows tr');
-  check('排出的行数 = 2（隐藏的那条默认不显示）', (await pxRows.count()) === 2,
+  // 4 条 fixture 里有 1 条 hidden，所以默认只看到 3 行
+  check('排出的行数 = 3（隐藏的那条默认不显示）', (await pxRows.count()) === 3,
     'count=' + (await pxRows.count()));
   const pxText = await page.locator('#px-rows').textContent();
   check('单跳显示 scheme://host:port', pxText.includes('socks5://66.80.12.66:20000'), pxText.slice(0, 120));
@@ -416,7 +425,16 @@ function setupRoutes(page, opts){
   check('有密码的标「已设置」', pxText.includes('已设置'));
   check('无密码的标「无」', pxText.includes('无'));
   check('来源列显示 origin', pxText.includes('zwd_hubtest01'), pxText.slice(0, 160));
-  check('计数文字正确', (await page.textContent('#px-count')).includes('共 2 条'));
+  check('计数文字正确', (await page.textContent('#px-count')).includes('共 3 条'));
+
+  // 代理库里的 label/host 来自设备上报（不可信）。渲染必须转义 ——
+  // 注入成功的话页面里会出现 img 节点，且 window.__xss 被设为 1。
+  check('代理的 label/host 里的 <img onerror> 被转义（没有注入节点）',
+    (await page.evaluate(() => document.querySelectorAll('#px-rows img').length === 0)));
+  check('代理的 XSS 载荷没有执行（window.__xss 未设置）',
+    (await page.evaluate(() => window.__xss === undefined)));
+  check('载荷以字面量显示（能看见标签文本本身）',
+    (await page.textContent('#px-rows')).includes('onerror'));
 
   // 隐藏：点第一行「隐藏」→ 应变成 1 行
   await page.locator('#px-rows [data-px-hide]').first().click();
