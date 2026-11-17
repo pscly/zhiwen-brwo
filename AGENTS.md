@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   577 项单元测试（含真起 hub 的同步集成测试）
+tests/   578 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由 `fingerprint-chromium`（`--fingerprint=<种子>`）或系统 Chrome 提供。
@@ -91,8 +91,8 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 
 **提交前必须做**：
 ```bash
-.venv/bin/python -m pytest tests -q            # 577 passed, 2 skipped
-.venv/bin/python scripts/e2e-check.py          # 72 通过 / 0 失败 / 4 跳过（配上主密码+hub+批准设备）
+.venv/bin/python -m pytest tests -q            # 578 passed, 2 skipped
+.venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 网关接管
 node scripts/ui-check.cjs                      # 23 通过 / 0 失败（客户端控制台）
@@ -121,8 +121,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- 577 单元测试、**72 项单机端到端（0 失败 / 4 跳过）**、**30 项跨机端到端**、75 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.40** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- 578 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、75 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
+- hub **0.7.41** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）

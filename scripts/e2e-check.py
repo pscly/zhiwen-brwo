@@ -315,6 +315,13 @@ def main() -> int:
     check("坏代理串的密码已脱敏",
           bool(bad_rows) and "***" in str(bad_rows[0].get("line", "")), str(bad_rows)[:200])
 
+    # 先把同名的清掉：这条断言读的是 `imported == 1`，而导入是按去重键 upsert 的 ——
+    # 上一次跑过之后这条已在库里，会变成 `imported: 0 / skipped: 1` 而误判为失败。
+    # （自检要能反复跑在同一个库上，所以自己清理，不指望外部环境干净。）
+    _, pre = call("GET", "/api/v1/proxies")
+    for x in (pre.get("data") or {}).get("proxies", []):
+        if (x.get("label") or "") == "链式自检":
+            call("DELETE", f"/api/v1/proxies/{x['id']}")
     st, chain = call("POST", "/api/v1/proxies/import",
                      {"text": "http://127.0.0.1:21080,socks5://u:p@5.5.5.5:1080 # 链式自检"})
     check("链式代理可导入", (chain.get("data") or {}).get("imported") == 1, str(chain)[:260])

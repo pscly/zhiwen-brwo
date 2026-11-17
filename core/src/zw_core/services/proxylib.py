@@ -351,7 +351,16 @@ def _row_to_public(row: Any) -> dict[str, Any]:
         "username": spec.username,
         "has_password": bool(spec.password),
         "upstream": spec.upstream,
-        # 链式：`is_chain` 给界面决定要不要画"前置 → 落地"，`chain` 是不含凭据的展示串
+        # 链式三件套，各有各的用处：
+        #   `hop`      —— 前置的脱敏地址（编辑回填 / 脚本判断走哪条路要用它）
+        #   `is_chain` —— 布尔，界面决定要不要画"前置 → 落地"
+        #   `chain`    —— 人看的展示串
+        # 少给 `hop` 的后果：库里明明有前置，接口却返回 `hop: null`，
+        # 前端编辑时回填不出前置、e2e 断言"链式保留了前置"直接红 ——
+        # 而这个字段本来就在 `spec.hop` 里躺着（同类问题出现过一次：
+        # 列表接口曾经把 `is_chain`/`chain` 整个漏掉）。
+        # `hop.upstream` 是 `scheme://host:port`（**不含凭据**），正好是能安全外露的形式
+        "hop": spec.hop.upstream if spec.hop is not None else "",
         "is_chain": spec.hop is not None,
         "chain": spec.chain_text,
         "country": row["country"] or "",

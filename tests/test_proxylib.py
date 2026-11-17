@@ -1221,3 +1221,31 @@ def test_check_egress_reports_wrong_password(monkeypatch):
         close()
         monkeypatch.delenv("ZW_EGRESS_ENDPOINTS", raising=False)
         config.reset_settings()
+
+
+def test_public_row_exposes_chain_hop(lib):
+    """列表接口必须给出链式代理的 `hop`（前置地址，脱敏）。
+
+    真踩过：库里 `hop` 列明明有值，`_row_to_public()` 却没把这个字段暴露出去 ——
+    接口返回 `hop: null`，而 `is_chain`/`chain` 都在。后果：
+      - 前端"编辑代理"回填不出前置，用户只能重打一遍
+      - `scripts/e2e-check.py` 的"链式保留了前置"断言直接红
+
+    这是同一类问题的第二次（第一次是列表接口把 `is_chain`/`chain` 整个漏掉）。
+    """
+    from zw_core.services import proxylib
+
+    proxylib.import_batch("http://127.0.0.1:21080,socks5://u:secret@5.5.5.5:1080 # 链式\n"
+                          "socks5://u:p@7.7.7.7:1080 # 单跳")
+    rows = proxylib.list_all()
+    chain = [r for r in rows if r.get("is_chain")]
+    assert chain, rows
+    item = chain[0]
+    assert item["hop"] == "http://127.0.0.1:21080", item
+    # 前置里不能带凭据（这条前置本身没有；但该字段永远只给 scheme://host:port）
+    assert "@" not in item["hop"], item["hop"]
+    # 落地凭据不能外露
+    assert "secret" not in str(item), item
+    # 单跳时是空串，不是 None（前端/脚本少一层判空）
+    single = [r for r in rows if not r.get("is_chain")][0]
+    assert single["hop"] == "", single
