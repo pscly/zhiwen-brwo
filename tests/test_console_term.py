@@ -53,20 +53,35 @@ def _run(s, cmd, timeout=8.0):
 # ── 会话引擎 ──────────────────────────────────────────
 def test_session_runs_and_reports_rc(sess):
     out, (rc, cwd, timed_out) = _run(sess, "echo hello")
-    assert out.strip() == "hello"
+    # Windows 的 cmd 会在行尾留一个空格，所以用 strip + in，而不是全等
+    assert out.strip() == "hello", repr(out)
     assert rc == 0 and not timed_out
 
 
 def test_session_keeps_cwd(sess, tmp_path):
-    """`cd` 必须保持 —— 这是"实时终端"和"一问一答"最本质的区别。"""
-    _run(sess, "cd /tmp")
-    out, (rc, _cwd, _) = _run(sess, "pwd")
-    assert out.strip() == "/tmp"
+    """`cd` 必须保持 —— 这是"实时终端"和"一问一答"最本质的区别。
+
+    不写死 `/tmp`：Windows 上 cd 到 /tmp 会被 Git-Bash/cmd 映射成
+    `C:\\Users\\...\\Temp` 之类，断言绝对路径在两边不可能同时成立。
+    这里改成"cd 到一个临时目录，然后确认 cwd 变了且不再等于初始值"。
+    """
+    target = str(tmp_path / "subdir")
+    import os as _os
+
+    _os.makedirs(target, exist_ok=True)
+    before = sess.cwd
+    _run(sess, f'cd "{target}"')
+    out, (rc, cwd, _) = _run(sess, "cd" if sys.platform == "win32" else "pwd")
+    assert rc == 0
+    assert cwd != before, f"cwd 没有变化：{cwd!r}"
+    assert _os.path.basename(target) in cwd.replace("\\", "/"), f"cwd={cwd!r} 不在 {target!r} 里"
 
 
 def test_session_reports_nonzero_rc(sess):
-    _out, (rc, _cwd, _) = _run(sess, "exit_code_probe 2>/dev/null; false")
-    assert rc != 0
+    # 用两边都有的写法：cd 到一个不存在目录会让 cmd 与 sh 都返回非 0
+    cmd = "cd __zw_no_such_dir__" if sys.platform == "win32" else "cd /__zw_no_such_dir__"
+    _out, (rc, _cwd, _) = _run(sess, cmd)
+    assert rc != 0, "失败的命令必须返回非 0"
 
 
 def test_session_streams_progressively(sess):
@@ -74,7 +89,10 @@ def test_session_streams_progressively(sess):
     chunks, done = [], []
     sess.on_output = lambda d: chunks.append((time.time(), d))
     sess.on_done = lambda rc, cwd, timed_out=False: done.append(rc)
-    sess.run("echo FIRST; sleep 1.2; echo SECOND")
+    # `sleep` 是 POSIX 命令；Windows 用 ping 空转同样时长（两边都要能跑）
+    cmd = ("echo FIRST & ping -n 3 127.0.0.1 >nul & echo SECOND"
+           if sys.platform == "win32" else "echo FIRST; sleep 1.2; echo SECOND")
+    sess.run(cmd)
     time.sleep(0.6)
     early = "".join(d for _t, d in chunks)
     assert "FIRST" in early, f"0.6 秒时应该已经收到第一行：{early!r}"

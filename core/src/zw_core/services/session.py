@@ -79,8 +79,9 @@ def _shell_argv() -> list[str]:
     """会话用的 shell。"""
     if sys.platform == "win32":
         comspec = os.environ.get("COMSPEC") or "cmd.exe"
-        # /v:on 延迟展开（拿正确 errorlevel）；/q 关回显（不然命令会被原样打出来）
-        return [comspec, "/v:on", "/q", "/k"]
+        # /q 关回显（不然命令会被原样打出来）。
+        # 不用 /v:on：标记改成独立一行用 %errorlevel%，不需要延迟展开。
+        return [comspec, "/q", "/k"]
     shell = "/bin/sh"
     if not os.path.exists(shell):
         shell = "/bin/bash" if os.path.exists("/bin/bash") else "sh"
@@ -273,8 +274,16 @@ class ShellSession:
     def _wrap(self, command: str) -> bytes:
         tok = self.token
         if sys.platform == "win32":
-            # !errorlevel! 需要 /v:on；!CD! 同理。用 & 而不是 && ：前一条失败也要打标记
-            line = f"{command} & echo __ZW{tok}_!errorlevel!__!CD!__\r\n"
+            # 把标记放在**独立一行**，用 %errorlevel%/%CD%。
+            #
+            # 为什么不用 `& echo ... !errorlevel!`（延迟展开）：
+            # 在 `cmd /k` 里 `!errorlevel!` 的展开时机依赖 /v:on 是否真的生效，
+            # CI 的 Windows 上实测没生效 —— 标记原样输出成 `!errorlevel!`，
+            # 解析器找不到数字就只能一直等，表现是"命令跑完但界面卡在执行中"。
+            #
+            # cmd 是**逐行解析**的：第二行在被读取时才展开 %errorlevel%，
+            # 那时第一条命令已经跑完，拿到的是正确值。这个语义比延迟展开稳。
+            line = f"{command}\r\necho __ZW{tok}_%errorlevel%__%CD%__\r\n"
         else:
             # 用分号而不是 &&：失败也要打标记，否则界面上永远卡在"执行中"
             line = f"{command}; printf '__ZW{tok}_%s__%s__\\n' \"$?\" \"$PWD\"\n"
