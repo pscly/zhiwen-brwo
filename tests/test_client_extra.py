@@ -293,3 +293,27 @@ def test_run_cli_without_tty_exits_gracefully(home, monkeypatch, capsys):
     joined = out.out + out.err
     assert "没有可用的图形界面" in joined or "没有可交互的终端" in joined
     assert "selftest" in joined, "要告诉用户怎么自查"
+
+
+def test_proxy_upstream_keeps_host_port_visible():
+    """环境行里的代理串必须能看出"是哪台代理"。
+
+    真踩过：带认证时返回 `socks5://user:***@66.80.12.66:20000`（32 字符），
+    而行里只留 22 个字符 → 截成 `socks5://user:***@66.80.…`，**IP 尾部被切掉**。
+    于是 66.80.12.66 和 66.80.12.65 在界面上长得一模一样，用户分不清用哪台。
+
+    修法：有认证时把用户名也压成 `***`，并且超长时优先砍协议名，
+    保证 `host:port` 完整可见。
+    """
+    from zw_core.gui_profiles import _clip, proxy_upstream_of
+
+    row = {"scheme": "socks5", "host": "66.80.12.66", "port": 20000, "username": "u"}
+    text = proxy_upstream_of(row)
+    assert "66.80.12.66:20000" in text, text
+    # 行里会截断，但截断后 host:port 仍在
+    assert "66.80.12.66" in _clip(text, 22), _clip(text, 22)
+    # 用户名被压掉（信息量不如"是哪台机器"）
+    assert "user" not in text and "u:" not in text, text
+    # 无认证时是干净的 scheme+host:port
+    row2 = dict(row, username="")
+    assert proxy_upstream_of(row2).endswith("66.80.12.66:20000")

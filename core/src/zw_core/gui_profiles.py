@@ -181,14 +181,31 @@ def mask_proxy_text(raw: str) -> str:
 
 
 def proxy_upstream_of(row: dict[str, Any]) -> str:
-    """代理库一行 → 给人看的脱敏串（`socks5://user:***@1.2.3.4:20000`）。"""
+    """代理库一行 → 给人看的脱敏串。
+
+    ## 为什么有认证时把用户名也压成 `***`
+
+    原来返回 `socks5://user:***@66.80.12.66:20000`（32 字符），而行里只留
+    `ROW_LIMIT_PROXY = 22` 个字符 → 截成 `socks5://user:***@66.80.…`，
+    **IP 尾部被切掉**。而 IP 正是"这条代理是哪台"的唯一有用信息：
+    66.80.12.66 和 66.80.12.65 在界面上长得一模一样，用户根本分不清。
+
+    改成 `socks5://***@66.80.12.66:20000`（28 字符，仍会截断但保住 IP 主体），
+    并且**优先保住 host:port**：真超长时先省协议名。
+    用户名对"这是谁的代理"有点用，但比不上"是哪台机器"重要。
+    """
     scheme = str(row.get("scheme") or "").strip()
     host = str(row.get("host") or "").strip()
     port = row.get("port") or 0
     user = str(row.get("username") or "").strip()
-    if user:
-        return f"{scheme}://{user}:***@{host}:{port}"
-    return f"{scheme}://{host}:{port}"
+    auth = "***@" if user else ""
+    full = f"{scheme}://{auth}{host}:{port}"
+    # 超长时先砍协议名（host:port 是不能丢的那部分）
+    if len(full) > 22:
+        short = f"{auth}{host}:{port}"
+        if len(short) <= 22:
+            return short
+    return full
 
 
 def proxy_display_for(profile: dict[str, Any], library: dict[int, dict[str, Any]]) -> str:
