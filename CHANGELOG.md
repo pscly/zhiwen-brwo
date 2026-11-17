@@ -1,5 +1,64 @@
 # CHANGELOG
 
+## 0.7.17 — 2026-11-17
+
+**输入 Chrome 商店链接就能装扩展**（新增需求）。
+
+### 用户要求
+
+> 扩展安装相关的，我希望也是可以直接输入谷歌的扩展链接，例如
+> https://chromewebstore.google.com/detail/cookiemanager-cookie-edit/hdhngoamekjhmnpenphenpaiindoinpo?hl=zh-CN
+> 就可添加，如果更新的话，他也可以自己更新，也可以自己手动拖动一个扩展放上去，他就自动帮我弄好
+
+### 三种入口
+
+| 场景 | 用法 |
+|---|---|
+| 粘商店链接 | `POST /api/v1/extensions/install {"url": "https://chromewebstore.google.com/detail/…/hdhng…"} ` |
+| 粘 32 位 ID | 同上，`url` 直接填 ID |
+| 手动拖一个文件 | `{"path": "C:\\Users\\…\\cookiemanager.crx"}`（也吃 `.zip`） |
+
+链接解析接受 6 种形态（`?hl=zh-CN`、带/不带 slug、`?id=`、裸 ID）都测了。
+
+### CRX 怎么解
+
+商店给的是 **CRX3**，结构实测：
+
+```
+0    'Cr24'         4 字节魔数
+4    version=3      uint32 小端
+8    header_len     uint32 小端（protobuf 头，含签名）
+12   header         header_len 字节
+12+header_len  ZIP  ← 切掉前面就是要的东西
+```
+
+cookiemanager 实测：164717 字节，header_len=1310，ZIP 从 1322 开始（`PK\x03\x04`）。
+CRX2 也支持（`pub_len`/`sig_len` 定位）。商店限流会回 HTML 页面 —— 那种情况
+报"多半是商店限流或需要代理"，而不是烂在 zipfile 里。
+
+### 为什么在客户端下载
+
+服务器常常没有外网、也没有用户的代理；客户端才有。所以这个能力只在 core 侧，
+hub 只负责保存打包结果。
+
+### 更新
+
+- 安装目录沿用 packs 的库布局 `<slug>-<version>`，版本升级不会覆盖旧目录
+  （正在用旧版的环境不会被突然换掉）
+- 装完写一个 `.zw-ext-id` 标记，`GET /api/v1/extensions/updates` 靠它回商店比对版本
+- **手工导入的包没有 ID 标记 → 更新检查直接跳过**：宁可漏查，也不瞎猜 ID 去下载别人的扩展
+
+### 安全
+
+解包防路径穿越（`../`、绝对路径、盘符一律整体拒绝），有测试盯着。
+
+### 测试
+
+516 → **540 项**。新增 `tests/test_extstore.py`（24 项）：6 种链接形态、
+CRX2/CRX3/纯 ZIP/HTML 错误页/截断/坏偏移、外层目录剥离、ID 标记与版本目录、
+无 manifest 拒绝、路径穿越拒绝、幂等与 update 语义、无 ID 不查更新、
+商店不可达的可读报错。
+
 ## 0.7.16 — 2026-11-17
 
 **启动时那条代理提示说错了话，改掉。**（其余是云电脑上的整链路实测）

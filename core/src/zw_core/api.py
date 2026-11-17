@@ -874,6 +874,47 @@ def build_app() -> FastAPI:
         return ok({"updated": True, "id": proxy_id})
 
     # ══ 代理库：批量导入 / 批量检测 ════════════════════════════
+    # ── 从 Chrome 应用商店装扩展（用户：输入商店链接就能添加）────────
+    class ExtInstallBody(BaseModel):
+        """从商店链接 / 扩展 ID / 本地 .crx 路径装一个扩展。
+
+        - `url`：`https://chromewebstore.google.com/detail/<slug>/<id>?hl=zh-CN`
+          或直接 32 位扩展 ID
+        - `path`：用户手动拖进来的 `.crx` / `.zip` 的本机路径
+        - `update`：库里已有其它版本时是否装新版（默认 True）
+        """
+
+        url: str = ""
+        path: str = ""
+        name: str = ""
+        update: bool = True
+
+    @app.post(f"{API_PREFIX}/extensions/install", tags=["扩展"], dependencies=[Auth],
+              summary="从 Chrome 商店链接或 .crx 文件安装扩展")
+    def extensions_install(body: ExtInstallBody) -> dict[str, Any]:
+        """下载（或读取本地文件）→ 去掉 CRX 头 → 解包 → 存进本机扩展库。
+
+        为什么在客户端下载而不是服务器：服务器常常没有外网，也没有用户的代理；
+        客户端才有。所以这个能力只在这里。
+        """
+        from zw_core.services import extstore
+
+        try:
+            return ok(extstore.install(url=body.url, crx_path=body.path,
+                                       name=body.name, update=body.update))
+        except extstore.StoreError as exc:
+            raise ApiError(exc.code, exc.message, status=exc.status) from exc
+
+    @app.get(f"{API_PREFIX}/extensions/updates", tags=["扩展"], dependencies=[Auth],
+             summary="检查已装扩展有没有新版")
+    def extensions_updates() -> dict[str, Any]:
+        """回商店比对版本。只查带 ID 标记的（手工导入的包没有 ID，跳过不瞎猜）。"""
+        from zw_core.services import extstore
+
+        items = extstore.check_updates()
+        return ok({"items": items,
+                   "updatable": [i for i in items if i.get("update_available")]})
+
     @app.post(f"{API_PREFIX}/proxies/sync", tags=["代理"], dependencies=[Auth],
               summary="代理库与服务器同步（上行 + 下行）")
     def proxies_sync() -> dict[str, Any]:
