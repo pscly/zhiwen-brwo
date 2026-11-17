@@ -834,7 +834,21 @@ def selftest(show_dialog: bool = True) -> int:
     warns: list[str] = []
     checks: list[tuple[str, Any]] = []
 
+    def _trace(name: str) -> None:
+        """逐项打进度到 stderr（立即 flush）。
+
+        为什么需要：自检如果**在某一项崩掉**（原生崩溃、段错误），
+        最后的汇总报告根本打不出来，CI 里只能看到 exit code 139，
+        完全不知道是哪一项。逐项打点后，日志最后一行就是"崩在这一项"。
+        """
+        try:
+            if sys.stderr is not None:
+                print(f"[selftest] {name} …", file=sys.stderr, flush=True)
+        except (AttributeError, ValueError, OSError):
+            pass
+
     def chk(name: str, fn: Any) -> None:
+        _trace(name)
         try:
             detail = fn()
             checks.append((name, detail))
@@ -847,6 +861,7 @@ def selftest(show_dialog: bool = True) -> int:
         用于"用户能看见但改不了/不该因此判死"的检查，例如安装路径里
         带了中文（那是 Windows 用户名的锅，不是程序坏了）。
         """
+        _trace(name)
         try:
             detail = fn()
             checks.append((name, detail))
