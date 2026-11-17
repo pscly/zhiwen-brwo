@@ -654,3 +654,35 @@ def _check_remote_auth(dev, _pytest, ApiError, require_auth, SimpleNamespace):
     # 错的也不行
     with _pytest.raises(ApiError):
         require_auth(fake_ok, authorization="Bearer wrong-code", x_zw_token="")
+
+
+def test_cdp_token_ttl_default_is_one_hour(client, monkeypatch):
+    """CDP 令牌默认有效期是 3600 秒（1 小时）。
+
+    原来 900 秒（15 分钟）实测太短：一轮调试里要反复取令牌，
+    经常"刚连上就过期"，而且报错看起来像 CDP 或代理挂了，容易误判。
+    用户明确要求改成 3600。
+
+    同时确认仍在 60–7200 的夹取范围内（issue_cdp_token 会夹）。
+    """
+    from zw_core.config import get_settings, reset_settings
+
+    monkeypatch.delenv("ZW_CDP_TOKEN_TTL", raising=False)
+    reset_settings()
+    try:
+        assert get_settings().cdp_token_ttl == 3600
+    finally:
+        reset_settings()
+
+
+def test_cdp_token_ttl_can_still_be_overridden(client, monkeypatch):
+    """环境变量还能改（别人机器上可能需要不同值）。"""
+    from zw_core.config import get_settings, reset_settings
+
+    monkeypatch.setenv("ZW_CDP_TOKEN_TTL", "1800")
+    reset_settings()
+    try:
+        assert get_settings().cdp_token_ttl == 1800
+    finally:
+        monkeypatch.delenv("ZW_CDP_TOKEN_TTL", raising=False)
+        reset_settings()

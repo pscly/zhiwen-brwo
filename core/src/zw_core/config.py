@@ -166,7 +166,10 @@ class Settings:
     # ── 网关 ────────────────────────────────────────────
     gateway_enabled: bool = field(default_factory=lambda: _env_bool("ZW_GATEWAY_ENABLED", True))
     gw_public_base: str = field(default_factory=lambda: _env("ZW_GATEWAY_PUBLIC_BASE", ""))
-    cdp_token_ttl: int = field(default_factory=lambda: _env_int("ZW_CDP_TOKEN_TTL", 900))
+    # CDP 令牌默认有效期。900 秒（15 分钟）实测太短：一轮调试里反复取令牌，
+    # 经常是"刚连上就过期"，报错还容易误判成代理/CDP 挂了。
+    # 改 3600 秒（1 小时）——够一轮调试，又不至于长期有效。上限仍是 7200。
+    cdp_token_ttl: int = field(default_factory=lambda: _env_int("ZW_CDP_TOKEN_TTL", 3600))
     cdp_max_conn_per_profile: int = field(default_factory=lambda: _env_int("ZW_CDP_MAX_CONN", 8))
 
     # ── 网络访问控制 ────────────────────────────────────
