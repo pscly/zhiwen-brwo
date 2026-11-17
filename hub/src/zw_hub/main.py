@@ -648,6 +648,144 @@ def panel_logout(response: Response) -> dict[str, Any]:
     return ok({"logged_out": True})
 
 
+# ── 代理库（服务器与用户机共享同一份）────────────────────────
+# 用户要求：「代理可以在服务器里面进行添加管控，也可以在用户机上添加管控，
+# 都是一样的…用户机上添加过的代理，都会自动同步到服务器里面，也可以在服务器
+# 里面删除，或者隐藏」。
+#
+# 所以它不是"服务器下发配置"，而是一份**共享库**：两边都能加，
+# 客户端加了会自动推上来；服务器加了，客户端下次同步会拉下去。
+
+
+class ProxyBody(BaseModel):
+    scheme: str = "http://"
+    host: str = ""
+    port: int = 0
+    username: str = ""
+    password: str = ""      # 空串 = 不改已有密码（编辑时不必每次重填）
+    hop: str = ""
+    label: str = ""
+    note: str = ""
+
+
+class ProxyHideBody(BaseModel):
+    hidden: bool = True
+
+
+class DeviceProxySyncBody(BaseModel):
+    """设备上报本机代理库。`password` 允许为空（已在服务器上的不必每次重传）。"""
+
+    items: list[dict[str, Any]] = []
+
+
+def _proxy_payload(item: dict[str, Any]) -> dict[str, Any]:
+    """内部 dict → 接口形状（把 ProxyError 变成 HTTP）。"""
+    return item
+
+
+@app.get("/v1/proxies", dependencies=[PanelAuth])
+def list_proxies(include_hidden: bool = False) -> dict[str, Any]:
+    """服务器侧代理库。默认不显示被隐藏的条目。"""
+    from . import proxies as px
+
+    s = get_settings()
+    items = px.list_all(s, include_hidden=include_hidden)
+    return ok({"proxies": items, "count": len(items), "include_hidden": include_hidden})
+
+
+@app.post("/v1/proxies", dependencies=[PanelAuth])
+def create_or_update_proxy(body: ProxyBody) -> dict[str, Any]:
+    from . import proxies as px
+
+    s = get_settings()
+    if not body.host.strip():
+        raise HubError(400, "PROXY_INVALID", "主机不能为空")
+    if not (0 < int(body.port) < 65536):
+        raise HubError(400, "PROXY_INVALID_PORT", "端口应在 1-65535")
+    try:
+        item = px.upsert(
+            s, scheme=px.norm_scheme(body.scheme),
+            host=body.host.strip(), port=int(body.port),
+            username=body.username, password=body.password,
+            hop=body.hop, label=body.label, note=body.note, origin="panel",
+        )
+    except px.ProxyError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    logger.info("服务器侧新增/更新代理 id=%s upstream=%s", item["id"], item["upstream"])
+    return ok(item)
+
+
+@app.post("/v1/proxies/{proxy_id}/hide", dependencies=[PanelAuth])
+def hide_proxy(proxy_id: int, body: ProxyHideBody) -> dict[str, Any]:
+    """隐藏/取消隐藏。不影响已经在用它的环境（删除才会）。"""
+    from . import proxies as px
+
+    s = get_settings()
+    try:
+        item = px.set_hidden(s, proxy_id, bool(body.hidden))
+    except px.ProxyError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    return ok(item)
+
+
+@app.delete("/v1/proxies/{proxy_id}", dependencies=[PanelAuth])
+def delete_proxy(proxy_id: int) -> dict[str, Any]:
+    from . import proxies as px
+
+    s = get_settings()
+    try:
+        return ok(px.delete(s, proxy_id))
+    except px.ProxyError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+
+
+@app.post("/v1/devices/proxies")
+def device_push_proxies(body: DeviceProxySyncBody, request: Request) -> dict[str, Any]:
+    """设备把本机代理库推上来（用户机加了代理 → 自动同步到服务器）。
+
+    只接受"这台设备"自己上报，origin 记成它的 device_id，
+    面板上就能看出这条是哪个机器加的。
+    """
+    from . import proxies as px
+
+    s = get_settings()
+    dev = _device_id_of(request)
+    devices().require_known(dev)      # 被踢/被拒绝的设备不许写库
+    try:
+        res = px.merge_from_device(s, body.items, origin=dev)
+    except px.ProxyError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    logger.info("设备 %s 同步代理 %s 条（新增 %s / 更新 %s）",
+                dev[:16], res["total"], res["created"], res["updated"])
+    return ok(res)
+
+
+@app.get("/v1/devices/proxies")
+def device_pull_proxies(request: Request, with_secrets: bool = True) -> dict[str, Any]:
+    """设备拉取服务器侧代理库（服务器加了代理 → 用户机下次同步就能用）。
+
+    `with_secrets=true` 时把密码一起给它 —— 这就是"服务器加的代理用户机也能用"
+    必须的一步。只发给**已注册且未撤销**的设备（`RequireKnown`），
+    并且只走这条设备专用的接口，列表接口永远不带明文。
+    """
+    from . import proxies as px
+
+    s = get_settings()
+    dev = _device_id_of(request)
+    devices().require_known(dev)      # 明文密码只发给已注册且未撤销的设备
+    items = px.list_all(s, include_hidden=False)
+    if with_secrets:
+        for it in items:
+            try:
+                it["password"] = px.secret_of(s, int(it["id"])) if it.get("has_password") else ""
+            except px.ProxyError as exc:
+                # 单条解不开不能拖垮整次同步：标记出来，让客户端保留本地密码
+                it["password"] = ""
+                it["secret_error"] = exc.message
+    logger.debug("设备 %s 拉取代理 %s 条", dev[:16], len(items))
+    return ok({"proxies": items, "count": len(items), "with_secrets": with_secrets})
+
+
 @app.get("/panel/api/meta", dependencies=[PanelAuth], include_in_schema=False)
 def panel_meta(request: Request) -> dict[str, Any]:
     _check_cidr(request)

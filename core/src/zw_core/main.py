@@ -75,6 +75,24 @@ async def _lifespan(app: Any):
     if not eng["ok"]:
         logger.warning("没有找到浏览器内核：%s", eng.get("error", ""))
 
+    # 代理库与服务器对齐（用户要求：两边都能加，"都是一样的"）。
+    # 放后台线程：服务器暂时连不上绝不能拖慢 core 启动。
+    try:
+        import threading as _threading
+
+        from zw_core.services import proxysync as _proxysync
+
+        def _sync_bg() -> None:
+            try:
+                _proxysync.sync()
+            except Exception:  # noqa: BLE001
+                logger.debug("启动时代理库同步失败", exc_info=True)
+
+        if s.hub_url and getattr(s, "device_id", ""):
+            _threading.Thread(target=_sync_bg, name="zw-proxysync-boot", daemon=True).start()
+    except Exception:  # noqa: BLE001
+        logger.debug("代理库同步启动失败", exc_info=True)
+
     # 远程命令行代理：只在有 hub 地址 + 设备号时启动。
     # 纯出站长轮询，设备不新开监听端口。
     try:

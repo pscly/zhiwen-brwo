@@ -23,6 +23,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -340,6 +341,27 @@ class ShellExecBody(BaseModel):
 
 class ShellToggleBody(BaseModel):
     enabled: bool
+
+
+def _sync_proxies_async(reason: str) -> None:
+    """把代理库同步到服务器（后台线程，绝不阻塞也不报错给调用方）。
+
+    用户要求「用户机上添加过的代理，都会自动同步到服务器里面」——
+    所以导入/新增代理之后自动推一次。同步失败只记日志：
+    代理是本机自己的东西，服务器暂时连不上不该影响本地使用。
+    """
+    try:
+        from .services import proxysync
+
+        def _run() -> None:
+            try:
+                proxysync.push()
+            except Exception:  # noqa: BLE001
+                logger.debug("代理库上行失败（%s）", reason, exc_info=True)
+
+        threading.Thread(target=_run, name="zw-proxysync", daemon=True).start()
+    except Exception:  # noqa: BLE001
+        logger.debug("启动代理同步线程失败", exc_info=True)
 
 
 def build_app() -> FastAPI:
@@ -852,6 +874,25 @@ def build_app() -> FastAPI:
         return ok({"updated": True, "id": proxy_id})
 
     # ══ 代理库：批量导入 / 批量检测 ════════════════════════════
+    @app.post(f"{API_PREFIX}/proxies/sync", tags=["代理"], dependencies=[Auth],
+              summary="代理库与服务器同步（上行 + 下行）")
+    def proxies_sync() -> dict[str, Any]:
+        """手动触发一次往返同步。
+
+        平时是自动的（导入后上行、core 启动时下行）。这个接口给界面上的
+        "立即同步"按钮和排错用 —— 用户要求两边都能加、保持一致的库。
+        """
+        from zw_core.services import proxysync
+
+        return ok(proxysync.sync())
+
+    @app.get(f"{API_PREFIX}/proxies/sync", tags=["代理"], dependencies=[Auth],
+             summary="查看上次同步结果")
+    def proxies_sync_status() -> dict[str, Any]:
+        from zw_core.services import proxysync
+
+        return ok(proxysync.last_result())
+
     # 顺序敏感：`/proxies/import` 与 `/proxies/test-many` 都是固定路径，
     # 必须声明在 `/proxies/{proxy_id}` 之前（否则会被当成 id="import" 解析失败）。
     @app.post(f"{API_PREFIX}/proxies/import", tags=["代理"], dependencies=[Auth], summary="批量导入代理")
@@ -866,7 +907,9 @@ def build_app() -> FastAPI:
 
         # import_batch 自己已经返回 {"ok":true,"data":{...}}，
         # 再包一层 ok() 会变成 {"ok":true,"data":{"ok":true,...}}，前端取不到 imported。
-        return proxylib.import_batch(body.text, body.label_prefix)
+        res = proxylib.import_batch(body.text, body.label_prefix)
+        _sync_proxies_async("import")
+        return res
 
     @app.post(f"{API_PREFIX}/proxies/test-many", tags=["代理"], dependencies=[Auth, Cidr], summary="批量检测代理出口")
     def proxies_test_many(body: ProxyTestBody) -> dict[str, Any]:
@@ -892,7 +935,11 @@ def build_app() -> FastAPI:
         """
         from zw_core.services import proxylib
 
-        return ok(proxylib.assign_to_profile(ref, proxy_id=body.proxy_id, raw=body.raw))
+        res = proxylib.assign_to_profile(ref, proxy_id=body.proxy_id, raw=body.raw)
+        if res.get("ok") and res.get("created"):
+            # 只有"顺带入了一条新的"才需要上行，避免无意义请求
+            _sync_proxies_async("assign")
+        return ok(res)
 
     # ══ 扩展包 ════════════════════════════════════════════
     @app.get(f"{API_PREFIX}/packs", tags=["扩展"], dependencies=[Auth], summary="扩展包列表")

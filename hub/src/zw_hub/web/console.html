@@ -460,6 +460,7 @@ dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
     <nav class="tabs" id="tabs" role="tablist" aria-label="视图切换">
       <button class="tab active" type="button" data-view="machines" role="tab" aria-selected="true">机器</button>
       <button class="tab" type="button" data-view="browsers" role="tab" aria-selected="false">浏览器</button>
+      <button class="tab" type="button" data-view="proxies" role="tab" aria-selected="false">代理</button>
       <button class="tab" type="button" data-view="secrets" role="tab" aria-selected="false">令牌</button>
       <button class="tab" type="button" data-view="events" role="tab" aria-selected="false">事件</button>
     </nav>
@@ -497,6 +498,24 @@ dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
     </section>
 
     <!-- ③ 令牌 -->
+    <section class="view-sec" id="view-proxies" role="tabpanel" aria-label="代理" hidden>
+      <div class="banner info">
+        这里和客户机上是<b>同一份代理库</b>：你在任意一侧添加，另一侧会自动同步过来。
+        <b>隐藏</b>只是列表里不显示（已在用它的环境不受影响），<b>删除</b>才会真正移除。
+      </div>
+      <div class="row-wrap" style="gap:8px; margin:12px 0">
+        <button class="btn sm primary" type="button" id="px-add">添加代理</button>
+        <button class="btn sm" type="button" id="px-refresh">刷新</button>
+        <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
+          <input type="checkbox" id="px-show-hidden"> 显示已隐藏
+        </label>
+        <div class="grow"></div>
+        <span class="muted" id="px-count" style="font-size:12px"></span>
+      </div>
+      <div class="table-wrap"><table class="tbl"><thead><tr>
+        <th>上游</th><th>前置</th><th>标签</th><th>密码</th><th>来源</th><th>操作</th>
+      </tr></thead><tbody id="px-rows"></tbody></table></div>
+    </section>
     <section class="view-sec" id="view-secrets" role="tabpanel" aria-label="令牌" hidden>
       <div class="banner info sec-warn">
         <b>安全提示</b>这些是服务器 <code>.env</code> 里的真实值 —— 面板密码等于服务器管理权。
@@ -557,7 +576,7 @@ dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
       「主控台接口未就绪」提示 —— 主控台不能因为后端还没实现就白屏。
    ========================================================================== */
 
-const VIEWS = ['machines', 'browsers', 'secrets', 'events'];
+const VIEWS = ['machines', 'browsers', 'proxies', 'secrets', 'events'];
 const REFRESH_MS = 10000;
 
 function $(sel, root){ return (root || document).querySelector(sel); }
@@ -1113,6 +1132,7 @@ function switchView(v, fromHash){
   if (!fromHash && location.hash !== '#' + v) location.hash = '#' + v;
   const y = state.scroll[v] || 0;
   window.scrollTo(0, y);
+  if (v === 'proxies') loadProxies();
   if (v === 'secrets') loadSecrets(false);
   if (v === 'machines') terminals.forEach(t => { try { termScrollToEnd(t); } catch (_) {} });
 }
@@ -1516,6 +1536,89 @@ function proxyDialog(px){
     html: body,
     okText: '关闭',
     hideCancel: true,
+  });
+}
+
+/* ── 代理库视图 ───────────────────────────────────────────────────────────
+   和客户机共享同一份库：两边都能加，服务器能隐藏/删除。
+   密码永远不显示原文（后端也不给），这里只显示"已设置/无"。
+*/
+async function loadProxies(){
+  const showHidden = $('#px-show-hidden') && $('#px-show-hidden').checked;
+  try {
+    const r = await fetch('/v1/proxies' + (showHidden ? '?include_hidden=true' : ''), {credentials:'same-origin'});
+    const body = await r.json();
+    if (!r.ok){ throw new Error((body.error && body.error.message) || ('HTTP ' + r.status)); }
+    renderProxies((body.data || {}).proxies || []);
+  } catch (e) {
+    $('#px-rows').innerHTML = '<tr><td colspan="6" class="muted">读取失败：' + esc(String(e.message || e)) + '</td></tr>';
+  }
+}
+function renderProxies(items){
+  const rows = $('#px-rows');
+  if (!items.length){
+    rows.innerHTML = '<tr><td colspan="6" class="muted">还没有代理。点「添加代理」，或在客户机上导入（会自动同步到这里）。</td></tr>';
+    $('#px-count').textContent = '共 0 条';
+    return;
+  }
+  rows.innerHTML = items.map(p => '<tr>' +
+    '<td class="mono">' + esc(p.scheme) + '://' + esc(p.host) + ':' + esc(p.port) + '</td>' +
+    '<td class="mono">' + (p.hop ? esc(p.hop) : '<span class="muted">—</span>') + '</td>' +
+    '<td>' + (p.label ? esc(p.label) : '<span class="muted">—</span>') +
+      (p.hidden ? ' <span class="badge">已隐藏</span>' : '') + '</td>' +
+    '<td>' + (p.has_password ? '<span class="badge ok">已设置</span>' : '<span class="muted">无</span>') + '</td>' +
+    '<td class="mono cell-sub">' + esc((p.origin || '').slice(0, 18)) + '</td>' +
+    '<td><div class="cdp-cell">' +
+      '<button class="btn xs ghost" type="button" data-px-hide="' + p.id + '" data-px-hid="' + (p.hidden ? '1' : '0') + '">' +
+        (p.hidden ? '取消隐藏' : '隐藏') + '</button>' +
+      '<button class="btn xs ghost danger" type="button" data-px-del="' + p.id + '">删除</button>' +
+    '</div></td>' +
+    '</tr>').join('');
+  $('#px-count').textContent = '共 ' + items.length + ' 条';
+}
+async function hideProxy(id, hidden){
+  const r = await fetch('/v1/proxies/' + id + '/hide', {
+    method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({hidden: hidden})
+  });
+  if (!r.ok){ const b = await r.json().catch(()=>({})); toast((b.error && b.error.message) || '操作失败', 'bad'); }
+  loadProxies();
+}
+async function deleteProxy(id){
+  if (!window.confirm('删除这条代理？客户机上同步后也会消失。只想让它不显示请用「隐藏」。')) return;
+  const r = await fetch('/v1/proxies/' + id, {method:'DELETE', credentials:'same-origin'});
+  if (!r.ok){ const b = await r.json().catch(()=>({})); toast((b.error && b.error.message) || '删除失败', 'bad'); }
+  loadProxies();
+}
+function askAddProxy(){
+  openDialog({
+    title: '添加代理',
+    html: '<div class="px-form">' +
+      '<label>协议 <input class="input" id="pxf-scheme" value="socks5" placeholder="http / socks5"></label>' +
+      '<label>主机 <input class="input" id="pxf-host" placeholder="66.80.12.66"></label>' +
+      '<label>端口 <input class="input" id="pxf-port" placeholder="20000"></label>' +
+      '<label>用户名 <input class="input" id="pxf-user" placeholder="可留空"></label>' +
+      '<label>密码 <input class="input" id="pxf-pass" type="password" placeholder="可留空"></label>' +
+      '<label>前置 <input class="input" id="pxf-hop" placeholder="可留空，如 http://127.0.0.1:21080"></label>' +
+      '<label>标签 <input class="input" id="pxf-label" placeholder="可留空"></label>' +
+      '</div><div class="br-note" style="margin-top:8px">IP 要写完整四段（66.80.12.66），不能有空格。' +
+      '带前置就是链式代理（前置 → 落地）。</div>',
+    okText: '保存',
+    onOk: async () => {
+      const val = (id) => { const el = $('#' + id); return el ? el.value.trim() : ''; };
+      const payload = {
+        scheme: val('pxf-scheme') || 'http', host: val('pxf-host'),
+        port: Number(val('pxf-port') || 0), username: val('pxf-user'),
+        password: val('pxf-pass'), hop: val('pxf-hop'), label: val('pxf-label')
+      };
+      const r = await fetch('/v1/proxies', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      const b = await r.json().catch(()=>({}));
+      if (!r.ok){ toast((b.error && b.error.message) || '保存失败', 'bad'); return false; }
+      closeDialog(); loadProxies(); return true;
+    }
   });
 }
 
@@ -2353,6 +2456,21 @@ $('#mach-list').addEventListener('click', async (ev) => {
     toast(e.message || '操作失败', 'err');
   }
 });
+
+/* 代理库视图：行由 JS 重建，所以整块视图用事件委托 */
+$('#view-proxies').addEventListener('click', (ev) => {
+  const hideBtn = ev.target.closest('[data-px-hide]');
+  if (hideBtn){
+    hideProxy(Number(hideBtn.dataset.pxHide), hideBtn.dataset.pxHid !== '1');
+    return;
+  }
+  const delBtn = ev.target.closest('[data-px-del]');
+  if (delBtn){ deleteProxy(Number(delBtn.dataset.pxDel)); return; }
+  if (ev.target.closest('#px-add')){ askAddProxy(); return; }
+  if (ev.target.closest('#px-refresh')){ loadProxies(); return; }
+});
+/* 复选框在容器外（按钮行），单独挂 */
+$('#px-show-hidden').addEventListener('change', () => loadProxies());
 
 /* 浏览器视图里的「复制」按钮（事件委托：表格每次刷新都重建）*/
 $('#br-list').addEventListener('click', (ev) => {
