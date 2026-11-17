@@ -372,3 +372,23 @@ def test_meta_auth_required_is_per_request_not_per_config():
             else:
                 os.environ[k] = v
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_client_console_does_not_claim_auth_extension_works():
+    """客户端控制台不能再说"选代理会注入凭据扩展"。
+
+    实测结论（多次真机验证）：Chrome 137 起**忽略 `--load-extension`**，
+    官方 Chrome 149/150/157 全都不加载扩展。带用户名密码的代理真正靠的是
+    **本机中继**（`services/proxyrelay.py`：中继代填 `Proxy-Authorization` /
+    做 SOCKS5 RFC1929 握手）。
+
+    界面文案里留着"会自动注入凭据扩展"，用户遇到代理连不上时就会以为是扩展
+    没生效，往错的方向查 —— 这类"文案比现实旧"的问题比代码 bug 更难发现。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    html = (root / "core/src/zw_core/web/index.html").read_text(encoding="utf-8")
+
+    assert "注入凭据扩展" not in html, "客户端控制台仍在宣称注入认证扩展"
+    assert "本机中继" in html, "应当说明带认证代理走的是本机中继"

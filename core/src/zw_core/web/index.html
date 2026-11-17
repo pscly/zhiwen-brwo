@@ -1522,7 +1522,7 @@ function openProfileForm(profile) {
     <div class="form-sec">
       <h3>网络</h3>
       <div class="form-grid">
-        ${field('代理库', proxySelect, proxyOpts.length ? '选库里的代理会自动注入凭据扩展（Chromium 的 --proxy-server 不支持带密码）。' : '')}
+        ${field('代理库', proxySelect, proxyOpts.length ? '选库里的代理会自动补上凭据：带用户名密码的代理不能写进 --proxy-server（Chromium 不支持），会由本机中继代填认证头再转发给真实代理。早年"生成认证扩展"那条路已不通（Chrome 137 起忽略 --load-extension），现在一律走中继。' : '')}
         ${field('代理地址', `<input class="input mono" id="f-proxy" value="${escAttr(p.proxy || '')}" placeholder="http://127.0.0.1:7890 或 socks5://user:pass@host:port">`, '这里是上游地址的唯一真相；代理库只是填进来的便捷来源。')}
       </div>
     </div>
