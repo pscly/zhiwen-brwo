@@ -180,6 +180,13 @@ def mask_proxy_text(raw: str) -> str:
     return text
 
 
+# 环境行里代理列的宽度上限（字符数）。**只在这里定义一次**：
+# `proxy_upstream_of()` 要用它决定"要不要省掉协议名"，
+# `ProfilePanel._render_row()` 要用它 `_clip()`。两处各写一个 22 迟早会不同步，
+# 而不同步的后果就是之前修过的那个 bug 又回来（IP 尾部被切掉、分不清是哪台代理）。
+ROW_LIMIT_PROXY = 22
+
+
 def proxy_upstream_of(row: dict[str, Any]) -> str:
     """代理库一行 → 给人看的脱敏串。
 
@@ -201,9 +208,9 @@ def proxy_upstream_of(row: dict[str, Any]) -> str:
     auth = "***@" if user else ""
     full = f"{scheme}://{auth}{host}:{port}"
     # 超长时先砍协议名（host:port 是不能丢的那部分）
-    if len(full) > 22:
+    if len(full) > ROW_LIMIT_PROXY:
         short = f"{auth}{host}:{port}"
-        if len(short) <= 22:
+        if len(short) <= ROW_LIMIT_PROXY:
             return short
     return full
 
@@ -1902,7 +1909,7 @@ class ProfilePanel(tk.Frame):
 
     ROW_LIMIT_NAME = 18
     ROW_LIMIT_GROUP = 8
-    ROW_LIMIT_PROXY = 22
+    ROW_LIMIT_PROXY = ROW_LIMIT_PROXY   # 模块级那一个（见 proxy_upstream_of 上方）
 
     def __init__(self, master: tk.Misc, *, api: CoreApi, theme: Theme,
                  fonts: dict[str, Any], on_log: Callable[[str, str], None],

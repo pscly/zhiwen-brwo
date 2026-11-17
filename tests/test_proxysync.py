@@ -237,3 +237,28 @@ def test_scheme_with_slashes_is_normalized(hub):
     item = c.post("/v1/proxies", json={"scheme": "http://", "host": "5.5.5.5",
                                        "port": 8080}).json()["data"]
     assert item["upstream"] == "http://5.5.5.5:8080"
+
+
+def test_pull_never_deletes_local_proxies(client_root, hub):
+    """`pull()` **不得**因为服务器上没有就删掉本机代理。
+
+    文档曾写"服务器删了本机也会删"，但实现从来没做过 —— 文档比代码承诺得多。
+    想清楚后决定保持不删，并把文档改成实话：本机环境按 `proxy_id` 引用代理，
+    级联删除会让"正被某个环境使用"的代理凭空消失，那个环境下次启动就变成
+    "代理 #N（库里已没有这一条）"。服务器侧"删除"的语义是"从我这份共享库里移除"，
+    不是"每台机器立刻丢掉它"；要表达"不想再看到它"应该用**隐藏**。
+
+    这条测试钉住这个决定：服务器上什么都没有时，本机已有的代理必须留下。
+    """
+    from zw_core.services import proxylib, proxysync
+
+    # 本机先有一条（服务器上不存在）
+    proxylib.import_batch("socks5://u:p@7.7.7.7:1080 # 本机独有")
+    assert any(x["host"] == "7.7.7.7" for x in proxylib.list_all())
+
+    res = proxysync.pull()
+    assert res.get("ok") is True, res
+
+    after = proxylib.list_all()
+    assert any(x["host"] == "7.7.7.7" for x in after), \
+        f"pull 把本机独有的代理删掉了：{after}"

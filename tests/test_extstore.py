@@ -588,3 +588,61 @@ def test_bad_crx_error_does_not_echo_file_content(home, tmp_path):
         es.install(crx_path=str(secret), make_pack=False)
     assert "TOP-SECRET" not in ei.value.message, ei.value.message
     assert "Cr24" in ei.value.message  # 给出可判定的提示，而不是内容
+
+
+# ── 版本来源与比较（0.7.35）─────────────────────────────
+def test_install_writes_meta_with_version(home, tmp_path):
+    """装在库里的扩展要留下"装的时候是什么版本"。
+
+    为什么不能靠目录名：`<slug>-<version>` 只对这里装进来的成立。
+    扩展包导入 / 手工放进来的目录可能叫 `cookiemanager`（不含版本），
+    那样 `rsplit("-",1)[-1]` 会把整个名字当版本 → 永久显示"有更新"。
+    """
+    import io as _io
+    import json as _json
+    import zipfile as _zf
+
+    from zw_core.services import extstore as es
+
+    buf = _io.BytesIO()
+    with _zf.ZipFile(buf, "w") as z:
+        z.writestr("manifest.json", _json.dumps(
+            {"manifest_version": 3, "name": "MetaExt", "version": "4.5.6"}))
+        z.writestr("a.js", "//")
+    p = tmp_path / "m.crx"
+    p.write_bytes(_crx3(buf.getvalue()))
+
+    r = es.install(crx_path=str(p), make_pack=False)
+    from pathlib import Path as _P
+
+    meta = _P(r["path"]) / ".zw-ext-meta.json"
+    assert meta.is_file(), "没有写元信息文件"
+    info = _json.loads(meta.read_text(encoding="utf-8"))
+    assert info["version"] == "4.5.6", info
+
+
+def test_installed_version_prefers_meta_over_directory_name(tmp_path):
+    """目录名不可靠时，版本号必须从 meta 读。"""
+    from zw_core.services.extstore import _installed_version
+
+    # 模拟"扩展包导入"出来的目录：名字里没有版本
+    d = tmp_path / "cookiemanager"
+    d.mkdir()
+    (d / ".zw-ext-meta.json").write_text(
+        '{"id": "hdhngoamekjhmnpenphenpaiindoinpo", "version": "0.6.7"}', encoding="utf-8")
+    assert _installed_version(d) == "0.6.7"
+
+    # 没有 meta 才退回目录名
+    d2 = tmp_path / "oldname-1.2.3"
+    d2.mkdir()
+    assert _installed_version(d2) == "1.2.3"
+
+
+def test_version_key_orders_like_versions():
+    """`1.10` 必须大于 `1.9`（字符串比较会得出相反结论）。"""
+    from zw_core.services.extstore import _ver_key
+
+    assert _ver_key("1.10") > _ver_key("1.9")
+    assert _ver_key("3.1.4") > _ver_key("3.1.3")
+    assert _ver_key("2.0") > _ver_key("1.99.99")
+    assert _ver_key("1.0") == _ver_key("1.0.0")

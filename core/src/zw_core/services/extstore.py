@@ -32,6 +32,7 @@ Chrome 商店给的是 **CRX3**：
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 import zipfile
@@ -353,6 +354,18 @@ def install(
                 (dest / ".zw-ext-id").write_text(ext_id, encoding="utf-8")
             except OSError:
                 logger.debug("写扩展 ID 标记失败", exc_info=True)
+        # 顺手记下**装的时候的版本号**。
+        # 为什么不能靠目录名：`<slug>-<version>` 这个布局只对这里装进来的成立；
+        # 从扩展包导入 / 手工放进来的目录可能叫 `cookiemanager`（不含版本），
+        # 那样 `rsplit("-",1)[-1]` 会把整个名字当版本 → 永久显示"有更新"。
+        try:
+            (dest / ".zw-ext-meta.json").write_text(
+                json.dumps({"id": ext_id, "version": version,
+                            "name": str(manifest.get("name") or slug)},
+                           ensure_ascii=False),
+                encoding="utf-8")
+        except OSError:
+            logger.debug("写扩展元信息失败", exc_info=True)
     finally:
         import shutil
 
@@ -415,6 +428,41 @@ def _make_pack(dest, *, name: str, as_default: bool) -> dict[str, Any]:
     return out
 
 
+def _ver_key(v: str) -> tuple[int, ...]:
+    """把 `1.10.2` 这种版本号变成可比较的元组（非数字段落按 0 处理）。
+
+    为什么不用字符串比较：`"1.10" < "1.9"` 在字符串里成立，但版本语义相反。
+    """
+    out: list[int] = []
+    for part in str(v or "").replace("_", ".").replace("-", ".").split("."):
+        if part.isdigit():
+            out.append(int(part))
+        else:
+            # `1.0.0-beta` 这类：取前导数字，没有就是 0
+            m = re.match(r"(\d+)", part)
+            out.append(int(m.group(1)) if m else 0)
+    while len(out) > 1 and out[-1] == 0:
+        out.pop()
+    return tuple(out)
+
+
+def _installed_version(d: Path) -> str:
+    """读"库里这条扩展装的是什么版本"。
+
+    优先 `.zw-ext-meta.json`（install 写的），其次从目录名 `<slug>-<version>` 猜。
+    目录名不可靠：扩展包导入的目录可能不带版本后缀。
+    """
+    meta = d / ".zw-ext-meta.json"
+    if meta.is_file():
+        try:
+            v = str(json.loads(meta.read_text(encoding="utf-8")).get("version") or "")
+            if v:
+                return v
+        except (OSError, ValueError, TypeError):
+            logger.debug("扩展元信息读不出来，退回目录名：%s", d, exc_info=True)
+    return d.name.rsplit("-", 1)[-1]
+
+
 def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
     """查库里已装的扩展有没有新版（用户要求"可以自己更新"）。
 
@@ -437,7 +485,7 @@ def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
         ext_id = mark.read_text(encoding="utf-8").strip()
         if not _ID_RE.match(ext_id):
             continue
-        cur = d.name.rsplit("-", 1)[-1]
+        cur = _installed_version(d)
         try:
             info = fetch_info(ext_id)
         except StoreError as exc:
@@ -445,9 +493,11 @@ def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
                         "latest": "", "update_available": False, "error": exc.message})
             continue
         latest = str(info.get("version") or "")
+        # 只有"远端比本地新"才算有更新。远端反而更旧时（开发者回滚）不该提示升级。
+        newer = bool(latest) and _ver_key(latest) > _ver_key(cur)
         out.append({
             "path": str(d), "ext_id": ext_id, "current": cur, "latest": latest,
-            "update_available": bool(latest and latest != cur),
+            "update_available": newer,
             "error": "",
         })
     return out
