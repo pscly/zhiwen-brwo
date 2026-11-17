@@ -646,3 +646,49 @@ def test_version_key_orders_like_versions():
     assert _ver_key("3.1.4") > _ver_key("3.1.3")
     assert _ver_key("2.0") > _ver_key("1.99.99")
     assert _ver_key("1.0") == _ver_key("1.0.0")
+
+
+# ── check_updates 的并发与容错（0.7.38）─────────────────
+def test_check_updates_runs_concurrently_and_isolates_failures(home, monkeypatch):
+    """查多个扩展时：并发跑、单个失败只影响自己、总耗时远小于串行。
+
+    之前是串行 `for`：查一次要整包下载 CRX，单个超时 60 秒 —— 5 个扩展最坏
+    5 分钟，界面上看就是卡死。现在并发 + 短超时。
+    """
+    import time as _t
+
+    from zw_core.services import extstore as es
+    from zw_core.services import packs as packsvc
+
+    s = packsvc.get_settings()
+    s.ext_dir.mkdir(parents=True, exist_ok=True)
+    ids = ["hdhngoamekjhmnpenphenpaiindoinpo", "aaaabbbbccccddddeeeeffffgggghhhh"]
+    for i, eid in enumerate(ids):
+        d = s.ext_dir / f"ext{i}-1.0.0"
+        d.mkdir()
+        (d / ".zw-ext-id").write_text(eid, encoding="utf-8")
+        (d / ".zw-ext-meta.json").write_text('{"version": "1.0.0"}', encoding="utf-8")
+
+    calls: list[str] = []
+
+    def fake_fetch(ext_id, *, timeout=60.0):
+        calls.append(ext_id)
+        if ext_id == ids[1]:
+            raise es.StoreError("EXT_STORE_UNREACHABLE", "模拟连不上")
+        _t.sleep(0.25)          # 模拟网络耗时
+        return {"version": "2.0.0"}
+
+    monkeypatch.setattr(es, "fetch_info", fake_fetch)
+    t0 = _t.time()
+    out = es.check_updates(timeout=5.0, concurrency=4)
+    cost = _t.time() - t0
+
+    assert len(out) == 2, out
+    # 一个成功、一个失败，且失败有原因
+    ok_rows = [r for r in out if not r["error"]]
+    bad_rows = [r for r in out if r["error"]]
+    assert len(ok_rows) == 1 and len(bad_rows) == 1, out
+    assert ok_rows[0]["update_available"] is True, ok_rows
+    assert "连不上" in bad_rows[0]["error"], bad_rows
+    # 并发：两个各 0.25s，串行要 0.5s+；这里应明显更短
+    assert cost < 0.45, f"看起来是串行的（{cost:.2f}s）"

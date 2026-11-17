@@ -463,7 +463,8 @@ def _installed_version(d: Path) -> str:
     return d.name.rsplit("-", 1)[-1]
 
 
-def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
+def check_updates(slugs: list[str] | None = None, *, timeout: float = 20.0,
+                  concurrency: int = 4) -> list[dict[str, Any]]:
     """查库里已装的扩展有没有新版（用户要求"可以自己更新"）。
 
     只查**能对上扩展 ID** 的：库里目录名是 `<slug>-<version>`，不含 ID；
@@ -475,7 +476,11 @@ def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
     s = packs.get_settings()
     if not s.ext_dir.is_dir():
         return []
-    out: list[dict[str, Any]] = []
+    # 先收集候选（带商店 ID 的目录），再**并发**查远端版本。
+    # 为什么并发：查一次要下载整个 CRX（Omaha 的纯版本接口在这里不可依赖），
+    # 串行跑 5 个扩展 = 最坏 5×60 秒，界面会像卡死。并发 + 短超时后最坏约等于
+    # `ceil(n/concurrency) × timeout`，并且单个失败只影响它自己那一行。
+    cands: list[tuple[Path, str, str]] = []
     for d in sorted(s.ext_dir.iterdir()):
         if not d.is_dir():
             continue
@@ -485,19 +490,29 @@ def check_updates(slugs: list[str] | None = None) -> list[dict[str, Any]]:
         ext_id = mark.read_text(encoding="utf-8").strip()
         if not _ID_RE.match(ext_id):
             continue
-        cur = _installed_version(d)
+        cands.append((d, ext_id, _installed_version(d)))
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _one(item: tuple[Path, str, str]) -> dict[str, Any]:
+        d, ext_id, cur = item
         try:
-            info = fetch_info(ext_id)
+            info = fetch_info(ext_id, timeout=timeout)
         except StoreError as exc:
-            out.append({"path": str(d), "ext_id": ext_id, "current": cur,
-                        "latest": "", "update_available": False, "error": exc.message})
-            continue
+            return {"path": str(d), "ext_id": ext_id, "current": cur,
+                    "latest": "", "update_available": False, "error": exc.message}
+        except Exception as exc:  # noqa: BLE001  单个扩展不该拖垮整批
+            return {"path": str(d), "ext_id": ext_id, "current": cur,
+                    "latest": "", "update_available": False,
+                    "error": f"{type(exc).__name__}: {exc}"}
         latest = str(info.get("version") or "")
         # 只有"远端比本地新"才算有更新。远端反而更旧时（开发者回滚）不该提示升级。
         newer = bool(latest) and _ver_key(latest) > _ver_key(cur)
-        out.append({
-            "path": str(d), "ext_id": ext_id, "current": cur, "latest": latest,
-            "update_available": newer,
-            "error": "",
-        })
-    return out
+        return {"path": str(d), "ext_id": ext_id, "current": cur, "latest": latest,
+                "update_available": newer, "error": ""}
+
+    if not cands:
+        return []
+    workers = max(1, min(int(concurrency), len(cands)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="zw-ext-upd") as ex:
+        return list(ex.map(_one, cands))
