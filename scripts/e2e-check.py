@@ -24,6 +24,28 @@
 
 用法：
   ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx python scripts/e2e-check.py
+
+## 想跑到 72 项而不是 65 项，要额外满足两个条件
+
+下面这两组能力**只有配好了才会真跑**，否则按"环境不具备"跳过（不是 bug）：
+
+1. **导出 / 导入**（第 11 节）需要主密码：
+   `ZW_SYNC_PASSWORD=...`（导出包靠它加密）。core 进程和本脚本都要有。
+
+2. **同步**（第 12 节）需要一个连通的 hub，且**设备已被批准**：
+   - core 侧：`ZW_HUB_URL` + `ZW_HUB_TOKEN` + `ZW_DEVICE_ID`
+   - 服务器侧：这台设备要 `active`。`ZW_DEVICE_AUTO_APPROVE=false` 时新设备是
+     `pending`，推送会失败（差异查询/推送/错密码拦截三节都会红）。
+
+     去面板点「允许」，或调 `POST /panel/api/devices/<id>/approve`。
+
+实测差异（同一台机器、同一份代码）：
+
+    没配主密码、没配 hub   → 通过 65 / 跳过 6
+    配好上面两项并批准设备 → 通过 72 / 跳过 4
+
+剩下真正跳过的 4 项是机器环境限制：指纹内核（2 项）、代理出口（没有真代理）、
+MCP 鉴权（本机回环免令牌，属正常）。
   ZW_SYNC_PASSWORD=xxx   # 想连同步那几项时必须给
 """
 
