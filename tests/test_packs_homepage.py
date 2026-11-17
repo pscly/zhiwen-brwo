@@ -431,3 +431,129 @@ def test_import_from_chrome_skips_helper_dirs(tmp_path):
     (helper / "manifest.json").write_text('{"name":"not-an-extension"}', encoding="utf-8")
     r = packs.import_pack(from_chrome=str(userdata))
     assert r["extension_count"] == 1, "只应该导入真正的扩展"
+
+
+def test_from_chrome_handles_spaces_and_non_ascii_paths(tmp_path):
+    """Chrome 的用户目录里一定有空格（`User Data`、`Local Extension Settings`），
+    Windows 上还可能落在中文用户名下。pathlib 应该原样处理，不能靠 shell 引号。
+
+    这条是为了防"在 Linux 上测得好好的，到用户机器上一遇到空格就崩"。
+    """
+    from zw_core.services import packs
+
+    root = tmp_path / "Users" / "张三" / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
+    ext_id = "ponmlkjihgfedcbaponmlkjihgfedcba"
+    code = root / "Default" / "Extensions" / ext_id / "2.0.0"
+    code.mkdir(parents=True)
+    (code / "manifest.json").write_text(
+        '{"manifest_version":3,"name":"空格测试","version":"2.0.0"}', encoding="utf-8")
+    les = root / "Default" / "Local Extension Settings" / ext_id
+    les.mkdir(parents=True)
+    (les / "000005.ldb").write_bytes(b"with space and CJK")
+
+    r = packs.import_pack(from_chrome=str(root), name="带空格与中文")
+    assert r["extension_count"] == 1
+    assert r["with_data"] == 1
+    import pathlib
+
+    pdir = pathlib.Path(r["path"])
+    assert (pdir / "extensions" / ext_id / "manifest.json").is_file()
+    assert (pdir / "data" / ext_id / "000005.ldb").read_bytes() == b"with space and CJK"
+
+
+def test_profile_name_with_spaces_survives_pack_source(tmp_path):
+    """包名/来源里带空格与中文都要能落盘再读回（Windows 路径常见）。"""
+    from zw_core.services import packs
+
+    userdata = _fake_chrome(tmp_path)
+    r = packs.import_pack(from_chrome=str(userdata), name="RXYCDP 的插件 数据")
+    listed = packs.list_packs()
+    got = next(x for x in listed if x["id"] == r["id"])
+    assert got["name"] == "RXYCDP 的插件 数据"
+    assert got["source"] == "chrome"
+
+
+# ── 扩展"能不能真的被加载"必须说清楚 ─────────────────────────────
+def test_major_of_handles_vendor_prefixed_version():
+    """`google-chrome --version` 返回的是 `Google Chrome 149.0.7827.53`。
+
+    第一版按 `[.-]` 切了再找第一个纯数字片段，切出来是
+    `["Google Chrome 149", "0", "7827", "53"]`，于是主版本被认成 **0**，
+    "≥137 不支持扩展"这条判断永远不触发（实测踩到：正式版 Chrome
+    被报告成"可以加载扩展"）。
+    """
+    from zw_core.services.engines import _major_of
+
+    assert _major_of("Google Chrome 149.0.7827.53") == 149
+    assert _major_of("150.0.7871.186") == 150
+    assert _major_of("Chrome/157.0.8103.79") == 157
+    assert _major_of("137.0.0.0") == 137
+    assert _major_of("") == 0
+    assert _major_of("unknown") == 0
+
+
+def test_extensions_loadable_rejects_modern_chromium(tmp_path, monkeypatch):
+    """Chrome 137+ 已移除命令行加载扩展的能力 —— 必须判成"不可加载"。
+
+    实测（2026-11-17）：google-chrome 149 / ungoogled-chromium 150 /
+    playwright chromium 三种内核、有界面与无头都试过，`--load-extension`
+    的扩展 ID 从未出现在 chrome-extension:// 目标里；加
+    `--disable-features=DisableLoadExtensionCommandLineSwitch` 也没用。
+    """
+    from zw_core.services import engines
+
+    monkeypatch.setattr(engines, "engine_version", lambda _p: "Google Chrome 149.0.7827.53")
+    ok, why = engines.extensions_loadable(tmp_path / "chrome")
+    assert ok is False
+    assert "137" in why and "不会加载" in why
+
+
+def test_extensions_loadable_allows_old_engine(tmp_path, monkeypatch):
+    from zw_core.services import engines
+
+    monkeypatch.setattr(engines, "engine_version", lambda _p: "128.0.6613.84")
+    ok, why = engines.extensions_loadable(tmp_path / "chrome")
+    assert ok is True and why == ""
+
+
+def test_extensions_loadable_unknown_version_does_not_block(tmp_path, monkeypatch):
+    """版本读不出来就别拦 —— 宁可运行期暴露，也不要无端禁止用户。"""
+    from zw_core.services import engines
+
+    monkeypatch.setattr(engines, "engine_version", lambda _p: "")
+    assert engines.extensions_loadable(tmp_path / "chrome") == (True, "")
+
+
+def test_apply_reports_extensions_will_not_load(tmp_path, monkeypatch):
+    """应用扩展包时必须告诉调用方"插件不会出现在浏览器里"。
+
+    代码和数据照样搬（换内核/换版本的机器上仍然有用），但沉默地搬完
+    会让用户以为是自己的操作错了。
+    """
+    from zw_core import config, db
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("ZW_CHROME_BIN", "/usr/bin/google-chrome")
+    config.reset_settings()
+    db.reset_db()
+    try:
+        from zw_core.services import engines, manager as mgr, packs
+
+        monkeypatch.setattr(engines, "engine_version", lambda _p: "Google Chrome 149.0.7827.53")
+
+        src = tmp_path / "ext"
+        src.mkdir()
+        (src / "manifest.json").write_text(
+            '{"manifest_version":3,"name":"Probe","version":"1.0"}', encoding="utf-8")
+        pack = packs.import_pack(src_path=str(src), name="探针包")
+        prof = mgr.create_profile({"name": "扩展验证"})
+        out = packs.apply_to_profile(prof["id"], [pack["id"]])
+
+        assert out["applied"], out
+        assert out["extensions_active"] is False
+        assert "137" in out["extensions_note"]
+        # 数据/代码这一半必须照常完成
+        assert out["applied"][0]["slug"] == "probe"
+    finally:
+        config.reset_settings()
+        db.reset_db()

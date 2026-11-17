@@ -1,5 +1,62 @@
 # CHANGELOG
 
+## 0.7.6 — 2026-11-17
+
+**扩展能不能真的被加载，现在说清楚了**（不再沉默）。
+
+### 实测结论：Chrome 137+ 不加载命令行传入的扩展
+
+三次独立实验，三种内核 × 有界面/无头，结论一致：
+
+| 内核 | `--load-extension` 生效？ |
+|---|---|
+| google-chrome 149.0.7827.53 | ❌ |
+| ungoogled-chromium 150.0.7871.186 | ❌ |
+| playwright chromium | ❌ |
+
+期望的扩展 ID（`chromium_unpacked_id` 算出的 `gkdidklgjlp…`）从未出现在
+`chrome-extension://` 目标里，内容脚本从不执行。同时排除了三种"以为能绕"的做法：
+
+- `--disable-features=DisableLoadExtensionCommandLineSwitch` —— 无效
+- `--disable-extensions-except` 配合 `--load-extension` —— 无效
+- 往 `Default/Preferences` 的 `extensions.settings` 注入
+  （`location:4`/`state:1`/`creation_flags:38`/完整 `manifest`）——
+  被 `Secure Preferences` 的 MAC 校验挡掉
+
+这是 Chromium 上游从 137 起关掉的能力，不是本项目的缺陷。
+
+### 因此：把"搬运"和"生效"分开说
+
+`POST /profiles/{ref}/packs/apply` 新增两个字段：
+
+```json
+{"extensions_active": false,
+ "extensions_note": "内核版本 Google Chrome 149.…（≥137）已移除命令行加载扩展的能力：…"}
+```
+
+- 代码（`extensions/<key>/`）、数据（`Local Extension Settings/<id>/`）、
+  `profiles.extensions` 的 slug 照旧完整搬运 —— 换内核或换机器后仍然有用
+- 但界面与事件流会明确提示"插件不会出现在浏览器里"，不再让人以为是自己操作错了
+- 判断靠内核版本 ≥137（`engines.extensions_loadable()`），不猜厂商（ungoogled 同样失效）；
+  版本读不出来时不拦
+
+### 修的一个解析 bug
+
+`engines._major_of()`：`google-chrome --version` 返回 `Google Chrome 149.0.7827.53`，
+第一版按 `[.-]` 切后取第一个纯数字片段，取到的是 `"0"` → 主版本判成 0 →
+"≥137 不支持扩展"永远不触发（正式版 Chrome 被报告成"可以加载扩展"）。
+改成先用正则找出 `x.y.z…` 整体再取第一段。
+
+### 文档
+
+`docs/16-代理与扩展包.md` 新增第五节，写清限制、三次实验、接口字段，
+以及三条真正能让插件生效的路线（CRX+企业策略 / 用 ≤136 内核 / 手工装一次）。
+
+### 测试
+
+493 → **500 项**。新增：版本字符串解析 6 种形态、现代内核判为不可加载、
+旧内核放行、版本未知不拦、`apply` 返回 `extensions_active=false` 且代码仍被搬运。
+
 ## 0.7.5 — 2026-11-17
 
 三件事：**代理串格式校验**、**从 Chrome 目录导入扩展包**、控制台能看到"代理无效"。

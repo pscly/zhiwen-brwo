@@ -193,6 +193,62 @@ def _version_from_layout(bin_path: Path) -> str:
     return ""
 
 
+
+# ── 外部扩展能不能加载（Chrome 137+ 不行）────────────────
+# 实测结论（2026-11-17，三种内核 × 有界面/无头 都试过）：
+#   google-chrome 149 / ungoogled-chromium 150 / playwright chromium
+#   命令行 `--load-extension=<dir>` **完全不生效** —— 期望的扩展 ID
+#   从来没出现在 chrome-extension:// 目标里，内容脚本也从不执行。
+#   加 `--disable-features=DisableLoadExtensionCommandLineSwitch` 也没用。
+#   同时试过往 Default/Preferences 的 extensions.settings 注入
+#   （location=4/state=1/manifest 齐全），也被 Secure Preferences 的 MAC 校验挡掉。
+# 所以"创建浏览器时自动带上插件"这件事，靠命令行加载在当前内核上做不到。
+EXT_LOAD_MIN_BROKEN_MAJOR = 137
+
+
+
+def _major_of(ver: str) -> int:
+    """从版本字符串里取主版本号。
+
+    ## 为什么不能按分隔符切了再找第一个纯数字
+
+    `engine_version()` 返回的可能是 **带厂商前缀** 的串：Linux 上跑
+    `google-chrome --version` 得到的是 `Google Chrome 149.0.7827.53`。
+    按 `[.-]` 切出来是 `["Google Chrome 149", "0", "7827", "53"]` ——
+    第一个纯数字片段是 `"0"`（版本号里的第二段），于是主版本被认成 0，
+    "≥137 不支持扩展"这条判断就永远不会触发（实测踩到：正式版 Chrome
+    被报告成"可以加载扩展"）。
+
+    所以先找形如 `x.y.z…` 的版本号整体，再取它的第一段。
+    """
+    m = re.search(r"(\d+)(?:\.\d+)+", ver or "")
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(\d+)\b", ver or "")
+    return int(m.group(1)) if m else 0
+
+
+def extensions_loadable(bin_path: Path) -> tuple[bool, str]:
+    """这个内核能不能通过命令行加载外部扩展。返回 (能?, 原因)。
+
+    Chrome 137 起 `--load-extension` 被 `DisableLoadExtensionCommandLineSwitch`
+    特性关掉，且该特性开关在当前构建里也不起作用（实测）。
+
+    这里不猜"厂商是不是 Google"——版本号是唯一可靠判据：
+    137 及以上一律当作不支持，宁可多告警也不要让用户以为插件装上了。
+    """
+    ver = engine_version(bin_path) or ""
+    major = _major_of(ver)
+    if not major:
+        return True, ""          # 版本都读不出来就别拦，交给运行期
+    if major >= EXT_LOAD_MIN_BROKEN_MAJOR:
+        return False, (
+            f"内核版本 {ver}（≥{EXT_LOAD_MIN_BROKEN_MAJOR}）已移除命令行加载扩展的能力："
+            "扩展的代码与数据会被完整带进这个环境，但浏览器不会加载它，"
+            "界面上的插件不会出现。"
+        )
+    return True, ""
+
 def engine_version(bin_path: Path) -> str:
     """取浏览器版本。
 

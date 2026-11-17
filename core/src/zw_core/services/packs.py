@@ -738,6 +738,15 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
         )
         logger.info("应用扩展包 环境=%s 包=%s 扩展=%s", p["name"], ids, [a["slug"] for a in applied])
 
+    ext_ok, ext_note = True, ""
+    if applied:
+        from . import engines as _engines
+
+        try:
+            ext_ok, ext_note = _engines.extensions_loadable(Path(p.get("engine_path") or s.engine_path))
+        except Exception:  # 读不到版本就当能用，运行期会暴露
+            ext_ok, ext_note = True, ""
+
     fresh = manager.get_profile(p["id"])
     return {
         "profile": fresh,
@@ -745,6 +754,11 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
         "packs": ids,
         "warnings": warnings,
         "needs_restart": ["extensions"] if (applied and p.get("state") == "running") else [],
+        # 扩展**能不能真的被加载**是另一件事：Chrome 137+ 已移除命令行加载能力。
+        # 数据与代码照样带过去了（换内核/换版本的机器上仍然有用），但必须明确告诉
+        # 调用方"这个环境里的插件不会出现在浏览器里"，否则用户会以为是自己填错了。
+        "extensions_active": ext_ok,
+        "extensions_note": ext_note,
     }
 
 

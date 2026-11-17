@@ -2375,6 +2375,12 @@ class ProfilePanel(tk.Frame):
             lines.append(f"包里没有可用的扩展，「{name}」没有被改动。")
         if needs_restart:
             lines.append("环境正在运行：扩展要到下次启动才会加载。")
+        # 内核 ≥137 已移除命令行加载扩展的能力：数据与代码照搬，但插件不会出现。
+        # 不在这里说清，用户会以为是自己操作错了（这一条是实测结论，见 docs/16 §五）。
+        if d.get("extensions_active") is False:
+            lines.append("⚠ " + str(d.get("extensions_note") or
+                                      "当前内核不加载外部扩展：代码与数据已带入，但插件不会出现。"))
+            self.on_log(f"「{name}」的扩展已带入，但当前内核不会加载它们（≥137 已移除该能力）", "warn")
         if warnings:
             lines.append("注意：" + "；".join(str(w) for w in warnings[:3]))
         self._open_overlay(NoticeOverlay(
