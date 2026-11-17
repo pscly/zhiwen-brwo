@@ -495,7 +495,11 @@ class LocalCore:
     def start(self, device_id: str = "", hub_url: str = "") -> bool:
         if self.is_running():
             return True
-        os.environ.setdefault("ZW_HOST", "127.0.0.1")
+        # 不要再把 ZW_HOST 硬写成 127.0.0.1：用户要求"客户端控制台监听 0.0.0.0"，
+        # 以便同网段/远程用机器码直接打开。安全边界交给 require_auth：
+        # 回环直通、远程必须给机器码（device_id 一定存在）。
+        # 只有在用户自己显式设了 ZW_HOST 时才会覆盖（setdefault 语义）。
+        os.environ.setdefault("ZW_HOST", "0.0.0.0")
         os.environ.setdefault("ZW_PORT", str(self.port))
         # 把身份与服务器地址注入 core：
         # - ZW_DEVICE_ID 让 core 调 hub 时带上 X-ZW-Device，被踢后同步立刻失效

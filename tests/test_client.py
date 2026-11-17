@@ -244,3 +244,45 @@ def test_selftest_reports_to_file(home):
     assert report.exists(), "selftest 结果必须写文件（GUI 程序看不到 stdout）"
     text = report.read_text(encoding="utf-8")
     assert "全部" in text and "通过" in text
+
+
+def test_localcore_binds_all_interfaces_by_default(home, tmp_path, monkeypatch):
+    """客户端启动的本机服务要听 0.0.0.0（用户要求远程能用机器码打开控制台）。
+
+    这里只断言"环境变量被设成 0.0.0.0"，不真起服务（起服务由 test_no_console 覆盖）。
+    之前 LocalCore.start 里 `setdefault("ZW_HOST", "127.0.0.1")` 把 config 的新默认值
+    覆盖掉了，表现是"改了 config 还是只听回环"——实测发布包才发现。
+    """
+    import os as _os
+
+    from zw_core.client import LocalCore
+
+    # LocalCore.start() 会直接写 os.environ（ZW_HOST/ZW_PORT/ZW_DEVICE_ID），
+    # 这是它的实现方式。测试必须自己快照+恢复，否则会污染后面的用例
+    # （表现是 test_sync_integration 报"设备未注册"）。
+    snapshot = {k: _os.environ.get(k) for k in ("ZW_HOST", "ZW_PORT", "ZW_DEVICE_ID", "ZW_HUB_URL")}
+    for key in ("ZW_HOST", "ZW_PORT"):
+        monkeypatch.delenv(key, raising=False)
+    core = LocalCore(port=8799)
+    # 只跑到设置环境变量那一步就停下：用 is_running 提前返回把它短路掉
+    monkeypatch.setattr(core, "is_running", lambda: False)
+    monkeypatch.setattr(core, "start", core.__class__.start.__get__(core))
+    try:
+        core.start(device_id="zwd_hostprobe123456789012", hub_url="")
+    except Exception:
+        pass          # 起 uvicorn 可能失败，不影响下面的断言
+    finally:
+        core.stop()
+    # 断言发生在恢复之前
+    bound = _os.environ.get("ZW_HOST")
+    for k, v in snapshot.items():
+        if v is None:
+            _os.environ.pop(k, None)
+        else:
+            _os.environ[k] = v
+    from zw_core import config as _cfg
+
+    _cfg.reset_settings()
+    assert bound == "0.0.0.0", f"ZW_HOST 应该是 0.0.0.0，实际 {bound!r}"
+    # 清理后必须回到快照值（全量跑时前面的用例可能已经留下值，所以不能假设是 None）
+    assert _os.environ.get("ZW_HOST") == snapshot["ZW_HOST"]
