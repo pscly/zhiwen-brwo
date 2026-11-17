@@ -187,9 +187,15 @@ def main() -> int:
         check("用户在浏览器里开的页面也算进去了", bool(sec), str(_pages(int(dev)))[:300])
 
         print("\n— 停止（应记住标签）—")
-        c.post(f"/profiles/{pid}/stop", json={"force": True})
+        stopped = c.post(f"/profiles/{pid}/stop", json={"force": True}).json()
         time.sleep(2)
         row = c.get(f"/profiles/{pid}").json()["data"]
+        # stop 的返回值要说明"这次记住没记住、没记住为什么"。
+        # 以前这个信息只在日志里（打包后日志不一定在手边），用户只看到
+        # "下次启动标签没恢复"却查不到原因。
+        rem = (stopped.get("data") or {}).get("remembered") or {}
+        print(f"    remembered = {rem}")
+        check("stop 返回里说明了标签记忆结果", "saved" in rem or "reason" in rem, str(rem))
         remembered = row.get("start_urls") or []
         print(f"    记住的 start_urls = {remembered}")
         check("停止后记住了**所有**用户页面（不只是最后一个）",

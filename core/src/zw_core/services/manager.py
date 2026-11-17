@@ -680,7 +680,10 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
 def stop(ref: str, force: bool = False) -> dict[str, Any]:
     p = get_profile(ref)
     if p["state"] not in ("running", "starting", "crashed", "failed", "stopping"):
-        return {"profile": p, "already_stopped": True}
+        # 本来就没在跑：没有标签可抓，但也要**说明**这一点，
+        # 而不是让调用方从"没有 remembered 字段"去猜。
+        return {"profile": p, "already_stopped": True,
+                "remembered": {"saved": 0, "reason": "环境没在运行，没有标签页可记"}}
 
     # ── 记住当前标签页（本函数里唯一一处跨模块调用，别再加第二处）────────
     # 必须在**关浏览器之前**抓：关掉之后 CDP 就没了，页面列表也就读不到了。
@@ -688,11 +691,22 @@ def stop(ref: str, force: bool = False) -> dict[str, Any]:
     # 解析它等于赌内核内部存储（详见 launcher.py 顶部注释）；走 CDP 拿到的是同一份
     # 事实，而且是运行时真值。抓到的列表写进 profiles.start_urls，
     # 下次启动由 build_cmdline 原样作为初始标签。
+    # 记住标签页的结果要**带出去**，不能只记一条 warning。
+    # `remember_open_tabs()` 有几种"没记"的分支（没调试端口、CDP 不可达、
+    # 当前只有 about:blank…），它们都返回 reason 而不是抛异常；如果这里把
+    # 返回值丢掉，用户只会看到"下次启动标签没恢复"，却查不到为什么 ——
+    # 和之前 `CDP.close()` 那个静默失败是同一类问题。
+    remembered: dict[str, Any] = {}
     try:
         from . import launcher as launcher_svc
 
-        launcher_svc.remember_open_tabs(p)
+        remembered = launcher_svc.remember_open_tabs(p) or {}
+        if remembered.get("saved"):
+            logger.info("记住标签页 %s 个", remembered["saved"])
+        elif remembered.get("reason"):
+            logger.info("没记住标签页：%s", remembered["reason"])
     except Exception as exc:  # noqa: BLE001 —— 记不住标签页不该让停止失败
+        remembered = {"saved": 0, "reason": f"{type(exc).__name__}: {exc}"}
         logger.warning("记住标签页失败（不影响停止）：%s", exc)
 
     from .. import gateway
@@ -741,7 +755,10 @@ def stop(ref: str, force: bool = False) -> dict[str, Any]:
         logger.info("临时环境 %s 已清空数据目录", p["name"])
     get_db().audit("profile.stop", p["id"], detail={"method": method, "freed": freed})
     logger.info("停止环境 name=%s 方式=%s", p["name"], method)
-    return {"profile": get_profile(p["id"]), "method": method, "trim": freed}
+    return {"profile": get_profile(p["id"]), "method": method, "trim": freed,
+            # saved/reason：这次有没有记住标签、没记住是为什么。
+            # 排错时不用去翻日志（打包后日志文件不一定在手边）。
+            "remembered": remembered}
 
 
 def restart(ref: str, urls: list[str] | None = None) -> dict[str, Any]:

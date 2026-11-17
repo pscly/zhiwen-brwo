@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## 0.7.37 — 2026-11-18
+
+**顺着上一轮那个静默失败，把同类"只记一条 warning、原因不外露"的地方补上。**
+
+### 改了什么
+
+`manager.stop()` 现在把"记住标签页"的结果放进返回值：
+
+```json
+{"profile": {...}, "method": "...", "trim": null,
+ "remembered": {"saved": 3}}
+```
+
+没记住时给原因（不再是"这一项没动静"）：
+
+```json
+{"remembered": {"saved": 0, "reason": "调试端口不可达，按「读不到」处理（不覆盖旧记录）"}}
+{"remembered": {"saved": 0, "reason": "环境没在运行，没有标签页可记"}}
+```
+
+为什么值得改：`remember_open_tabs()` 本来就有几种"没记"的分支并返回 `reason`，
+但 `stop()` 把返回值丢掉了，只留一条 warning。**用户看到的现象是"下次启动标签没恢复"，
+却查不到为什么** —— 和上一轮 `CDP.close()` 那个 bug 是同一类问题：
+错误信息存在，但没人往外送。打包后日志文件不一定在手边，调用方（CLI / MCP / AI）
+更看不到日志。
+
+同时 `already_stopped` 这条提前返回也补上了 `remembered.reason`，
+不再让调用方从"没有这个字段"去猜。
+
+### 验收
+
+`scripts/tabs-check.py` 增加一条断言（12 → 13 条）：
+
+```
+remembered = {'saved': 3}
+✅ stop 返回里说明了标签记忆结果
+断言通过 13 条，失败 0 条
+```
+
+单元测试 573 → **574 项**（`stop` 的 `remembered` 形状）。
+
+### 顺带记一笔
+
+写这条测试时我又踩了同一个坑：`client` fixture 只在 `tests/test_api_smoke.py` 里，
+而且它设了 `ZW_ADMIN_TOKEN`，请求必须带 `Authorization` 头 —— 不带就会拿到
+`{"ok": false}`，然后 `KeyError: 'data'`。这已经是第三次因为这个 fixture 返工了。
+
 ## 0.7.36 — 2026-11-18
 
 **找到并修掉一个"静默失效"的真 bug：无头模式下，恢复标签和检测页从来没被打开过。**

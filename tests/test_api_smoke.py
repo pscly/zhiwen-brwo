@@ -731,3 +731,20 @@ def test_ai_manifest_lists_new_endpoints(client):
     for frag in ("proxies/{id}/hide", "extensions/install",
                  "extensions/updates", "proxies/sync"):
         assert frag in paths, f"manifest 里缺 {frag}"
+
+
+def test_stop_reports_why_tabs_were_not_remembered(client):
+    """`stop` 的返回值要说明"这次有没有记住标签、没记住为什么"。
+
+    以前这个信息只在日志里（打包后日志文件不一定在手边），用户只看到
+    "下次启动标签没恢复"却查不到原因 —— 和 `CDP.close()` 那个静默失败同类。
+    """
+    # 这个 fixture 设了 ZW_ADMIN_TOKEN，非回环来源必须带令牌
+    d = client.post("/api/v1/profiles", json={"name": "停止自检"}, headers=H).json()["data"]
+    r = client.post(f"/api/v1/profiles/{d['id']}/stop", headers=H).json()
+    rem = (r.get("data") or {}).get("remembered")
+    assert rem is not None, r
+    # 没启动过的环境：一定是"没记住"，并且必须给出原因
+    # （走的是 already_stopped 分支，那里也要说明原因，不能只留空字段）
+    assert rem.get("saved") == 0, rem
+    assert rem.get("reason"), rem
