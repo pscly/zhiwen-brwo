@@ -1311,6 +1311,12 @@ def stats(refresh_size: bool = False) -> dict[str, Any]:
         "node_id": s.node_id,
         "cdp_tokens": token_stats(),
         "groups": groups(),
+        # 端口要报出去：客户端在首选端口被占时会自动回退（见 client.LocalCore），
+        # 服务器用它拼 core_base（远程控制台/CDP 地址）。不报的话，
+        # 回退之后服务器还按 8730 去连，就永远是"连不上"。
+        "port": s.port,
+        "host": s.host,
+        "gateway_public_base": s.gateway_public_base,
     }
 
 

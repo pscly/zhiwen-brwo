@@ -294,3 +294,85 @@ def test_localcore_binds_all_interfaces_by_default(home, tmp_path, monkeypatch):
     assert "get_settings().host" in src, "uvicorn 的 host 必须取 settings.host"
     # 清理后必须回到快照值（全量跑时前面的用例可能已经留下值，所以不能假设是 None）
     assert _os.environ.get("ZW_HOST") == snapshot["ZW_HOST"]
+
+
+# ── 端口被占时的自愈（云电脑上真踩到过）────────────────────────────
+def test_localcore_falls_back_when_port_busy(tmp_path, monkeypatch):
+    """首选端口被占时要自动换端口，而不是等 45 秒后报"启动失败"。
+
+    现场：用户手动跑了一个便携版占了 8730，新装的客户端起不来。
+    心跳还在（服务器上看着"在线"），但 core 没了 ——
+    远程命令和远程控制台**一起失联**，只能跑到机器前处理。
+    """
+    import socket as _socket
+
+    from zw_core import config as _cfg
+    from zw_core.client import LocalCore
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    monkeypatch.setenv("ZW_SHELL_ENABLED", "false")
+    _cfg.reset_settings()
+
+    blocker = _socket.socket()
+    blocker.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    blocker.bind(("0.0.0.0", 0))
+    blocker.listen(8)
+    busy = int(blocker.getsockname()[1])
+    snapshot = {k: __import__("os").environ.get(k) for k in ("ZW_HOST", "ZW_PORT", "ZW_DEVICE_ID")}
+    core = LocalCore(port=busy)
+    try:
+        ok = core.start(device_id="zwd_portsfallback1234567", hub_url="")
+        assert ok is True, core.error
+        assert core.actual_port and core.actual_port != busy
+        assert core.is_running()
+        # 端口要报给服务器，否则远程还按旧端口连
+        st = core.stats() or {}
+        assert int(st.get("port") or 0) == core.actual_port
+    finally:
+        core.stop()
+        blocker.close()
+        import os as _os
+
+        for k, v in snapshot.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+        _cfg.reset_settings()
+
+
+def test_localcore_attaches_to_running_instance(tmp_path, monkeypatch):
+    """已经有健康的 core 在跑时，要附上去，而不是起第二个、也不是报失败。"""
+    from zw_core import config as _cfg
+    from zw_core.client import LocalCore
+
+    import os as _os
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root2"))
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    monkeypatch.setenv("ZW_SHELL_ENABLED", "false")
+    _cfg.reset_settings()
+    # LocalCore.start 会直接写 os.environ（ZW_HOST/ZW_PORT/ZW_DEVICE_ID），
+    # 不快照恢复会污染后面的用例（表现是 test_sync_integration 报"设备未注册"）。
+    snapshot = {k: _os.environ.get(k) for k in ("ZW_HOST", "ZW_PORT", "ZW_DEVICE_ID", "ZW_HUB_URL")}
+    a = LocalCore(port=8755)
+    b = None
+    try:
+        assert a.start(device_id="zwd_attachcase12345678", hub_url="") is True, a.error
+        b = LocalCore(port=8755)
+        assert b.start(device_id="zwd_attachcase12345678", hub_url="") is True
+        assert b.attached is True
+        # B 停止不能把 A 的服务关掉
+        b.stop()
+        assert a.is_running(), "第二个实例停止时误伤了第一个"
+    finally:
+        a.stop()
+        if b is not None:
+            b.stop()
+        for k, v in snapshot.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+        _cfg.reset_settings()

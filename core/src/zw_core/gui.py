@@ -677,6 +677,14 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         st = core.stats() if state.get("core_on") else None
         if not st:
             return {}
+        # 告诉服务器"从哪能连到我这台机器"。
+        # core 在首选端口被占时会自动回退（client.LocalCore），
+        # 所以这里必须用**实际端口**拼，否则服务器会一直按 8730 去连、永远连不上。
+        base = str(st.get("gateway_public_base") or "")
+        if not base:
+            port = core.live_port
+            host = state.get("lan_ip") or "127.0.0.1"
+            base = f"http://{host}:{port}"
         inv = []
         try:
             from zw_core.services import manager as mgr

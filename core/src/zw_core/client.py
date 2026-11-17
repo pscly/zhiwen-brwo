@@ -25,6 +25,7 @@ PyInstaller 会把 `zw_core` 一起打进去。启动 core 用**进程内线程*
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import secrets
@@ -477,30 +478,93 @@ class Heartbeat:
 class LocalCore:
     """在后台线程里跑 zw-core。嵌入（打包）与源码运行都走这条路径。"""
 
+    # 首选端口被占用时依次尝试的个数（8730→8739）
+    PORT_SCAN = 10
+
     def __init__(self, port: int = 8730) -> None:
         self.port = port
+        # 实际监听的端口。选了回退端口时这里才是真值 —— 界面/接口/上报都得用它。
+        self.actual_port = 0
         self.thread: threading.Thread | None = None
         self.server: Any = None
         self.error = ""
+        # 附到"已经在跑的实例"上（没有自己起服务）。停止时不该把别人的关掉。
+        self.attached = False
 
-    def is_running(self) -> bool:
+    @property
+    def live_port(self) -> int:
+        """当前真正在用的端口（还没选过就返回首选端口）。"""
+        return self.actual_port or self.port
+
+    def _health_on(self, port: int, timeout: float = 1.5) -> bool:
         try:
             import httpx
 
-            r = httpx.get(f"http://127.0.0.1:{self.port}/healthz", timeout=1.5)
-            return r.status_code == 200
+            return httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=timeout).status_code == 200
         except Exception:
             return False
 
-    def start(self, device_id: str = "", hub_url: str = "") -> bool:
-        if self.is_running():
+    @staticmethod
+    def _port_bindable(port: int) -> bool:
+        """端口能不能绑。
+
+        ## 为什么要先探一次
+
+        端口被占时 uvicorn 会在自己的线程里抛 OSError 然后退出，
+        我们只能等 `is_running()` 超时才失败（45 秒）。
+        云电脑上真踩到过：用户手动跑了一个便携版占了 8730，
+        新装的客户端起不来 —— 心跳还在（所以服务器上看着"在线"），
+        但 core 没了，于是**远程命令和远程控制台一起失联**，只能跑到机器前处理。
+
+        先 bind 一次能在毫秒级判断，才有机会换端口自救。
+        """
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+                sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sk.bind(("0.0.0.0", int(port)))
             return True
+        except OSError:
+            return False
+
+    def is_running(self) -> bool:
+        return self._health_on(self.live_port)
+
+    def start(self, device_id: str = "", hub_url: str = "") -> bool:
+        # 已在跑（自己之前起的，或用户另开了一个）：直接复用，不要起第二个
+        for cand in [self.port] + [self.port + i for i in range(1, self.PORT_SCAN)]:
+            if self._health_on(cand):
+                self.actual_port = cand
+                self.attached = True
+                if cand != self.port:
+                    self.error = ""      # 复用一个非首选端口是正常状态，不算错
+                return True
+
+        # 首选端口被占（常见：另一个客户端实例 / 上次没退干净 / 别的程序）→ 往后找
+        chosen = 0
+        for cand in [self.port] + [self.port + i for i in range(1, self.PORT_SCAN)]:
+            if self._port_bindable(cand):
+                chosen = cand
+                break
+        if not chosen:
+            self.error = (
+                f"端口 {self.port}-{self.port + self.PORT_SCAN - 1} 全被占用，本机服务起不来。\n\n"
+                "请关掉占用这些端口的程序（常见：另一个知纹客户端窗口、上次没退干净的进程），"
+                "或在配置里把端口改成别的。"
+            )
+            return False
+        if chosen != self.port:
+            # 换过端口必须让用户/服务器知道，否则远程还会按 8730 去连
+            logging.getLogger("zw.client").warning(
+                "首选端口 %s 被占用，本机服务改用 %s", self.port, chosen)
+        self.port = chosen
         # 不要再把 ZW_HOST 硬写成 127.0.0.1：用户要求"客户端控制台监听 0.0.0.0"，
         # 以便同网段/远程用机器码直接打开。安全边界交给 require_auth：
         # 回环直通、远程必须给机器码（device_id 一定存在）。
         # 只有在用户自己显式设了 ZW_HOST 时才会覆盖（setdefault 语义）。
         os.environ.setdefault("ZW_HOST", "0.0.0.0")
-        os.environ.setdefault("ZW_PORT", str(self.port))
+        # 必须用赋值而不是 setdefault：换了回退端口时，环境里可能还留着旧的 8730，
+        # setdefault 不会覆盖，core 就会去绑那个被占的端口 → 白换。
+        os.environ["ZW_PORT"] = str(self.port)
         # 把身份与服务器地址注入 core：
         # - ZW_DEVICE_ID 让 core 调 hub 时带上 X-ZW-Device，被踢后同步立刻失效
         # - ZW_HUB_URL 让 core 知道往哪同步（客户端只填了 IP，用户不该再配一遍）
@@ -552,7 +616,8 @@ class LocalCore:
         # 但更重要的是下面那句错误信息 —— 光说"没起来"用户没法自查。
         deadline = time.time() + 45
         while time.time() < deadline:
-            if self.is_running():
+            if self._health_on(self.port):
+                self.actual_port = self.port
                 return True
             time.sleep(0.25)
         if not self.error:
@@ -571,7 +636,7 @@ class LocalCore:
         try:
             import httpx
 
-            r = httpx.get(f"http://127.0.0.1:{self.port}/api/v1/stats", timeout=3)
+            r = httpx.get(f"http://127.0.0.1:{self.live_port}/api/v1/stats", timeout=3)
             if r.status_code == 200:
                 return (r.json() or {}).get("data")
         except Exception:
@@ -579,9 +644,11 @@ class LocalCore:
         return None
 
     def stop(self) -> None:
-        if self.server is not None:
+        # `attached` = 这个实例只是连到别人已经跑着的 core 上，关它不该把别人的服务停掉
+        if self.server is not None and not self.attached:
             self.server.should_exit = True
             self.server = None
+        self.attached = False
 
 
 # ── 图形界面 ──────────────────────────────────────────────
