@@ -453,3 +453,55 @@ def test_gateway_enabled_switch_is_enforced(monkeypatch):
     assert router2.get("pf_on") is not None, "网关打开时应该登记"
     router2.unregister("pf_on")
     router2.unregister("pf_deadswitch")
+
+
+def test_mcp_reports_missing_args_readably():
+    """MCP 工具少给必填参数时，必须报**可读的**缺参错误，不能是裸 KeyError。
+
+    真踩过：`tools/call` 直接把 `args` 丢给工具函数，而函数内部写 `args["profile"]`，
+    于是 AI 少给一个参数时拿到的是：
+
+        {"code": "KeyError", "message": "'profile'"}
+
+    —— 既不知道**哪个**参数必填，也不知道该怎么填。而工具的 inputSchema 里
+    其实早声明了 `required`，只是没人用它做校验。实测 32 个工具里有 21 个这样。
+
+    这条测试会对**每个**工具用空参数调一次，断言不再出现裸 KeyError。
+    """
+    import json as _json
+    import subprocess
+    import sys as _sys
+
+    tl = _json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    out = subprocess.run([_sys.executable, "-m", "zw_core.cli", "mcp"],
+                         input=tl + "\n", capture_output=True, text=True, timeout=120).stdout
+    tools = None
+    for line in out.splitlines():
+        try:
+            d = _json.loads(line)
+        except Exception:
+            continue
+        if d.get("id") == 1:
+            tools = d["result"]["tools"]
+    assert tools, "拿不到工具清单"
+
+    lines = [_json.dumps({"jsonrpc": "2.0", "id": 100 + i, "method": "tools/call",
+                          "params": {"name": t["name"], "arguments": {}}})
+             for i, t in enumerate(tools)]
+    out2 = subprocess.run([_sys.executable, "-m", "zw_core.cli", "mcp"],
+                          input="\n".join(lines) + "\n", capture_output=True,
+                          text=True, timeout=600).stdout
+
+    raw = []
+    for line in out2.splitlines():
+        try:
+            d = _json.loads(line)
+        except Exception:
+            continue
+        rid = d.get("id")
+        if not isinstance(rid, int) or rid < 100:
+            continue
+        txt = _json.dumps(d.get("result") or {}, ensure_ascii=False)
+        if "KeyError" in txt or "TypeError" in txt:
+            raw.append(tools[rid - 100]["name"])
+    assert not raw, f"这些工具少参数时报裸异常：{raw}"

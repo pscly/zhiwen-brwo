@@ -345,8 +345,16 @@ def test_connect_tunnel_adds_basic_auth(http_upstream, relay) -> None:
         head, _ = _recv_head(client)
         assert head.startswith(b"HTTP/1.1 200 Connection Established"), head
 
-        # 上游收到的认证是客户端从来没发过的那一份
-        assert http_upstream.seen, "假上游没有收到任何请求"
+        # 上游收到的认证是客户端从来没发过的那一份。
+        #
+        # **要等，不能立刻断言**：中继是异步把 CONNECT 转发给上游的，
+        # 客户端这边已经收到 `200 Connection Established`，但假上游的记录
+        # 可能还差几微秒才写进去。直接 `assert http_upstream.seen` 在负载高的
+        # 机器上会偶发失败（全量跑时出现过一次，单独跑 3 次都过）。
+        deadline = time.time() + 5
+        while time.time() < deadline and not http_upstream.seen:
+            time.sleep(0.01)
+        assert http_upstream.seen, "假上游没有收到任何请求（等了 5 秒）"
         entry = http_upstream.seen[0]
         assert entry["request_line"].startswith("CONNECT example.com:443 ")
         assert entry["auth"] == [_basic("user", "pass")]

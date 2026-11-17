@@ -486,6 +486,33 @@ def handle(request: dict[str, Any]) -> dict[str, Any] | None:
                 "error": {"code": -32602, "message": f"没有这个工具：{name}（可用：{', '.join(sorted(TOOLS))}）"},
             }
         _desc, _schema, fn = entry
+        # **按 schema 先校验必填项**。
+        #
+        # 之前是直接把 `args` 丢给 `fn()`，而各工具内部写的是 `args["profile"]`
+        # 这种直取 —— 于是 AI 少给一个参数时，拿到的是裸
+        # `{"code": "KeyError", "message": "'profile'"}`：
+        # 既不知道**哪个**参数必填，也不知道该怎么填。schema 里其实早就声明了
+        # `required`，只是没人用。
+        #
+        # 现在统一在这里挡一层，报错写成"缺哪个参数 + 它的类型和说明"。
+        missing = [k for k in (_schema.get("required") or []) if k not in args]
+        if missing:
+            props = _schema.get("properties") or {}
+            detail = "；".join(
+                f"`{k}`（{props.get(k, {}).get('description') or props.get(k, {}).get('type') or '必填'}）"
+                for k in missing)
+            return {
+                "jsonrpc": "2.0", "id": rid,
+                "result": {
+                    "isError": True,
+                    "content": [{"type": "text", "text": json.dumps({
+                        "ok": False, "code": "MCP_MISSING_ARG",
+                        "message": f"调用 {name} 缺少必填参数：{detail}",
+                        "hint": "参数名见该工具的 inputSchema.required；"
+                                "也可以先调 tools/list 看完整定义。",
+                    }, ensure_ascii=False)}],
+                },
+            }
         try:
             result = fn(args)
             return {

@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## 0.7.48 — 2026-11-18
+
+**MCP 工具少给参数时报裸 `KeyError`（32 个里 21 个这样），AI 完全没法用。**
+
+### 问题
+
+`tools/call` 是直接把 `args` 丢给工具函数的，而工具内部写 `args["profile"]`
+这种直取。于是 AI 少给一个参数时，拿到的是：
+
+```json
+{"isError": true, "content": [{"type":"text","text":
+  "{\"ok\": false, \"code\": \"KeyError\", \"message\": \"'profile'\"}"}]}
+```
+
+**既不知道哪个参数必填，也不知道该怎么填。** 而工具的 `inputSchema` 里
+其实**早就声明了** `required: ["profile"]`，只是没人用它做校验。
+
+用空参数把 32 个工具逐个真调一遍：**21 个报裸 KeyError**。
+
+### 修法
+
+在 `tools/call` 分发处统一按 `inputSchema.required` 校验，报错写成：
+
+```
+调用 zw_navigate 缺少必填参数：`profile`（环境 id 或名字）
+```
+
+实测：裸 KeyError **从 21 个降到 0**，23 个变成可读的 `MCP_MISSING_ARG`，
+剩下 3 个是合理的工具级报错（"要么给 id 要么给 host+port"之类）。
+
+### 顺带扩展了错误码文档扫描器
+
+`test_no_doc_only_error_codes_that_look_like_typos` 原来只认
+`XxxError("CODE")` 这种异常构造；而 MCP 的错误码是**塞在返回字典里的字符串**，
+扫不到。扩展后一次抓出 **5 个真漏写的错误码**并补齐：
+
+`MCP_MISSING_ARG`、`CLIENT_ERROR`、`CORE_UNREACHABLE`、`ROUTE_NOT_FOUND`、
+`UNREACHABLE`、`UPSTREAM_ERROR`。
+
+### 还修了一个偶发测试
+
+全量跑时 `test_proxyrelay.py::test_connect_tunnel_adds_basic_auth` 失败过一次，
+单独跑 3 次都过。查下去是**竞态**：中继异步把 CONNECT 转给上游，客户端这边
+已经收到 `200 Connection Established`，但假上游的 `seen` 记录可能还差几微秒。
+改成"最多等 5 秒轮询"，不再立刻断言。
+
+偶发测试比红测试更糟 —— 它会让人习惯性重跑，门槛就形同虚设。
+
+### 测试
+
+583 → **584 项**，七个门槛全绿（584 / 73 / 13 / 20 / 75 / 23 / 32）。
+
 ## 0.7.47 — 2026-11-18
 
 **删掉三个"声明了但根本不生效"的配置项（比死开关更彻底：连语义都不成立）。**

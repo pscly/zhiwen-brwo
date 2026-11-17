@@ -25,6 +25,11 @@ def _raised_codes() -> set[str]:
             text,
         ):
             codes.add(m.group(1))
+        # MCP 的错误码不是异常，而是塞在返回字典里的字符串
+        # （`{"ok": false, "code": "MCP_MISSING_ARG", ...}`）。
+        # 只扫异常构造会漏掉它们，导致"文档里记了但代码里找不到"的假失败。
+        for m in re.finditer(r'"code"\s*:\s*"([A-Z][A-Z0-9_]{2,})"', text):
+            codes.add(m.group(1))
     return codes
 
 
