@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## 0.7.5 — 2026-11-17
+
+三件事：**代理串格式校验**、**从 Chrome 目录导入扩展包**、控制台能看到"代理无效"。
+
+### 1. 代理填错不再静默失败
+
+以前填错代理是**彻底静默**的：串被原样收下、存进库、显示在界面上，
+浏览器起来没网络，任何地方都没提示。用户真实踩过：
+
+```
+socks5://cf1b481103:51ec63a321@66.80.12 0.66:20000
+                                    ↑   ↑
+                                 空格   IP 五段
+```
+
+现在解析时就拒掉，并说清错在哪（空格 / 段数 / 段值 / 非法字符 / IPv6 方括号 / 端口）：
+
+- 新增 `_validate_host()`：主机名不许有空白；形似 IPv4 就必须正好四段且每段 0-255；
+  域名只允许字母数字点连字符；含 `:` 的按 IPv6 校验（`[::1]` 支持）。
+- 新增错误码 `PROXY_INVALID_HOST` / `PROXY_INVALID_PORT`。
+- `urlsplit` 对 `[::zz]` 抛的 `ValueError` 也接住了 —— 否则是个 500。
+- 三条入口都拦：导入（`failed` 里给脱敏原因）、绑定环境（`ok=false`）、
+  启动（抛 `PROXY_INVALID_HOST`，不起一个没网的浏览器）。
+- 错误信息里的密码永远是 `***`（有测试盯着）。
+
+### 2. 从 Chrome 目录导入扩展包（RXYCDP 那条路）
+
+`POST /api/v1/packs/import {"from_chrome": "C:/Users/你/AppData/Local/Google/Chrome/User Data"}`
+
+RXYCDP / Roxy 这类浏览器**不是知纹启动的**，扩展不在知纹的 profiles 目录里，
+而在标准 Chrome 的 `User Data/Default/Extensions/<id>/<ver>/`。现在给个路径就能
+把代码 + `Local Extension Settings` 数据一起打包：
+
+- 接受 `User Data`、`User Data/Default`、`Profile N`、`Default` 任一层
+- 跳过 `_metadata` 之类的辅助目录
+- 内部抽出 `_materialize_pack()`，与"从环境导出"共用同一段落盘/审计逻辑
+- 客户端"扩展包"面板多了「从 Chrome 目录导入」按钮，默认值自动填好本机 Chrome 路径
+
+### 3. 控制台显示「代理无效」
+
+代理列现在有三态：正常（`socks5 host:port`）、**代理无效**（红色，点开给原因和改法）、直连。
+
+修了两个同类的白名单漏字段问题：`normBrowser` 先后漏掉 `proxy` 和
+`invalid`/`problem`，表现分别是"表头有列但永远直连"和"填错的代理显示成直连"。
+这类"白名单静默丢字段"已经踩两次，字段都在注释里标了原因。
+
+### 测试
+
+483 → **493 项**。新增文件格式校验 6 组参数化用例、密码不泄漏、IPv6 与链式不被误伤、
+`display_summary` 标记无效、坏代理阻断启动、`from_chrome` 五种场景。
+
 ## 0.7.4 — 2026-11-17
 
 两件事：**链式代理**（前置 → 落地）和**控制台的代理列**。

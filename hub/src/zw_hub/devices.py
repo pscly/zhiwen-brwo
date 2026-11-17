@@ -98,8 +98,17 @@ def _clean_proxy(raw: Any) -> dict[str, Any]:
     所以显式按白名单重建：任何不在列表里的键都丢掉，`url` 里如果出现 `:***@`
     以外的东西也一律截断成不带凭据的形式。
     """
-    if not isinstance(raw, dict) or not raw.get("set"):
+    if not isinstance(raw, dict):
         return {"set": False}
+    if not raw.get("set"):
+        # 没生效的代理也可能是"填了但无效"，要把原因带过去，否则界面上只剩「直连」，
+        # 用户会以为"我明明填了代理怎么显示直连"。
+        invalid = bool(raw.get("invalid"))
+        return {
+            "set": False,
+            "invalid": invalid,
+            "problem": str(raw.get("problem") or "")[:300] if invalid else "",
+        }
     url = str(raw.get("url") or "")[:200]
     # 双保险：url 里若带了看起来像密码的片段（非 ***），把它抹掉
     if "@" in url:
@@ -111,6 +120,8 @@ def _clean_proxy(raw: Any) -> dict[str, Any]:
         url = f"{scheme}://{user}:***@{tail}" if scheme else f"{user}:***@{tail}"
     return {
         "set": True,
+        "invalid": False,
+        "problem": "",
         "url": url,
         "has_auth": bool(raw.get("has_auth")),
         "username": str(raw.get("username") or "")[:80],

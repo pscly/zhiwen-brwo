@@ -364,9 +364,16 @@ class HeartbeatThread:
         items: list[dict[str, Any]] = []
         for p in mgr.list_profiles():
             pid = str(p.get("id") or "")
+            spec = None
+            raw_proxy = str(p.get("proxy") or "").strip()
+            problem = ""
             try:
                 spec = mgr.proxy_spec_for(p)
-            except Exception:
+            except Exception as exc:
+                # 代理串是坏的（带空格 / IP 段数不对 / 端口越界…）。
+                # 把原因一起报给主控台，让它显示「代理无效」+ 具体问题，
+                # 而不是让用户去点启动才发现。
+                problem = str(getattr(exc, "message", "") or exc)
                 spec = None
             items.append({
                 "id": pid,
@@ -374,7 +381,7 @@ class HeartbeatThread:
                 "state": str(p.get("state") or ""),
                 "group": str(p.get("group_name") or ""),
                 "cdp_path": f"/cdp/{pid}" if pid else "",
-                "proxy": proxylib.display_summary(spec),
+                "proxy": proxylib.display_summary(spec, raw=raw_proxy, problem=problem),
             })
         return items
 

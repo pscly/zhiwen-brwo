@@ -939,15 +939,24 @@ function normBrowser(b){
     cdp_ws: b.cdp_ws || '',
     // 代理摘要（已脱敏）。必须在这里列出来，否则会被这条白名单丢掉 ——
     // 我第一版就漏了，表现是"表头有代理列但永远显示直连"。
-    proxy: px && px.set ? {
+    // `invalid`/`problem` 也算白名单成员：漏了就会把"代理填错"显示成"直连"，
+    // 用户会以为"我明明填了代理，怎么显示直连"。
+    proxy: px && px.invalid ? {
+      set: false,
+      invalid: true,
+      problem: String(px.problem || ''),
+      url: String(px.url || ''),
+    } : (px && px.set ? {
       set: true,
+      invalid: false,
+      problem: '',
       url: String(px.url || ''),
       has_auth: !!px.has_auth,
       username: String(px.username || ''),
       host: String(px.host || ''),
       port: Number(px.port) || 0,
       scheme: String(px.scheme || ''),
-    } : { set: false },
+    } : { set: false, invalid: false, problem: '' }),
   };
 }
 function normMachine(m){
@@ -1449,6 +1458,11 @@ function renderBrowsers(){
    密码不离开那台机器——hub 本来也改不了本机启动参数。
 */
 function proxyCell(px){
+  if (px && px.invalid){
+    // 填了代理但串不合法：必须显眼，否则用户只会看到"这个环境上不了网"
+    return '<button class="btn xs ghost proxy-cell" type="button" data-proxy="' + esc(JSON.stringify(px)) + '">' +
+      '<span class="badge bad">代理无效</span> <span class="mono">' + esc((px.url || '').slice(0, 24)) + '</span></button>';
+  }
   if (!px || !px.set) return '<span class="muted">直连</span>';
   const badge = px.has_auth
     ? '<span class="badge ok">' + esc(px.scheme) + '</span>'
@@ -1458,6 +1472,19 @@ function proxyCell(px){
     badge + ' <span class="mono">' + esc(px.host) + ':' + esc(px.port) + '</span></button>';
 }
 function proxyDialog(px){
+  if (px && px.invalid){
+    openDialog({
+      title: '代理无效',
+      html: '<div class="br-note bad" style="margin-bottom:10px">' + esc(px.problem || '这个代理串没法解析') + '</div>' +
+        '<div class="mono muted">' + esc(px.url || '') + '</div>' +
+        '<div class="br-note" style="margin-top:12px">' +
+        '去客户端 → 环境列表 → 「代理」里改：<b>IP 要写完整四段</b>（例如 66.80.12.66），' +
+        '不要有空格；带认证就写 socks5://user:pass@host:port。</div>',
+      okText: '关闭',
+      hideCancel: true,
+    });
+    return;
+  }
   const rows = [
     ['协议', px.scheme || '—'],
     ['主机', px.host || '—'],

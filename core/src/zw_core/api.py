@@ -304,8 +304,16 @@ class ProfileProxyBody(BaseModel):
 
 
 class PackImportBody(BaseModel):
+    """导入扩展包。三种来源（见 services/packs.import_pack）：
+
+    - `from_profile`：从已有的知纹环境导出
+    - `from_chrome`：从任意 Chrome/Roxy 的用户数据目录导出（给"把 RXYCDP 的插件带走"用）
+    - `path`：扩展目录或 zip
+    """
+
     path: str = ""
     from_profile: str = ""
+    from_chrome: str = ""
     name: str = ""
 
 
@@ -901,7 +909,9 @@ def build_app() -> FastAPI:
         """
         from zw_core.services import packs
 
-        return ok(packs.import_pack(body.path, name=body.name, from_profile=body.from_profile))
+        return ok(packs.import_pack(body.path, name=body.name,
+                                    from_profile=body.from_profile,
+                                    from_chrome=body.from_chrome))
 
     @app.post(f"{API_PREFIX}/packs/{{pack_id}}/default", tags=["扩展"], dependencies=[Auth], summary="设为新建环境默认带上")
     def packs_set_default(pack_id: str, body: PackDefaultBody) -> dict[str, Any]:

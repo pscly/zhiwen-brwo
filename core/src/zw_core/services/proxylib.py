@@ -1148,7 +1148,8 @@ def _chain_display(spec: proxysvc.ProxySpec) -> str:
     return f"{_mask_spec_url(spec.hop)} → {_mask_spec_url(spec)}"
 
 
-def display_summary(spec: "proxysvc.ProxySpec | None", *, label: str = "") -> dict[str, Any]:
+def display_summary(spec: "proxysvc.ProxySpec | None", *, label: str = "",
+                    raw: str = "", problem: str = "") -> dict[str, Any]:
     """给主控台展示用的代理摘要。
 
     ## 为什么不直接给原始串
@@ -1168,8 +1169,12 @@ def display_summary(spec: "proxysvc.ProxySpec | None", *, label: str = "") -> di
     前置的地址只在 `chain` 里出现 —— 单独给一份前置字段会诱导界面把它当出口显示。
     """
     if spec is None:
-        return {"set": False, "url": "", "chain": "", "is_chain": False, "has_auth": False,
-                "username": "", "host": "", "port": 0, "scheme": "", "label": label, "local": ""}
+        # `raw` 非空但解析不出 spec = 这条代理串是坏的（带空格、IP 段数不对、端口越界…）。
+        # 主控台据此显示「代理无效」并给出原因 —— 不用等用户点启动才发现。
+        return {"set": False, "url": (raw or "")[:200], "chain": "", "is_chain": False,
+                "has_auth": False, "username": "", "host": "", "port": 0, "scheme": "",
+                "label": label, "local": "",
+                "invalid": bool(raw), "problem": (problem or "")[:300]}
     return {
         "set": True,
         "url": _mask_spec_url(spec),
@@ -1182,6 +1187,8 @@ def display_summary(spec: "proxysvc.ProxySpec | None", *, label: str = "") -> di
         "scheme": spec.scheme,
         "label": label,
         "local": "",
+        "invalid": False,
+        "problem": "",
     }
 
 

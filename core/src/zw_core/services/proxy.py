@@ -152,6 +152,66 @@ class ProxyError(Exception):
         self.message = message
 
 
+def _validate_host(host: str, raw: str) -> None:
+    """校验主机名形状。
+
+    ## 为什么必须严格
+
+    用户贴过 `socks5://user:pass@66.80.12 0.66:20000` —— 中间**有个空格**，
+    而且 IP 有**五段**。urlsplit 会老老实实把它当成一个主机名收下，
+    于是这个代理被存进库、被显示在界面上，然后**连不上，且没有任何提示**。
+    排查时只能靠猜。
+
+    所以这里把明显的错误当场拒掉，并说清错在哪：
+      - 含空白（粘贴时混进来的空格/制表符）
+      - 看着像 IPv4（只有数字和点）但不是正好 4 段、或某段 > 255
+      - 其它非法字符
+    """
+    h = (host or "").strip()
+    if not h:
+        raise ProxyError("PROXY_INVALID_HOST", "代理主机名是空的")
+    if any(ch.isspace() for ch in h):
+        raise ProxyError(
+            "PROXY_INVALID_HOST",
+            f"代理主机名里有空格：{mask_url(raw)}。"
+            "多半是粘贴时多打了空格，或者 IP 本身写错了（例如把 66.80.12.66 写成了 66.80.12 0.66）",
+        )
+    # 形似 IPv4（只由数字和点组成）就严格按 IPv4 校验
+    if all(ch.isdigit() or ch == "." for ch in h):
+        parts_ = h.split(".")
+        if len(parts_) != 4:
+            raise ProxyError(
+                "PROXY_INVALID_HOST",
+                f"IP 应该是 4 段（a.b.c.d），现在有 {len(parts_)} 段：{h}",
+            )
+        for seg in parts_:
+            if not seg or not seg.isdigit() or not (0 <= int(seg) <= 255):
+                raise ProxyError(
+                    "PROXY_INVALID_HOST",
+                    f"IP 段不合法：「{seg}」（每段应在 0-255）：{h}",
+                )
+        return
+    # IPv6 字面量：含 `:` 就按 IPv6 校验（urlsplit 会把 `[::1]` 的方括号去掉，
+    # hostname 拿到的是 `::1`）。不认这一支的话，本机/环回的 v6 代理会被误拒。
+    if ":" in h:
+        import ipaddress as _ip
+
+        try:
+            _ip.IPv6Address(h)
+        except ValueError as exc:
+            raise ProxyError(
+                "PROXY_INVALID_HOST", f"IPv6 地址不合法：{h}（例如 ::1 或 2001:db8::1）"
+            ) from exc
+        return
+    # 域名：只允许常见字符，别把整串说明文字当地址收下
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._")
+    if not set(h) <= allowed:
+        raise ProxyError(
+            "PROXY_INVALID_HOST",
+            f"代理主机名里有非法字符：{h}（只允许字母、数字、点、连字符）",
+        )
+
+
 def parse_proxy(raw: str) -> ProxySpec | None:
     """解析用户填的代理串。空串返回 None。
 
@@ -175,12 +235,21 @@ def parse_single_proxy(raw: str) -> ProxySpec:
         raise ProxyError("PROXY_INVALID", "空代理串")
     if "://" not in text:
         text = f"http://{text}"
-    parts = urlsplit(text)
+    try:
+        parts = urlsplit(text)
+    except ValueError as exc:
+        # urlsplit 对"方括号里的东西不是合法 IPv6"（如 `http://[::zz]:8080`）
+        # 直接抛 ValueError。不接住它就会变成一个 500，用户只看到"导入失败"。
+        raise ProxyError(
+            "PROXY_INVALID_HOST",
+            f"代理地址不合法：{mask_url(raw)}（方括号里必须是合法 IPv6，例如 [::1]）",
+        ) from exc
     scheme = (parts.scheme or "http").lower()
     if scheme not in ("http", "https", "socks5", "socks4", "socks"):
         raise ProxyError("PROXY_SCHEME_UNSUPPORTED", f"不支持的代理协议：{scheme}（可用 http / https / socks5）")
     if not parts.hostname:
         raise ProxyError("PROXY_INVALID", f"代理地址里没有主机名：{mask_url(raw)}")
+    _validate_host(parts.hostname, raw)
     try:
         port = parts.port
     except ValueError as exc:
@@ -189,6 +258,8 @@ def parse_single_proxy(raw: str) -> ProxySpec:
         raise ProxyError("PROXY_INVALID", f"代理串的端口不是数字：{mask_url(raw)}") from exc
     if not port:
         port = 1080 if scheme.startswith("socks") else 8080
+    if not (0 < int(port) < 65536):
+        raise ProxyError("PROXY_INVALID_PORT", f"端口超出范围：{port}（应在 1-65535）")
     # urlsplit 不会解码百分号编码（"pa%40ss" 原样留着），但用户填的凭据
     # 常常是编码过的（@ 在 URL 里必须写成 %40），所以要显式还原。
     from urllib.parse import unquote

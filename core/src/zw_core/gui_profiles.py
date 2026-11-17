@@ -121,6 +121,35 @@ def _clip(text: str, limit: int) -> str:
 
 
 # ── 代理串的脱敏与展示 ────────────────────────────────────
+
+def _default_chrome_userdata() -> str:
+    """Chrome 用户数据目录的常见位置（给输入框做默认值，省得用户去找）。
+
+    找不到就返回空串 —— 让人自己填，而不是填一个不存在的路径让他改。
+    """
+    import os as _os
+    import sys as _sys
+    from pathlib import Path as _P
+
+    cands: list[_P] = []
+    if _sys.platform == "win32":
+        base = _os.environ.get("LOCALAPPDATA") or str(_P.home() / "AppData" / "Local")
+        cands += [_P(base) / "Google" / "Chrome" / "User Data",
+                  _P(base) / "Chromium" / "User Data"]
+    elif _sys.platform == "darwin":
+        cands.append(_P.home() / "Library" / "Application Support" / "Google" / "Chrome")
+    else:
+        cands += [_P.home() / ".config" / "google-chrome",
+                  _P.home() / ".config" / "chromium",
+                  _P.home() / ".config" / "google-chrome-beta"]
+    for c in cands:
+        try:
+            if (c / "Default" / "Extensions").is_dir() or (c / "Default").is_dir():
+                return str(c)
+        except OSError:
+            continue
+    return str(cands[0]) if cands else ""
+
 def mask_proxy_text(raw: str) -> str:
     """把一串代理里的密码换成 `***`，其余原样。
 
@@ -515,11 +544,21 @@ class CoreApi:
         return self.call("GET", "/api/v1/packs", timeout=10.0)
 
     def import_pack(self, *, path: str = "", from_profile: str = "",
+                    from_chrome: str = "",
                     name: str = "") -> tuple[bool, Any, dict[str, Any] | None]:
-        # 从环境导入要复制扩展代码 + 本地存储（可能几十 MB），慢是正常的
+        """导入扩展包。三种来源：
+
+        - `from_profile`：从知纹自己的环境导出
+        - `from_chrome`：从任意 Chrome/Roxy 的用户数据目录导出
+          （"把 RXYCDP 的插件带走"就是这条）
+        - `path`：扩展目录或 zip
+
+        从环境/Chrome 导入要复制扩展代码 + 本地存储（可能几十 MB），慢是正常的。
+        """
         return _unwrap_business(*self.call(
             "POST", "/api/v1/packs/import",
-            json_body={"path": path, "from_profile": from_profile, "name": name},
+            json_body={"path": path, "from_profile": from_profile,
+                       "from_chrome": from_chrome, "name": name},
             timeout=600.0,
         ))
 
@@ -1412,6 +1451,10 @@ class PacksOverlay(_Overlay):
                    command=self.close).pack(side="right")
         ttk.Button(self.buttons, text="从环境导入", style="TinyAccent.TButton",
                    command=self.ask_import_from).pack(side="right", padx=(0, 8))
+        # 另一条路：那个浏览器不是知纹起的（Roxy / RXYCDP 等），扩展装在它自己的
+        # 用户数据目录里，所以让它给路径。默认值填 Chrome 的标准位置，省得找。
+        ttk.Button(self.buttons, text="从 Chrome 目录导入", style="Tiny.TButton",
+                   command=self.ask_import_from_chrome).pack(side="right", padx=(0, 6))
         ttk.Button(self.buttons, text="刷新", style="Tiny.TButton",
                    command=lambda: self.reload(force=True)).pack(side="right", padx=(0, 6))
 
@@ -1544,6 +1587,36 @@ class PacksOverlay(_Overlay):
         )
         ov.open()
 
+    def ask_import_from_chrome(self) -> None:
+        """从任意 Chrome / Roxy 的用户数据目录导入扩展包。
+
+        为什么需要这条：RXYCDP / Roxy 这类浏览器不是知纹启动的，
+        它们的扩展不在知纹的 profiles 目录里，而是在标准 Chrome 的
+        `User Data/Default/Extensions` 下面。给一个路径就能打包。
+        """
+        default = _default_chrome_userdata()
+        ov = TextOverlay(
+            self.card, self.theme, self.fonts, "从 Chrome 目录导入扩展包",
+            "填那个浏览器的「用户数据」目录（也可以直接给里面的 Default）。\n"
+            "会把这个用户里装的所有扩展连同它们的本地数据一起打包；\n"
+            "不含缓存、Cookie、账号数据。",
+            fields=[
+                ("path", "用户数据目录", default, "例如 C:\\Users\\你\\AppData\\Local\\Google\\Chrome\\User Data"),
+                ("name", "包名称（可留空）", ""),
+            ],
+            submit_text="开始导入",
+            on_submit=self._import_from_chrome_path,
+        )
+        ov.open()
+
+    def _import_from_chrome_path(self, values: dict[str, str]) -> None:
+        path = str(values.get("path") or "").strip()
+        if not path:
+            self.set_status("请填用户数据目录", bad=True)
+            return
+        self._do_import(from_chrome=path, name=str(values.get("name") or "").strip(),
+                        label="Chrome 目录")
+
     def _import_from(self, ref: str) -> None:
         if self._inflight:
             self.set_status("上一个操作还没完成，稍等一下", bad=True)
@@ -1553,10 +1626,21 @@ class PacksOverlay(_Overlay):
             if ref in (str(p.get("id") or ""), str(p.get("name") or "")):
                 name = str(p.get("name") or ref)
                 break
+        self._do_import(from_profile=ref, label=f"环境「{name}」")
+
+    def _do_import(self, *, from_profile: str = "", from_chrome: str = "",
+                   path: str = "", name: str = "", label: str = "") -> None:
+        """统一的导入入口（环境 / Chrome 目录 / 路径三条来源都走这里）。"""
+        if self._inflight:
+            self.set_status("上一个操作还没完成，稍等一下", bad=True)
+            return
         self._inflight = True
-        self.set_status(f"正在把「{name}」的插件打包 …（插件多、带数据时要几十秒）")
-        self.on_log(f"开始从环境「{name}」导入扩展包", "info")
-        call_async(self.card, lambda: self.api.import_pack(from_profile=ref),
+        self.set_status(f"正在从{label or '所选来源'}打包 …（插件多、带数据时要几十秒）")
+        self.on_log(f"开始从{label or '所选来源'}导入扩展包", "info")
+        call_async(self.card,
+                   lambda: self.api.import_pack(from_profile=from_profile,
+                                                from_chrome=from_chrome,
+                                                path=path, name=name),
                    self._on_imported)
 
     def _on_imported(self, res: tuple[bool, Any, dict[str, Any] | None]) -> None:

@@ -286,20 +286,28 @@ def _ext_meta(code_dir: Path, key: str, ext_id: str = "", data_dir: Path | None 
     }
 
 
-def import_pack(src_path: str = "", name: str = "", from_profile: str = "") -> dict[str, Any]:
-    """建一个扩展包。三种来源：
+def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
+                from_chrome: str = "") -> dict[str, Any]:
+    """建一个扩展包。四种来源：
 
-    1. `from_profile`：**从已有的浏览器环境导出**（这是"把 RXYCDP 的插件和数据带走"
-       那条路）——扫描它的 `udd/Default/Extensions/<id>/<ver>/` 拿代码，
-       再把 `Default/Local Extension Settings/<id>/` 一起打包。
-    2. `src_path` 是扩展目录（含 manifest.json）。
-    3. `src_path` 是 zip（内部形状与 2 相同即可）。
+    1. `from_profile`：**从已有的知纹环境导出** —— 扫描它的
+       `udd/Default/Extensions/<id>/<ver>/` 拿代码，再把
+       `Default/Local Extension Settings/<id>/` 一起打包。
+    2. `from_chrome`：**从任意 Chrome / Roxy / 其它指纹浏览器的用户目录导出**。
+       用户说的"RXYCDP 浏览器的插件及其数据"就是这种：那个浏览器不是知纹管的，
+       但它的扩展就装在标准的 Chrome 用户数据目录里。
+       参数可以是 `User Data`、`User Data/Default`、或直接指向 `Default` 的路径。
+    3. `src_path` 是扩展目录（含 manifest.json）。
+    4. `src_path` 是 zip（内部形状与 3 相同即可）。
     """
     s = get_settings()
     packs_root().mkdir(parents=True, exist_ok=True)
 
     if from_profile:
         return _import_from_profile(from_profile, name)
+
+    if from_chrome:
+        return _import_from_chrome(from_chrome, name)
 
     if not src_path:
         raise PackError("PACK_INVALID_SOURCE", "要么给 src_path（扩展目录或 zip），要么给 from_profile", 400)
@@ -371,6 +379,140 @@ def _default_pack_name(exts: list[dict[str, Any]]) -> str:
     return f"{exts[0].get('name') or exts[0]['key']} 等 {len(exts)} 个扩展"
 
 
+def _resolve_chrome_default(raw: str) -> Path:
+    """把用户给的路径规整成"chrome 的 Default 目录"。
+
+    接受这几种写法（用户很难搞清楚该给哪一层，所以都认）：
+      .../User Data                  → 取 Default
+      .../User Data/Default          → 就是它
+      .../User Data/Profile 1        → 也认（多用户目录）
+      .../Default                    → 就是它
+    """
+    p = Path(raw).expanduser()
+    if not p.exists():
+        raise PackError("PACK_INVALID_SOURCE", f"路径不存在：{p}", 400)
+    if not p.is_dir():
+        raise PackError("PACK_INVALID_SOURCE", f"不是目录：{p}", 400)
+    # 已经是 Default / Profile N
+    if (p / "Extensions").is_dir() or (p / "Local Extension Settings").is_dir():
+        return p
+    # User Data 层：优先 Default，其次任意 Profile N（选扩展最多的那个）
+    cand = p / "Default"
+    if cand.is_dir():
+        return cand
+    profs = [d for d in p.iterdir() if d.is_dir() and (d.name == "Default" or d.name.startswith("Profile"))]
+    for d in sorted(profs):
+        if (d / "Extensions").is_dir():
+            return d
+    raise PackError(
+        "PACK_NO_EXTENSION",
+        f"{p} 里找不到 Chrome 的 Extensions 目录。请给 `User Data` 或 `User Data/Default` 这一层",
+        400,
+    )
+
+
+def _import_from_chrome(raw_path: str, name: str = "") -> dict[str, Any]:
+    """从任意 Chrome 系浏览器的用户目录导出扩展 + 该扩展的本地数据。
+
+    和 `_import_from_profile` 的区别只在"代码从哪来"：这里直接读标准
+    Chrome 布局（`Extensions/<id>/<ver>/` + `Local Extension Settings/<id>/`），
+    不依赖知纹自己的 profiles 目录 —— 因为 Roxy / RXYCDP 这类浏览器不是知纹启的。
+    """
+    default_dir = _resolve_chrome_default(raw_path)
+    ext_root = default_dir / "Extensions"
+    settings_root = default_dir / "Local Extension Settings"
+
+    found: list[tuple[str, Path]] = []
+    if ext_root.is_dir():
+        for id_dir in sorted(ext_root.iterdir()):
+            if not id_dir.is_dir():
+                continue
+            # Chrome 有时会把用户装的扩展放在 _metadata 之类的辅助目录里，跳过
+            if id_dir.name.startswith("_"):
+                continue
+            if _read_manifest(id_dir):
+                found.append((id_dir.name, id_dir))
+                continue
+            for ver_dir in sorted(id_dir.iterdir()):
+                if ver_dir.is_dir() and _read_manifest(ver_dir):
+                    found.append((id_dir.name, ver_dir))
+                    break
+
+    if not found:
+        raise PackError(
+            "PACK_NO_EXTENSION",
+            f"{default_dir} 里没有可导入的扩展（Extensions 目录为空或只有内置组件）。"
+            "如果那个浏览器还没装扩展，先在它里面装好再导入",
+            400,
+        )
+
+    return _materialize_pack(
+        found,
+        settings_root,
+        name=name or f"{default_dir.parent.name or 'chrome'}-扩展",
+        source_kind="chrome",
+        source_path=str(default_dir),
+    )
+
+
+
+def _materialize_pack(
+    found: list[tuple[str, Path]],
+    les_root: Path | None,
+    *,
+    name: str,
+    source_kind: str,
+    source_path: str = "",
+    audit_ref: str = "",
+    profile_name: str = "",
+) -> dict[str, Any]:
+    """把"已找到的扩展列表"落成一个包。
+
+    `found` 是 [(扩展ID, 代码目录)]；`les_root` 是 `Local Extension Settings` 的父目录
+    （可能不存在）。"从环境导出"和"从 Chrome 目录导出"最后都走这里，
+    差别只在怎么找到这些目录。
+    """
+    pack_id = uuid.uuid4().hex[:12]
+    pdir = packs_root() / pack_id
+    (pdir / CODE_DIR).mkdir(parents=True, exist_ok=True)
+    exts: list[dict[str, Any]] = []
+    for ext_id, code_src in found:
+        key = ext_id
+        _copy_tree(code_src, pdir / CODE_DIR / key)
+        data_dst = None
+        if les_root is not None:
+            les_src = les_root / ext_id
+            if les_src.is_dir() and any(les_src.iterdir()):
+                data_dst = pdir / DATA_DIR / key
+                _copy_tree(les_src, data_dst)
+        exts.append(_ext_meta(code_src, key, ext_id=ext_id, data_dir=data_dst))
+
+    meta = {
+        "id": pack_id,
+        "name": (name or "扩展包").strip()[:64],
+        "created_at": time.time(),
+        "is_default": 0,
+        "source": {"kind": source_kind, "path": source_path, "profile": profile_name},
+        "extensions": exts,
+    }
+    _write_meta(pdir, meta)
+    total = _dir_size(pdir)
+    if total > MAX_PACK_BYTES:
+        shutil.rmtree(pdir, ignore_errors=True)
+        raise PackError("PACK_TOO_LARGE", f"包体积 {_human(total)} 超过上限 {_human(MAX_PACK_BYTES)}", 413)
+    get_db().audit(
+        "pack.import",
+        audit_ref or pack_id,
+        detail={"pack": pack_id, "kind": source_kind,
+                "extensions": len(exts), "with_data": sum(1 for e in exts if e["has_data"])},
+    )
+    logger.info(
+        "导入扩展包 来源=%s 包=%s 扩展数=%s 带数据=%s",
+        source_kind, pack_id, len(exts), sum(1 for e in exts if e["has_data"]),
+    )
+    return _summary(meta)
+
+
 def _import_from_profile(profile_ref: str, name: str = "") -> dict[str, Any]:
     """从已有环境导出：代码从 `Default/Extensions/<id>/<ver>/` 取，数据从
     `Default/Local Extension Settings/<id>/` 取。"""
@@ -406,43 +548,15 @@ def _import_from_profile(profile_ref: str, name: str = "") -> dict[str, Any]:
             400,
         )
 
-    pack_id = uuid.uuid4().hex[:12]
-    pdir = packs_root() / pack_id
-    (pdir / CODE_DIR).mkdir(parents=True, exist_ok=True)
-    exts: list[dict[str, Any]] = []
-    for ext_id, code_src in found:
-        key = ext_id
-        _copy_tree(code_src, pdir / CODE_DIR / key)
-        les_src = udd / LES_REL / ext_id
-        data_dst = None
-        if les_src.is_dir() and any(les_src.iterdir()):
-            data_dst = pdir / DATA_DIR / key
-            _copy_tree(les_src, data_dst)
-        exts.append(_ext_meta(code_src, key, ext_id=ext_id, data_dir=data_dst))
-
-    meta = {
-        "id": pack_id,
-        "name": (name or f"{p['name']} 的扩展").strip()[:64],
-        "created_at": time.time(),
-        "is_default": 0,
-        "source": {"kind": "profile", "profile": p["name"], "profile_id": p["id"]},
-        "extensions": exts,
-    }
-    _write_meta(pdir, meta)
-    total = _dir_size(pdir)
-    if total > MAX_PACK_BYTES:
-        shutil.rmtree(pdir, ignore_errors=True)
-        raise PackError("PACK_TOO_LARGE", f"包体积 {_human(total)} 超过上限 {_human(MAX_PACK_BYTES)}", 413)
-    get_db().audit(
-        "pack.import",
-        p["id"],
-        detail={"pack": pack_id, "kind": "profile", "extensions": len(exts), "with_data": sum(1 for e in exts if e["has_data"])},
+    return _materialize_pack(
+        found,
+        udd / LES_REL,
+        name=name or f"{p['name']} 的扩展",
+        source_kind="profile",
+        source_path=str(udd),
+        audit_ref=p["id"],
+        profile_name=p["name"],
     )
-    logger.info(
-        "从环境导出扩展包 环境=%s 包=%s 扩展数=%s 带数据=%s",
-        p["name"], pack_id, len(exts), sum(1 for e in exts if e["has_data"]),
-    )
-    return _summary(meta)
 
 
 # ── 查询 ──────────────────────────────────────────────────

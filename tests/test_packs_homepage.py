@@ -350,3 +350,84 @@ def test_chromium_unpacked_id_is_stable_and_path_dependent(tmp_path):
     assert a != b, "不同加载路径必须得到不同 ID（否则数据目录会串）"
     assert packs.chromium_unpacked_id(tmp_path / "one") == a
     assert len(a) == 32 and set(a) <= set("abcdefghijklmnop"), a
+
+
+# ── 从任意 Chrome 用户目录导入（RXYCDP / Roxy 那种）─────────────────────
+def _fake_chrome(tmp_path, ext_id="abcdefghijklmnopabcdefghijklmnop", with_data=True):
+    """造一个标准 Chrome 用户目录：User Data/Default/Extensions/<id>/<ver>/ + 数据。"""
+    udd = tmp_path / "User Data" / "Default"
+    code = udd / "Extensions" / ext_id / "1.2.3"
+    code.mkdir(parents=True)
+    (code / "manifest.json").write_text(
+        '{"manifest_version":3,"name":"RXYCDP helper","version":"1.2.3"}', encoding="utf-8")
+    (code / "sw.js").write_text("// probe", encoding="utf-8")
+    if with_data:
+        les = udd / "Local Extension Settings" / ext_id
+        les.mkdir(parents=True)
+        (les / "000003.log").write_bytes(b"data-here")
+    return tmp_path / "User Data"
+
+
+def test_import_from_chrome_user_data(tmp_path):
+    """用户说的"把 RXYCDP 浏览器的插件及其数据一起打包"：那浏览器不是知纹起的，
+    扩展装在标准 Chrome 用户目录里，所以要支持从那个目录直接导入。"""
+    from zw_core.services import packs
+
+    userdata = _fake_chrome(tmp_path)
+    r = packs.import_pack(from_chrome=str(userdata), name="RXYCDP 全套")
+    assert r["name"] == "RXYCDP 全套"
+    assert r["extension_count"] == 1
+    assert r["with_data"] == 1, "扩展的本地数据（Local Extension Settings）也要带上"
+    assert r["source"] == "chrome"
+    # 包目录里代码与数据都在
+    import pathlib
+
+    pdir = pathlib.Path(r["path"])
+    assert (pdir / "extensions" / "abcdefghijklmnopabcdefghijklmnop" / "manifest.json").exists()
+    assert (pdir / "data" / "abcdefghijklmnopabcdefghijklmnop" / "000003.log").exists()
+
+
+def test_import_from_chrome_accepts_default_layer(tmp_path):
+    """给 `User Data` 或 `User Data/Default` 都要能导入（用户分不清该给哪一层）。"""
+    from zw_core.services import packs
+
+    userdata = _fake_chrome(tmp_path)
+    a = packs.import_pack(from_chrome=str(userdata))
+    b = packs.import_pack(from_chrome=str(userdata / "Default"))
+    assert a["extension_count"] == 1 and b["extension_count"] == 1
+
+
+def test_import_from_chrome_without_extensions_is_clear(tmp_path):
+    """目录里没有扩展时要给出可操作的错误，而不是空包。"""
+    import pytest as _pytest
+
+    from zw_core.services import packs
+
+    empty = tmp_path / "User Data" / "Default"
+    empty.mkdir(parents=True)
+    with _pytest.raises(packs.PackError) as ei:
+        packs.import_pack(from_chrome=str(empty))
+    assert ei.value.code == "PACK_NO_EXTENSION"
+    assert "装好" in ei.value.message or "Extensions" in ei.value.message
+
+
+def test_import_from_chrome_bad_path(tmp_path):
+    import pytest as _pytest
+
+    from zw_core.services import packs
+
+    with _pytest.raises(packs.PackError) as ei:
+        packs.import_pack(from_chrome=str(tmp_path / "not-there"))
+    assert ei.value.code == "PACK_INVALID_SOURCE"
+
+
+def test_import_from_chrome_skips_helper_dirs(tmp_path):
+    """Chrome 的 `_metadata` 之类辅助目录不能被当成扩展。"""
+    from zw_core.services import packs
+
+    userdata = _fake_chrome(tmp_path)
+    helper = userdata / "Default" / "Extensions" / "_metadata"
+    helper.mkdir(parents=True)
+    (helper / "manifest.json").write_text('{"name":"not-an-extension"}', encoding="utf-8")
+    r = packs.import_pack(from_chrome=str(userdata))
+    assert r["extension_count"] == 1, "只应该导入真正的扩展"

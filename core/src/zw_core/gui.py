@@ -685,17 +685,20 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
 
             for pr in mgr.list_profiles():
                 pid = str(pr.get("id") or "")
+                _spec = None
+                _raw_px = str(pr.get("proxy") or "").strip()
+                _px_problem = ""
                 try:
                     _spec = mgr.proxy_spec_for(pr)
-                except Exception:
-                    _spec = None
+                except Exception as _exc:
+                    _px_problem = str(getattr(_exc, "message", "") or _exc)
                 inv.append({
                     "id": pid,
                     "name": str(pr.get("name") or ""),
                     "state": str(pr.get("state") or ""),
                     "group": str(pr.get("group_name") or ""),
                     "cdp_path": f"/cdp/{pid}" if pid else "",
-                    "proxy": _plib.display_summary(_spec),
+                    "proxy": _plib.display_summary(_spec, raw=_raw_px, problem=_px_problem),
                 })
         except Exception:
             inv = []

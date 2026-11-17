@@ -942,3 +942,82 @@ def test_proxy_spec_for_quotes_credentials(tmp_path, monkeypatch):
     finally:
         config.reset_settings()
         db.reset_db()
+
+
+# ── 代理串形状校验（用户踩过：带空格 + 五段 IP）────────────────────
+import pytest as _pytest
+
+from zw_core.services.proxy import ProxyError as _PErr, parse_proxy as _pp
+
+
+@pytest.mark.parametrize("bad,expect_code", [
+    ("socks5://user:pass@66.80.12 0.66:20000", "PROXY_INVALID_HOST"),   # 中间有空格
+    ("socks5://user:pass@66.80.12.0.66:20000", "PROXY_INVALID_HOST"),   # 五段 IP
+    ("http://u:p@1.2.3.999:8080", "PROXY_INVALID_HOST"),                # IP 段超 255
+    ("http://u:p@1.2.3:8080", "PROXY_INVALID_HOST"),                    # 三段 IP
+    ("http://u:p@ho st:8080", "PROXY_INVALID_HOST"),                    # 域名里有空格
+    ("http://u:p@bad host!:8080", "PROXY_INVALID_HOST"),                # 非法字符
+])
+def test_invalid_host_is_rejected_with_reason(bad, expect_code):
+    """明显的坏串必须在解析时就被拒，而不是"存进库、显示出来、然后连不上"。
+
+    用户真实踩过：`socks5://cf1b481103:51ec63a321@66.80.12 0.66:20000`
+    （中间一个空格、IP 五段）。当时它被原样收下，浏览器起来后没有网络，
+    界面上也没有任何提示 —— 只能靠猜。
+    """
+    with _pytest.raises(_PErr) as ei:
+        _pp(bad)
+    assert ei.value.code == expect_code, f"{bad} 应该被拒，实际 {ei.value.code}"
+    assert ei.value.message, "错误信息不能为空"
+
+
+def test_error_message_never_leaks_password():
+    with _pytest.raises(_PErr) as ei:
+        _pp("socks5://user:SUPERSECRET@66.80.12 0.66:20000")
+    assert "SUPERSECRET" not in ei.value.message
+    assert "***" in ei.value.message
+
+
+def test_valid_proxies_still_accepted():
+    """校验不能误伤正常串。"""
+    for good in (
+        "socks5://u:p@66.80.12.66:20000",
+        "http://proxy.example.com:8080",
+        "http://192.168.1.1:3128",
+        "socks5://[::1]:1080",
+        "http://127.0.0.1:21080|socks5://u:p@66.80.12.66:20000",
+    ):
+        assert _pp(good) is not None, good
+
+
+def test_display_summary_marks_invalid():
+    """主控台要能显示「代理无效」而不是把它当成「直连」。"""
+    from zw_core.services.proxylib import display_summary
+
+    d = display_summary(None, raw="socks5://66.80.12 0.66:20000",
+                        problem="代理主机名里有空格")
+    assert d["set"] is False
+    assert d["invalid"] is True
+    assert "空格" in d["problem"]
+    assert d["url"].startswith("socks5://")
+
+
+def test_bad_proxy_blocks_start_with_readable_error(tmp_path, monkeypatch):
+    """启动时遇到坏代理要给出可读原因，不能静默起一个没有网络的浏览器。"""
+    from zw_core import config, db
+    from zw_core.services import manager as mgr
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    db.reset_db()
+    try:
+        p = mgr.create_profile({"name": "坏代理启动"})
+        with db.get_db().conn() as c:
+            c.execute("UPDATE profiles SET proxy=? WHERE id=?",
+                      ("socks5://66.80.12 0.66:20000", p["id"]))
+        with _pytest.raises(Exception) as ei:
+            mgr.start(p["id"])
+        assert "空格" in str(ei.value) or "IP" in str(ei.value)
+    finally:
+        config.reset_settings()
+        db.reset_db()
