@@ -41,6 +41,23 @@ ZW_GATEWAY_ENABLED  → 同上
 `ZW_INTERNAL_TOKEN`、`ZW_DEVICE_ID`、端口池、远程命令行 cwd/timeout）。
 `docs/04` 补 `ENGINE_RUN_AS_ROOT` 错误码。
 
+### 一个 CI 抓出来的测试错误
+
+`test_allow_root_gate_is_enforced` 第一版在 **Windows 上必红**：
+
+```
+FAILED tests/test_client_extra.py::test_allow_root_gate_is_enforced
+AssertionError: 以 root 跑且未授权时必须报错，而不是静默 --no-sandbox
+```
+
+因为那段代码是 `if not IS_WIN and _is_root():` —— Windows 上整段不走，
+`--no-sandbox` 在 Windows 是另一条分支。**这是测试没考虑平台，不是产品问题。**
+已加 `sys.platform == "win32"` 时 skip。
+
+（顺带说明：这次发布被我的"必需平台缺失就拒绝发版"闸拦住了 ——
+Windows 构建失败 → 发布明确报错，而不是发出一个只有两平台的版本。
+这个闸是按设计工作的。）
+
 ### 测试
 
 579 → **582 项**：

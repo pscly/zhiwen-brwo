@@ -394,6 +394,16 @@ def test_allow_root_gate_is_enforced(monkeypatch):
     from zw_core import config
     from zw_core.services import engines
 
+    import sys as _sys
+
+    import pytest as _pytest
+
+    if _sys.platform == "win32":
+        # Windows 上这段代码根本不走（`if not IS_WIN and _is_root()`），
+        # `--no-sandbox` 在 Windows 是另一条分支。硬在 Windows 上断言会红 ——
+        # 这是测试没考虑平台，不是产品问题（CI 的 Windows job 抓出来过）。
+        _pytest.skip("root / --no-sandbox 这条只在 POSIX 有意义")
+
     # 非 root 环境下这条路径本来就不走，直接验"root + 未授权 → 明确报错"
     monkeypatch.setattr(engines, "_is_root", lambda: True)
 
