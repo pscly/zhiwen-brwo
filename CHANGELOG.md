@@ -69,6 +69,21 @@ INFO [uvicorn.error] Uvicorn running on http://127.0.0.1:8851
 > 因为源码里我从来都是 `python -m zw_core.cli serve`。
 > 上一轮加的 `verify-release.sh` 立刻体现了价值。
 
+### 补：用**修好后的产物**跑完整 e2e（这条才是硬证据）
+
+发布后拿 v0.7.51 的真实二进制再跑一遍完整自检：
+
+```
+产物版 core → 200                      ← 之前是 000 / Connection refused
+通过 68 项，失败 0 项，跳过 5 项
+✅ 单机全能力自检通过
+```
+
+跳过 5 项是这台机器的环境（没有 fingerprint-chromium、没有真代理、
+没给 hub/令牌/主密码），不是缺陷。
+
+也就是说：**用户下载到的那个文件，自己起得来、自己把 68 项能力跑通了。**
+
 ## 0.7.50 — 2026-11-18
 
 **新增 `scripts/verify-release.sh`：验证**已发布产物**能不能跑 —— 并已实测通过。**
