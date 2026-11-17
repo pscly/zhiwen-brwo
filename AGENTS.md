@@ -93,7 +93,7 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 网关接管
 node scripts/ui-check.cjs                      # 23 通过 / 0 失败（客户端控制台）
-node scripts/console-ui-check.cjs              # 67 通过 / 0 失败（hub 主控台，mock 后端）
+node scripts/console-ui-check.cjs              # 73 通过 / 0 失败（hub 主控台，mock 后端）
 DISPLAY=:78 .venv/bin/python scripts/gui-check.py  # 32 通过 / 0 失败（客户端 tkinter GUI，含真改代理）
 ```
 
@@ -117,8 +117,8 @@ DISPLAY=:78 .venv/bin/python scripts/gui-check.py  # 32 通过 / 0 失败（客�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- 559 单元测试、65 项单机端到端、**30 项跨机端到端**、67 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.31** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- 559 单元测试、65 项单机端到端、**30 项跨机端到端**、73 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
+- hub **0.7.32** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）

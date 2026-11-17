@@ -1569,6 +1569,7 @@ function renderProxies(items){
     '<td>' + (p.has_password ? '<span class="badge ok">已设置</span>' : '<span class="muted">无</span>') + '</td>' +
     '<td class="mono cell-sub">' + esc((p.origin || '').slice(0, 18)) + '</td>' +
     '<td><div class="cdp-cell">' +
+      '<button class="btn xs ghost" type="button" data-px-edit="' + esc(JSON.stringify(p)) + '">编辑</button>' +
       '<button class="btn xs ghost" type="button" data-px-hide="' + p.id + '" data-px-hid="' + (p.hidden ? '1' : '0') + '">' +
         (p.hidden ? '取消隐藏' : '隐藏') + '</button>' +
       '<button class="btn xs ghost danger" type="button" data-px-del="' + p.id + '">删除</button>' +
@@ -1590,6 +1591,40 @@ async function deleteProxy(id){
   if (!r.ok){ const b = await r.json().catch(()=>({})); toast((b.error && b.error.message) || '删除失败', 'bad'); }
   loadProxies();
 }
+function askEditProxy(p){
+  // 编辑：**密码留空 = 不改**（POST /v1/proxies 的语义），
+  // 所以这里绝不把已存密码回填到输入框（后端也不给）。
+  openDialog({
+    title: '编辑代理',
+    html: '<div class="px-form">' +
+      '<label>协议 <input class="input" id="pxf-scheme" value="' + esc(p.scheme || 'http') + '"></label>' +
+      '<label>主机 <input class="input" id="pxf-host" value="' + esc(p.host || '') + '"></label>' +
+      '<label>端口 <input class="input" id="pxf-port" value="' + esc(String(p.port || '')) + '"></label>' +
+      '<label>用户名 <input class="input" id="pxf-user" value="' + esc(p.username || '') + '"></label>' +
+      '<label>密码 <input class="input" id="pxf-pass" type="password" placeholder="留空＝不修改"></label>' +
+      '<label>前置 <input class="input" id="pxf-hop" value="' + esc(p.hop || '') + '" placeholder="可留空，链式用"></label>' +
+      '<label>标签 <input class="input" id="pxf-label" value="' + esc(p.label || '') + '"></label>' +
+      '</div><div class="br-note" style="margin-top:8px">密码留空表示保持原样。' +
+      'IP 要写完整四段，不能有空格。</div>',
+    okText: '保存',
+    onOk: async () => {
+      const val = (id) => { const el = $('#' + id); return el ? el.value.trim() : ''; };
+      const payload = {
+        scheme: val('pxf-scheme') || 'http', host: val('pxf-host'),
+        port: Number(val('pxf-port') || 0), username: val('pxf-user'),
+        password: val('pxf-pass'), hop: val('pxf-hop'), label: val('pxf-label')
+      };
+      const r = await fetch('/v1/proxies', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+      });
+      const b = await r.json().catch(()=>({}));
+      if (!r.ok){ toast((b.error && b.error.message) || '保存失败', 'bad'); return false; }
+      closeDialog(); loadProxies(); return true;
+    }
+  });
+}
+
 function askAddProxy(){
   openDialog({
     title: '添加代理',
@@ -2459,6 +2494,11 @@ $('#mach-list').addEventListener('click', async (ev) => {
 
 /* 代理库视图：行由 JS 重建，所以整块视图用事件委托 */
 $('#view-proxies').addEventListener('click', (ev) => {
+  const editBtn = ev.target.closest('[data-px-edit]');
+  if (editBtn){
+    try { askEditProxy(JSON.parse(editBtn.dataset.pxEdit)); } catch (_) { toast('数据坏了，刷一下再试', 'bad'); }
+    return;
+  }
   const hideBtn = ev.target.closest('[data-px-hide]');
   if (hideBtn){
     hideProxy(Number(hideBtn.dataset.pxHide), hideBtn.dataset.pxHid !== '1');

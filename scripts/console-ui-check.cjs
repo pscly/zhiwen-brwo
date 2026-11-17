@@ -465,6 +465,27 @@ function setupRoutes(page, opts){
     added.host === '5.5.5.5' && Number(added.port) === 1080 && added.label === '自检加的',
     JSON.stringify(added));
 
+  // 编辑：密码留空 = 不改（后端语义），对话框要把现有值预填好
+  const editCount = await page.locator('#px-rows [data-px-edit]').count();
+  const rowCount = await page.locator('#px-rows tr').count();
+  check('每行都有「编辑」按钮', editCount === rowCount,
+    `edit=${editCount} rows=${rowCount}`);
+  await page.locator('#px-rows [data-px-edit]').first().click();
+  await page.waitForTimeout(400);
+  check('点「编辑」弹出对话框', await page.isVisible('#dlg[open]'));
+  const preHost = await page.inputValue('#pxf-host');
+  const prePass = await page.inputValue('#pxf-pass');
+  check('编辑框预填了现有主机', preHost === '66.80.12.66', 'host=' + preHost);
+  check('密码框**不回填**（留空＝不改）', prePass === '', 'pass=' + prePass);
+  // 改标签后保存，断言请求体带对了
+  await page.fill('#pxf-label', '改过的标签');
+  await page.click('#dlg-ok');
+  await page.waitForTimeout(600);
+  const edited = (pxMocks.added || []).find(x => x.label === '改过的标签') || {};
+  check('编辑保存发出 host/port/label', edited.host === '66.80.12.66' && Number(edited.port) === 20000,
+    JSON.stringify(edited));
+  check('编辑时密码为空（表示不修改）', (edited.password || '') === '', JSON.stringify(edited.password));
+
   console.log('\n— D2. 令牌视图 —');
   await page.click('#tabs .tab[data-view="secrets"]');
   await page.waitForSelector('.sec-row', { timeout: 5000 });
