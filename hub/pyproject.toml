@@ -1,6 +1,6 @@
 [project]
 name = "zw-hub"
-version = "0.7.22"
+version = "0.7.23"
 description = "知纹同步中心（zhiwen sync hub）—— 局域网内托管加密 profile 快照、租约与索引"
 requires-python = ">=3.11"
 dependencies = [

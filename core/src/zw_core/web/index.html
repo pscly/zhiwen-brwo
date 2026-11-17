@@ -3917,9 +3917,27 @@ async function boot() {
   const savedView = (location.hash || '').replace(/^#\/?/, '');
   S.view = VIEW_META[savedView] ? savedView : 'overview';
 
-  // 本地压根没有令牌时不要先去撞一次 401：直接把登录卡摆出来。
-  // 撞 401 除了多一次请求、多一条浏览器 console 报错之外没有任何收益。
+  // 本地没有令牌时先问一次 meta，再决定要不要弹登录卡。
+  //
+  // ## 这里以前是直接 showLogin，用户抱怨的正是这个
+  //
+  // 用户原话：「客户端打开控制台的话，就再也不需要输入什么访问令牌，
+  // 直接就可以进入」。而早先的代码是 `if (!S.token) { showLogin(); return; }`
+  // —— 不看服务端到底要不要令牌，本地没存过令牌就无条件弹框。
+  // 结果就是：即使 core 在回环上已经放行（`auth_required: false`），
+  // 打开页面仍然被要求输令牌，看起来那个改动完全没生效。
+  //
+  // 现在的顺序：先 loadMeta()
+  //   - `auth_required === false`（本机回环 / 没配令牌）→ 直接进，不弹框
+  //   - 否则才弹登录卡
+  // loadMeta 失败（服务没起来）也弹卡，那里至少能看错误提示。
   if (!S.token) {
+    const okMeta = await loadMeta();
+    if (S.meta && S.meta.auth_required === false) {
+      hideLogin();
+      await startData();
+      return;
+    }
     showLogin('');
     renderView();
     return;

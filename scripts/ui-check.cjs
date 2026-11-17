@@ -73,6 +73,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nodeText = (await page.textContent('body')).trim();
   check('控制台已加载（不是登录卡）', !nodeText.includes('输入访问令牌'), nodeText.slice(0, 120));
 
+  // 用户明确要求：本机打开控制台**不需要**输令牌，直接进。
+  // 这条专门钉住"登录层有没有显示"——曾经出过 bug：页面只要本地没存令牌就无条件
+  // 弹框，完全不看服务端返回的 auth_required=false，看起来那个改动从没生效过。
+  const loginShown = await page.evaluate(() =>
+    !!(document.getElementById('login') || {}).classList &&
+    document.getElementById('login').classList.contains('show'));
+  check('本机打开不弹登录层（auth_required=false 时直接进）', loginShown === false,
+    'login 层被显示了');
+  const tokInStore = await page.evaluate(() => localStorage.getItem('zw_token') || '');
+  check('本机免令牌时不需要往 localStorage 写令牌', tokInStore === '', 'token=' + tokInStore);
+
   console.log('== 逐视图 ==');
   for (const v of ['overview', 'profiles', 'data', 'extensions', 'proxies', 'sync', 'ops']) {
     const nav = await page.$(`#nav .nav-item[data-view="${v}"]`);

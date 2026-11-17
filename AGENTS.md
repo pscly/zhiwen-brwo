@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   549 项单元测试（含真起 hub 的同步集成测试）
+tests/   550 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由 `fingerprint-chromium`（`--fingerprint=<种子>`）或系统 Chrome 提供。
@@ -88,11 +88,11 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 
 **提交前必须做**：
 ```bash
-.venv/bin/python -m pytest tests -q            # 549 passed, 2 skipped
+.venv/bin/python -m pytest tests -q            # 550 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 65 通过 / 0 失败 / 6 跳过（真开浏览器）
 .venv/bin/python scripts/e2e-cross-machine.py  # 跨机（两台真机器 + hub，可选）
 node scripts/gateway-check.cjs                 # 网关接管
-node scripts/ui-check.cjs                      # 客户端控制台逐视图点一遍
+node scripts/ui-check.cjs                      # 23 通过 / 0 失败（客户端控制台）
 node scripts/console-ui-check.cjs              # 64 通过 / 0 失败（hub 主控台，mock 后端）
 ```
 
@@ -116,8 +116,8 @@ node scripts/console-ui-check.cjs              # 64 通过 / 0 失败（hub 主�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- 549 单元测试、65 项单机端到端、64 条主控台界面断言 —— 全绿
-- hub **0.7.22** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- 550 单元测试、65 项单机端到端、64 条主控台界面断言、23 条客户端控制台断言 —— 全绿
+- hub **0.7.23** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）

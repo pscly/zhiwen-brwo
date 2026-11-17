@@ -294,3 +294,30 @@ def test_overview_core_alive_unknown_for_old_clients(hub):
     d = hub.get("/v1/console/overview", params={"probe": False}).json()["data"]
     m = next(x for x in d["machines"] if x["device_id"] == dev)
     assert m["core_alive"] is None
+
+
+def test_client_console_page_skips_login_when_auth_not_required():
+    """本机打开客户端控制台时，页面**不应该**弹登录层。
+
+    用户原话：「客户端打开控制台的话，就再也不需要输入什么访问令牌，直接就可以进入」。
+
+    真出过这个 bug：页面启动时是
+        `if (!S.token) { showLogin(); return; }`
+    —— 完全没看服务端返回的 `auth_required`。于是即使 core 在回环上已经放行，
+    打开页面仍然被要求输令牌，看起来那个改动从没生效过。
+    这里直接读页面源码钉住修复后的形状（JS 行为由 scripts/ui-check.cjs 覆盖）。
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    html = (root / "core/src/zw_core/web/index.html").read_text(encoding="utf-8")
+
+    # 必须存在"先 loadMeta、再看 auth_required"的分支
+    assert "auth_required === false" in html, "页面没有按 auth_required 决定是否弹登录框"
+    # `if (!S.token)` 分支里不能"直接 showLogin 就 return"
+    m = re.search(r"if \(!S\.token\) \{(.{0,400}?)\n  \}", html, re.S)
+    assert m, "找不到 !S.token 的启动分支"
+    body = m.group(1)
+    assert "loadMeta()" in body, f"没先问 meta 就弹登录框：{body[:200]}"
+    assert "hideLogin()" in body, "auth_required=false 时没有隐藏登录层"

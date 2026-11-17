@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## 0.7.23 — 2026-11-17
+
+**修掉"本机打开客户端控制台仍然要输令牌"——用户早就抱怨过的那件事。**
+
+### 真相：接口放行了，页面还在拦
+
+0.7.3 我改了鉴权模型（回环保送、远程凭机器码），接口层实测：
+`GET /api/v1/meta` → `auth_required: false`、无令牌也能拿数据。
+
+**但页面启动时是这么写的**：
+
+```js
+if (!S.token) { showLogin(''); renderView(); return; }   // ← 本地没令牌就无条件弹框
+```
+
+它**根本没看**服务端返回的 `auth_required`。所以即使接口已经放行，
+你一打开 `http://127.0.0.1:8730/` 还是被要求输令牌 —— 那个改动等于没生效。
+我之前只验证了 API、没验证**页面**，这个疏漏正是用户原话抱怨的现象。
+
+### 修法
+
+启动顺序改成「先问 meta，再决定要不要弹」：
+
+```js
+if (!S.token) {
+  const okMeta = await loadMeta();
+  if (S.meta && S.meta.auth_required === false) {   // 本机回环 / 没配令牌
+    hideLogin();
+    await startData();                              // 直接进
+    return;
+  }
+  showLogin('');
+  renderView();
+  return;
+}
+```
+
+### 验证
+
+真浏览器实测（无头 Chromium，本机 8797）：
+
+```
+登录层显示: false | localStorage 有令牌: false
+页面有内容: true
+导航可见: true
+页面报错: none
+```
+
+客户端控制台 UI 验收 `scripts/ui-check.cjs`：**23 项全过 / 0 失败**
+（原来卡在登录层上，脚本自己都点不动 —— 产品坏了，不是脚本坏了）。
+
+新增 2 条断言把这件事钉死：
+
+- 「本机打开不弹登录层（auth_required=false 时直接进）」
+- 「本机免令牌时不需要往 localStorage 写令牌」
+
+另有 Python 侧 `test_client_console_page_skips_login_when_auth_not_required`
+直接读页面源码，保证 `!S.token` 分支里有 `loadMeta()` 与 `hideLogin()`，
+防止以后又被改回去。
+
+### 测试
+
+549 → **550 项**。
+
 ## 0.7.22 — 2026-11-17
 
 **给控制台的「代理」视图补上 UI 验收，并修掉 3 条一直在误报的断言。**
