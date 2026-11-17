@@ -51,10 +51,20 @@ def _run(s, cmd, timeout=8.0):
 
 
 # ── 会话引擎 ──────────────────────────────────────────
+def _meaningful(out: str) -> list[str]:
+    """去掉空行与纯空白行。
+
+    Windows 的 cmd 在管道模式下每跑完一条命令都会打一次提示符；
+    我们把它设成 `$_`（换行），所以输出里会多出空行 —— 那是终端界面上
+    正常的空行，不是"垃圾"，断言时忽略掉。
+    """
+    return [ln for ln in out.replace("\r", "").split("\n") if ln.strip()]
+
+
 def test_session_runs_and_reports_rc(sess):
     out, (rc, cwd, timed_out) = _run(sess, "echo hello")
-    # Windows 的 cmd 会在行尾留一个空格，所以用 strip + in，而不是全等
-    assert out.strip() == "hello", repr(out)
+    # Windows 的 cmd 行尾会多一个空格，所以按"有效行"比较
+    assert _meaningful(out) == ["hello"], repr(out)
     assert rc == 0 and not timed_out
 
 
@@ -298,7 +308,9 @@ def test_windows_session_wrapping_and_env(monkeypatch):
     line = s._wrap("echo hello").decode()
     assert line == f"echo hello\r\necho __ZW{s.token}_%errorlevel%__%CD%__\r\n", line
     assert "!errorlevel!" not in line, "不能依赖延迟展开"
-    assert s._env().get("PROMPT") == "", "PROMPT 必须清空，否则输出里混提示符"
+    # 不能设成空串：cmd 遇到空 PROMPT 会退回默认的 `$P$G`（`C:\path>`）。
+    # `$_` 是"换行"，提示符变成一次空行，界面上只是自然分隔。
+    assert s._env().get("PROMPT") == "$_", "PROMPT 必须给 $_，否则输出里混路径提示符"
     argv = [a.lower() for a in S._shell_argv()]
     assert "/v:on" not in argv, "不再需要延迟展开"
 

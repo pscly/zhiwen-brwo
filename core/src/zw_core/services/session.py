@@ -184,10 +184,13 @@ class ShellSession:
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         if sys.platform == "win32":
-            # **必须清空 PROMPT**：cmd 在管道模式下仍然会把提示符打到 stdout
+            # **必须处理 PROMPT**：cmd 在管道模式下仍会把提示符打到 stdout
             # （`C:\Users\xxx>`），每跑完一条命令就多一行垃圾。
-            # `/q` 只关命令回显，管不了提示符。清空后输出才是干净的命令结果。
-            env["PROMPT"] = ""
+            #
+            # 坑：把 PROMPT 设成**空字符串无效** —— cmd 会退回默认的 `$P$G`
+            # （也就是 `C:\path>`）。必须给一个"输出无害"的值：
+            # `$_` 是"换行"，于是提示符变成一次空行，界面上只是自然的分隔。
+            env["PROMPT"] = "$_"
         return env
 
     def close(self) -> None:

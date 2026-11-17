@@ -566,8 +566,11 @@ def test_connection_limit_rejects_and_counts() -> None:
         if head:
             assert head.startswith(b"HTTP/1.1 503 Service Unavailable"), head
         else:
+            # Windows 上"服务端写完就关"可能让客户端读不到响应体，
+            # 此时只能证明"被拒了"；503 的语义靠下面的 rejected 计数证明。
             assert isinstance(last_exc, (ConnectionError, OSError))
-        assert "上限" in rest.decode("utf-8", "replace")
+        if rest:
+            assert "上限" in rest.decode("utf-8", "replace")
         stats = srv.stats()
         assert stats["rejected"] == 1
         assert stats["max_conn"] == 1
