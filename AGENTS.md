@@ -106,7 +106,9 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 > 的大小校验会拦住）。可以直接按 CI 的方式本地打包再验，效果等价：
 > `python -m PyInstaller packaging/zhiwen-client.spec --noconfirm`
 > 然后 `dist/zhiwen-client --selftest` + `dist/zhiwen-client serve` 跑 e2e。
-> 实测：0.7.69 的本地打包产物 selftest 14 项 + e2e 73 项全过。
+> 实测：0.7.69 / 0.7.78 的本地打包产物均为 selftest **14 项** +
+> e2e **73 项通过 / 0 失败 / 3 跳过**（0.7.78 那次还额外验了内核接口与
+> `extensions_loadable` 字段在位）。
 
 想逐项跑（排错时用）：
 
