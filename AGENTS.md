@@ -99,6 +99,12 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 > 第二个别省。`check-all.sh` 验的是源码，用户拿到的是 Releases 上的二进制 ——
 > 打包环节出问题（缺库、glibc 版本、路径写错）源码测试完全看不出来。
 > 历史上踩过：ubuntu-latest 打出来的包要求 GLIBC_2.42，在 Ubuntu 22 上直接跑不起来。
+>
+> **下载不通时怎么办**：GitHub 对这台机器的下载经常限速/截断（`verify-release.sh`
+> 的大小校验会拦住）。可以直接按 CI 的方式本地打包再验，效果等价：
+> `python -m PyInstaller packaging/zhiwen-client.spec --noconfirm`
+> 然后 `dist/zhiwen-client --selftest` + `dist/zhiwen-client serve` 跑 e2e。
+> 实测：0.7.69 的本地打包产物 selftest 14 项 + e2e 73 项全过。
 
 想逐项跑（排错时用）：
 
