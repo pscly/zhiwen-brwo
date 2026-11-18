@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## 0.7.61 — 2026-11-18
+
+**云电脑实机跑通了「商店装扩展 → 建包 → 默认带上」整条链，顺带发现详情页看不到"扩展到底加载没"。**
+
+### 实机验证（云电脑 Windows + Chrome 157，机器码访问）
+
+这轮把被卡了六十多轮的那条链路走完了。关键突破：**远端 shell 会把 `"` 转义成 `\"`**，
+于是命令行里的 `&` 失去保护被 cmd 当分隔符 —— 带查询串的商店 URL 必然被截断。
+改用 PowerShell 的 `-EncodedCommand`（base64 UTF-16LE）绕开引号问题后一次成功：
+
+```
+下载 CRX（经 mihomo 代理）      → 164717 字节   ← 与 cookiemanager 真实大小一致
+POST /extensions/install {path} → ok
+   slug: cookiemanager---cookie-editor, version: 0.2.7
+   pack_id: 20a58e339cec, pack_created: true, is_default: true
+POST /profiles {name: …}        → extensions: ["cookiemanager---cookie-editor"]
+```
+
+**「以后创建浏览器时，可以默认就把这些插件的数据都带上」= 真机验证通过。**
+
+顺带确认了那台机器的代理：`127.0.0.1:21080` 是 **verge-mihomo**（Clash Verge 内核），
+`-x http://127.0.0.1:21080` 到 `chromewebstore.google.com` 返回 200。
+
+### 发现并修掉：环境详情里看不到"扩展加载没"
+
+`extensions_active` 以前只在 `POST /packs/apply` 的响应里出现；
+`GET /profiles/{id}`（用户点开环境看的就是它）是 `None`。于是：
+
+- 实机这次看到的确定结论是 `extensions_active=False`（Chrome 157 忽略
+  `--load-extension`），note 写得很清楚 —— 但**点过「应用扩展包」之后再看就没了**
+- 用户只能靠记忆，或者再去点一次「应用」
+
+修：`get_profile()` 在环境绑了扩展时附带 `extensions_active` / `extensions_note`，
+用**探针缓存**（未知内核才真跑一次探针，不启动浏览器），所以给详情加这个字段
+没有额外开销。
+
+### 清理
+
+云电脑上那个测试环境（`扩展自检-可删`）已 stop + `purge` 删除，
+现在只剩用户自己的 4 个（`tests5` / `3` / `2` / `1`）。
+装好的 cookiemanager 与它的扩展包**保留**（那正是用户要的效果）。
+
+### 测试
+
+593 → **594 项**（`test_profile_detail_reports_extensions_active`）。
+八项门槛全绿（594 / 34 / 73 / 13 / 21 / 81 / 23 / 32）。
+
 ## 0.7.60 — 2026-11-18
 
 **云电脑终于上线了 —— 实机验证暴露一个自相矛盾：提示让你"配好代理"，但根本没有配的地方。**

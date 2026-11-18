@@ -128,7 +128,26 @@ def get_profile(ref: str) -> dict[str, Any]:
         row = c.execute("SELECT * FROM profiles WHERE id=? OR name=?", (ref, ref)).fetchone()
     if row is None:
         raise ProfileError("PROFILE_NOT_FOUND", f"找不到环境：{ref}", status=404)
-    return row_to_dict(row)
+    out = row_to_dict(row)
+    # 环境绑了扩展时，顺带给出"这些扩展在当前内核上**能不能真的被加载**"。
+    #
+    # 以前这个判断只在 `POST /packs/apply` 的响应里出现，而 `GET /profiles/{id}`
+    # （用户点开环境时看的就是它）是 None —— 于是"插件到底加载没"只能在
+    # 点过「应用扩展包」的那一刻看到，之后再看就没有了。
+    # 实机验证过：官方 Chrome 157 判 False（忽略 --load-extension），
+    # 用户需要能随时看到这个结论，而不是靠记忆。
+    #
+    # 用探针结果（`engines.extensions_loadable` 有缓存，未知内核才真跑一次），
+    # **不启动浏览器**，所以给列表/详情加这个字段没有额外开销。
+    if out.get("extensions"):
+        try:
+            ok, note = engines.extensions_loadable(str(out.get("engine_path") or ""))
+            out["extensions_active"] = bool(ok)
+            out["extensions_note"] = note
+        except Exception as exc:  # noqa: BLE001 —— 判断失败不能拖垮"看详情"
+            out["extensions_active"] = None
+            out["extensions_note"] = f"判断扩展能否被加载时出错：{type(exc).__name__}: {exc}"
+    return out
 
 
 def groups() -> list[dict[str, Any]]:

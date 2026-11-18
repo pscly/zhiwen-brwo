@@ -814,3 +814,36 @@ def test_business_errors_are_structured_not_500(client):
         assert d.get("code"), f"{path} 没有错误码：{d}"
         if expect_code:
             assert d["code"] == expect_code, f"{path} 错误码是 {d['code']}，期望 {expect_code}"
+
+
+def test_profile_detail_reports_extensions_active(client):
+    """环境详情里要能随时看到"扩展到底加载没"。
+
+    以前这个判断只出现在 `POST /packs/apply` 的响应里；`GET /profiles/{id}`
+    （用户点开环境看的就是它）是 None。于是"插件加载没"只在点过「应用扩展包」
+    的那一刻可见，之后再看就没有了。
+
+    实机验证（云电脑 Chrome 157）：`extensions_active=False`，
+    note 说明"这个内核忽略 --load-extension"。用户需要随时可查，而不是靠记忆。
+    """
+    import json as _json
+    import os as _os
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    with open(_os.path.join(d, "manifest.json"), "w") as f:
+        _json.dump({"manifest_version": 3, "name": "DetailExt", "version": "1.0.0"}, f)
+    with open(_os.path.join(d, "sw.js"), "w") as f:
+        f.write("//x")
+
+    pid_pack = client.post("/api/v1/packs/import",
+                           json={"path": d, "name": "详情包"}, headers=H).json()["data"]["id"]
+    pid = client.post("/api/v1/profiles", json={"name": "详情自检"}, headers=H).json()["data"]["id"]
+    client.post(f"/api/v1/profiles/{pid}/packs/apply",
+                json={"pack_ids": [pid_pack]}, headers=H)
+
+    d2 = client.get(f"/api/v1/profiles/{pid}", headers=H).json()["data"]
+    assert d2.get("extensions"), d2
+    # 必须是"有值"（True/False 都行），不能是 None
+    assert d2.get("extensions_active") is not None, d2.get("extensions_active")
+    assert isinstance(d2.get("extensions_note"), str), d2.get("extensions_note")
