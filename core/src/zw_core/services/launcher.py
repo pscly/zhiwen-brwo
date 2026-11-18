@@ -114,7 +114,61 @@ def compose_start_urls(profile: dict[str, Any]) -> list[str]:
         urls.extend(remembered_urls(profile))
     if s.open_detect_on_start:
         urls.extend(detect_urls(profile))
-    return _dedupe(urls)
+    return _dedupe(_collapse_same_site(urls))
+
+
+def _collapse_same_site(urls: list[str]) -> list[str]:
+    """同一站点只保留一个入口，**保留先出现的那个**。
+
+    ## 为什么光靠 `_dedupe` 不够（云电脑实测）
+
+    配置里的检测页是 `https://ip123.in/`，而它打开后会自动**跳到** `https://ip123.in/zh/`。
+    停止时抓到的是跳转后的 `/zh/`，下次启动又把配置里的 `/` 加回来 —— 两个串不相等，
+    `_dedupe` 不会合并，用户就看到**两条几乎一样的标签**：
+
+        https://ip123.in/zh/      ← 上次记住的
+        https://ip123.in/         ← 配置里的检测页（又会跳到 /zh/）
+
+    修法：按「协议+主机」归一，同一站点只留第一个（恢复的优先于检测页）。
+    只在**同一个 host** 内合并，不会把不同站点误伤掉。
+    """
+    from urllib.parse import urlsplit
+
+    out: list[str] = []
+    seen_hosts: set[str] = set()
+    for u in urls:
+        try:
+            parts = urlsplit(str(u))
+        except ValueError:
+            out.append(u)
+            continue
+        netloc = (parts.netloc or "").lower()
+        if not netloc:
+            out.append(u)
+            continue
+        host = f"{(parts.scheme or '').lower()}://{netloc}"
+        # **只处理"根路径"那一条**。
+        #
+        # 为什么不能一律"同 host 只留一个"：同一站点的不同页面是合理需求
+        # （用户可能同时开着 example.com/a 和 example.com/b）。第一版就是这么写的，
+        # 直接把既有测试 `test_compose_start_urls_restores_then_detects` 弄红了 ——
+        # 那条测试用 `/a` 和 `/b` 两个不同页面，被误合并成一个。
+        #
+        # 真正要解决的只是：检测页配的是站点根（如 `https://ip123.in/`），
+        # 它打开后会跳转到 `/zh/`，而那次跳转后的地址又被"记住标签"记下来，
+        # 下次启动就变成「记住的 /zh/」+「配置的 /」两条几乎一样的标签。
+        # 所以：**根路径的条目，若同 host 已经有别的条目，就跳过它。**
+        path = (parts.path or "").strip()
+        is_root = path in ("", "/")
+        if is_root and netloc in {h.split("://", 1)[-1] for h in seen_hosts}:
+            logger.info("同站点已有具体页面，跳过根路径重复入口：%s", u)
+            continue
+        if host in seen_hosts and is_root:
+            logger.info("同站点已有入口，跳过根路径重复：%s", u)
+            continue
+        seen_hosts.add(host)
+        out.append(u)
+    return out
 
 
 # ── 关闭时抓标签页 ────────────────────────────────────────

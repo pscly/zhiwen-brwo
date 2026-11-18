@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   595 项单元测试（含真起 hub 的同步集成测试）
+tests/   596 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由 `fingerprint-chromium`（`--fingerprint=<种子>`）或系统 Chrome 提供。
@@ -103,7 +103,7 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 想逐项跑（排错时用）：
 
 ```bash
-.venv/bin/python -m pytest tests -q            # 595 passed, 2 skipped
+.venv/bin/python -m pytest tests -q            # 596 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 21 通过 / 0 失败（网关接管）
@@ -133,8 +133,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- 595 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.62** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- 596 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
+- hub **0.7.64** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
@@ -142,6 +142,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 - 坏代理串被拒并给出可读原因（`66.80.12 0.66` 的典型笔误）
 - 带认证代理走本机中继（`--proxy-server=http://127.0.0.1:<port>`，中继有真实连接）
 - 启动打开检测页、停止记住标签、再启动恢复且不重复
+  （真机复验：初始 3 页 → 启动后 CDP 读到 3 页（ip123 跳到 /zh/）→ 停止记 3 条 →
+  再启动**曾出现 4 页重复**，已修；修法与边界见 CHANGELOG 0.7.64）
 - 扩展探针在该机器 Chrome 157 上判 `extensions_active=false`（官方内核不给加载）
 - 代理库上行/下行双向同步（云电脑加的传到 3.5；3.5 加的拉回云电脑）
 - **商店装扩展整条链**（经 mihomo 下载 CRX 164717B → 装 → 建包 → 设默认 → 新建环境自动带上）

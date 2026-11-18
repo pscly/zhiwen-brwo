@@ -1,5 +1,87 @@
 # CHANGELOG
 
+## 0.7.64 — 2026-11-18
+
+**云电脑实测：再启动后检测页出现两条一样的标签 —— 站点跳转导致的重复入口。**
+
+### 实机过程（v0.7.57，云电脑）
+
+**① 新建环境 → 初始标签页正确**
+
+```
+https://browserleaks.com/ip
+https://ip123.in/
+https://abrahamjuliot.github.io/creepjs/
+```
+
+**② 启动 → 浏览器里确实开了 3 个页面**（通过它本机的 CDP 读 `/json/list`）
+
+```
+https://browserleaks.com/ip
+https://abrahamjuliot.github.io/creepjs/
+https://ip123.in/zh/          ← 注意：自动跳转成 /zh/ 了
+```
+
+**③ 停止 → 记住 3 条，且记的是跳转后的真实地址**
+
+```
+remembered: {'saved': 3, 'urls': [...ip123.in/zh/, ...]}
+```
+
+**④ 再启动 → 4 个页面，`ip123.in/zh/` 出现两次** ← **问题在这**
+
+```
+browserleaks.com/ip
+ip123.in/zh/
+creepjs/
+ip123.in/zh/     ← 重复
+```
+
+### 根因
+
+配置里检测页写的是 `https://ip123.in/`，而它打开后会**跳到** `/zh/`。
+停止时抓到的是 `/zh/`，下次启动又把配置里的 `/` 加回来。
+两个**字符串不同**，`_dedupe()` 的 `rstrip("/")` 归一合并不了 → 两条几乎一样的标签。
+
+正好撞在用户那句要求上：「默认先打开上次被关闭的网址，然后再加一个检测网址」——
+加是加了，但加出了重复。
+
+### 修法（第一次改错了，记下来）
+
+`compose_start_urls()` 里加 `_collapse_same_site()`。
+
+**第一版是"同 host 只留一个"** → 立刻把既有测试
+`test_compose_start_urls_restores_then_detects` 弄红了：
+
+```
+assert ['https://example.com/a', 'https://example.com/b'] ... "恢复的标签必须在最前面"
+```
+
+那条测试用同站点的 `/a` 和 `/b` 两个**不同页面**，被我一刀切合并了。
+**同一站点的不同页面是合理需求**（用户可能同时开着好几个），不该合并。
+
+**收紧后的规则：只跳过"根路径"那条**
+
+- 根路径（`/` 或空）且同 host 已有别的条目 → 跳过它（就是这次的问题）
+- 非根路径（`/a`、`/b`、`/zh/`）→ **一律保留**，不管同不同站
+
+三个用例验证：
+
+```
+['ip123.in/zh/', 'ip123.in/', 'browserleaks…'] → ['ip123.in/zh/', 'browserleaks…']   ✅ 去重
+['example.com/a', 'example.com/b']             → 两条都留                     ✅ 不误伤
+['ip123.in/', 'browserleaks…']                 → 两条都留                     ✅ 单独根路径不算重复
+```
+
+### 清理
+
+测试环境 `检测页自检-可删` 已 stop + purge 删除；用户的环境回到自己的 4 个。
+
+### 测试
+
+595 → **596 项**（`test_same_site_detect_page_does_not_duplicate_restored_url`）。
+八项门槛全绿（596 / 34 / 73 / 13 / 21 / 81 / 23 / 32）。
+
 ## 0.7.63 — 2026-11-18
 
 **云电脑真机验证「创建浏览器之后还能改代理」——含改完是否真的生效。**

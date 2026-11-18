@@ -639,3 +639,32 @@ def test_manifest_with_utf8_bom_is_recognized(tmp_path):
     got = packsvc._read_manifest(d)
     assert got is not None, "带 BOM 的 manifest 被当成读不出来（已被静默跳过）"
     assert got.get("name") == "BomExt", got
+
+
+def test_same_site_detect_page_does_not_duplicate_restored_url(monkeypatch):
+    """同一站点的检测页不能和"上次记住的地址"重复。
+
+    云电脑实测：配置里的检测页是 `https://ip123.in/`，它打开后会跳到
+    `https://ip123.in/zh/`。停止时抓到 `/zh/`，下次启动又把配置里的 `/` 加回来 ——
+    两个串不相等，`_dedupe` 不合并，用户看到**两条几乎一样的标签**。
+
+    修法：按「协议+主机」归一并保留先出现的（恢复的优先于检测页）。
+    """
+    from zw_core import config
+    from zw_core.services import launcher
+
+    monkeypatch.setenv("ZW_RESTORE_TABS", "true")
+    monkeypatch.setenv("ZW_OPEN_DETECT_ON_START", "true")
+    monkeypatch.setenv("ZW_DETECT_URLS", "https://ip123.in/,https://browserleaks.com/ip")
+    config.reset_settings()
+
+    prof = {"start_urls": ["https://ip123.in/zh/"]}
+    urls = launcher.compose_start_urls(prof)
+    hosts = [u.split("/")[2] for u in urls]
+    assert hosts.count("ip123.in") == 1, urls
+    assert "https://ip123.in/zh/" in urls, urls      # 恢复的那条优先保留
+    assert "https://browserleaks.com/ip" in urls, urls
+    monkeypatch.delenv("ZW_RESTORE_TABS", raising=False)
+    monkeypatch.delenv("ZW_OPEN_DETECT_ON_START", raising=False)
+    monkeypatch.delenv("ZW_DETECT_URLS", raising=False)
+    config.reset_settings()
