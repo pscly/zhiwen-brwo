@@ -66,7 +66,10 @@ def _ws(ref: str, start: bool = True) -> str:
 # ── 环境 ──────────────────────────────────────────────────
 @tool(
     "zw_list_profiles",
-    "列出本机全部浏览器环境（含状态、指纹种子、同步版本、分组）。开始任何操作前先调它。",
+    "列出本机全部浏览器环境（含状态、指纹种子、同步版本、分组、代理）。"
+    "代理看 `proxy_info`：绑了代理库时 `proxy` 字段是空的（库是唯一真相），"
+    "`proxy_info.source=library` 且 `proxy_info.upstream` 才是实际地址；"
+    "`source=missing` 表示库条目已被删。开始任何操作前先调它。",
     _obj({
         "state": {"type": "string", "description": "只看某个状态：running/stopped/crashed/failed"},
         "group": {"type": "string", "description": "只看某个分组"},
