@@ -68,6 +68,18 @@ zw engine install
 而风险实在（那份 config 里有策略组、直连规则、注入的自建节点）。已在文档里说明，
 需要正式并入时再做。
 
+### 一个只在 Windows 上炸的测试（CI 抓到）
+
+`test_ensure_full_pipeline_over_real_http` 里我写死了 `chrome`：
+
+```
+E  EngineSourceError: 解包后没找到 chrome.exe，这个包可能不是可用的内核
+```
+
+Windows 上可执行文件是 `chrome.exe`。Linux/macOS 全绿、Windows CI 红 ——
+**测试的平台假设错了**，不是产品问题。已按 `os.name` 取文件名，
+并把"可执行位"那条断言在 Windows 上跳过（没有 POSIX 可执行位概念）。
+
 ### 测试
 
 611 → **618 项**（`tests/test_netproxy.py` 6 项 + 其它）。

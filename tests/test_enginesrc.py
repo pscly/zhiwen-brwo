@@ -222,10 +222,17 @@ def test_ensure_full_pipeline_over_real_http(tmp_path, monkeypatch):
     from zw_core.services import enginesrc
 
     # 造一个"最小可用内核"：真的能跑 `--version`
+    #
+    # **文件名必须按平台取**：Windows 上是 `chrome.exe`，POSIX 上是 `chrome`。
+    # 第一版写死 `chrome`，Linux/macOS 绿、Windows CI 红
+    # （`解包后没找到 chrome.exe`）—— 这是测试的平台假设错了，不是产品问题。
+    is_win = os.name == "nt"
+    bin_name = "chrome.exe" if is_win else "chrome"
+    script = (b"@echo off\r\necho Chromium 999.0.1.2\r\n" if is_win
+              else b"#!/bin/sh\necho 'Chromium 999.0.1.2'\n")
     payload = io.BytesIO()
     with zipfile.ZipFile(payload, "w") as zf:
-        zf.writestr("fake-chromium/chrome",
-                    "#!/bin/sh\necho 'Chromium 999.0.1.2'\n")
+        zf.writestr(f"fake-chromium/{bin_name}", script)
     blob = payload.getvalue()
     served = tmp_path / "eng.zip"
     served.write_bytes(blob)
@@ -257,9 +264,11 @@ def test_ensure_full_pipeline_over_real_http(tmp_path, monkeypatch):
         binp = Path(res["path"])
         assert binp.is_file(), res
         assert "fake-999" in str(binp), res
-        # 可执行位必须被补上（否则解包出来的脚本跑不了）
-        assert os.access(binp, os.X_OK), "解包后没有可执行权限"
-        assert binp.stat().st_mode & stat.S_IXUSR
+        # 可执行位必须被补上（否则解包出来的脚本跑不了）。
+        # Windows 没有 POSIX 可执行位概念，跳过这两条。
+        if os.name != "nt":
+            assert os.access(binp, os.X_OK), "解包后没有可执行权限"
+            assert binp.stat().st_mode & stat.S_IXUSR
 
         prog = enginesrc.progress()
         assert prog["state"] == "done", prog
