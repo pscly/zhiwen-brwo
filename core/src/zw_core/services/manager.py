@@ -607,6 +607,19 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
             status=409,
         ) from exc
 
+    # **先校验代理，再找内核**。
+    #
+    # 顺序有讲究：代理串写错（`socks5://66.80.12 0.66:20000` 中间多空格）是
+    # 用户当场能改的参数问题，而"这台机器还没下好内核"是环境问题。
+    # 以前内核检查在前，于是 policy=ungoogled 之后，坏代理会被
+    # 「没有找到 ungoogled 内核」盖掉 —— 用户去查内核，其实改代理就好。
+    # （CI 上 `test_bad_proxy_blocks_start_with_readable_error` 抓到的就是这个。）
+    try:
+        pre_row = _prepare_launch(p)
+    except proxysvc.ProxyError as exc:
+        lease.release()
+        raise ProfileError(exc.code, exc.message, status=422) from exc
+
     try:
         chrome = engines.find_chrome(s)
     except engines.EngineError as exc:
@@ -620,12 +633,8 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
         logger.info("清理 %s 的残留锁文件：%s", p["name"], locks)
 
     port = pool().allocate(p["id"])
-    try:
-        row = _prepare_launch(p)
-    except proxysvc.ProxyError as exc:
-        pool().release(port)
-        lease.release()
-        raise ProfileError(exc.code, exc.message, status=422) from exc
+    # 上面已经校验过一遍代理（为了报错顺序），这里复用结果，避免重复解析。
+    row = pre_row
 
     if urls:
         row["start_urls"] = urls

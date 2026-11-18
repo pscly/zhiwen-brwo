@@ -75,8 +75,23 @@ GET /api/v1/engine → path=…/ungoogled-chromium-150/chrome
 
 ### 自己踩的坑
 
-`_engine_version()` 第一版直接 `subprocess.run` —— 被 `test_proc_hidden` 挡住：
-Windows 上会弹出黑色控制台窗口。改成 `proc.run_hidden`。
+1. `_engine_version()` 第一版直接 `subprocess.run` —— 被 `test_proc_hidden` 挡住：
+   Windows 上会弹出黑色控制台窗口。改成 `proc.run_hidden`。
+
+2. **CI 红了，根因是「内核检查抢在参数校验前面」**。`policy=ungoogled` 之后，
+   启动一个**代理串写错**的环境时，报出来的是「没有找到 ungoogled 内核」，
+   而不是「代理串里有空格」——用户会去查内核，其实改代理就好。
+
+   CI 上暴露这件事的是 `test_bad_proxy_blocks_start_with_readable_error`：
+
+   ```
+   AssertionError: assert ('空格' in '没有找到可用的 ungoogled-chromium 内核…'
+                           or 'IP' in '没有找到可用的 ungoogled-chromium 内核…')
+   ```
+
+   修法不是改断言，而是**调整顺序**：先校验代理（用户当场能改的参数），
+   再找内核（环境问题）。这类"两个错误都能报，但先后顺序决定用户往哪查"的问题，
+   只有跑全量才会露出来。
 
 ### 测试
 
