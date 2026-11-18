@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## 0.7.87 — 2026-11-19
+
+**给 AI 的自描述清单漏了 13 条接口 —— 包括我刚加的「内核」和「扫描本机」。**
+
+### 这是什么问题
+
+`GET /api/v1/ai/manifest` 是这个项目特意为 AI 设计的：AI 读完它就知道全部能力、
+调用顺序、踩坑提示，不用先读文档。`AGENTS.md` 也明确规定
+"加一个接口 → 在 `/api/v1/ai/manifest` 的端点清单里补一条"。
+
+但我这几轮加 `GET /api/v1/engine`、`POST /api/v1/engine/install`、
+`GET /api/v1/packs/scan-browsers` 时，**一条都没补进去**。
+
+后果很具体：AI 读这份清单会不知道"内核可以自己装"、"能扫描本机浏览器导入插件"，
+于是要么用别的方式硬凑，要么直接告诉用户"做不到"。
+
+### 补的时候发现缺的不止我加的那三条
+
+写了个测试**真的调接口**拿返回，再和 FastAPI 注册的路由表逐一比对。结果：
+
+```
+缺 13 条：
+  /engine  /engine/install  /packs/scan-browsers
+  /maintenance/doctor  /maintenance/trim  /maintenance/reap-orphans  /maintenance/cleanup
+  /packs/{id}  /profiles/{ref}/extensions/{slug}  /extensions/{slug}/{version}
+  /page/targets  /page/text
+  /sync/state  /sync/{ref}  /sync/{ref}/history  /term
+```
+
+其中 `/page/targets`、`/page/text` 是"不进 CDP 也能读页面"的常用能力，
+`/maintenance/*` 是运维接口 —— 都不是边缘功能，只是清单一直没跟上。
+
+### 新测试
+
+`test_ai_manifest_lists_all_public_routes`：真的 `TestClient` 调一次接口，
+把 `端点清单` 与 `app.routes` 比对，缺一条就红并列出名字。
+
+> 第一版我是用正则去解析源码里的清单文本，结果被"源码里同时有路由注册语句和
+> 清单文本"干扰，扫出来全是误报。改成调真接口可靠得多。
+
+比对时把 `{id}` / `{ref}` 这类参数归一成 `{}`，避免同一路由两种写法被算成缺。
+
+### 测试
+
+640 → **641 项**。九项门槛全绿（641 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 37）。
+
 ## 0.7.86 — 2026-11-19
 
 **把「文档里的配置项」与「代码真读的变量」做了一次机械对账，抓出 3 处。**

@@ -404,3 +404,55 @@ def test_port_pool_defaults_are_consistent_in_docs():
     s = Settings()
     assert str(s.port_pool_start) in vals, f"文档默认值与代码不符：文档={vals} 代码={s.port_pool_start}"
     assert str(s.port_pool_end) in vals, f"文档默认值与代码不符：文档={vals} 代码={s.port_pool_end}"
+
+
+def test_ai_manifest_lists_all_public_routes(monkeypatch):
+    """`/api/v1/ai/manifest` 的端点清单必须覆盖所有公开路由。
+
+    AGENTS.md 写着"加一个接口 → 在 `/api/v1/ai/manifest` 的端点清单里补一条"。
+    这是**给 AI 用的自描述清单** —— AI 读完它就知道全部能力。漏一条，AI 就
+    不知道那个能力存在，会用别的方式硬凑或者干脆说"做不到"。
+
+    实测漏过：`/engine`、`/engine/install`、`/packs/scan-browsers` 三条
+    （都是后来加的），AI 因此不知道"内核可以自己装"、"能扫描本机浏览器导入插件"。
+
+    做法：**真的调一次接口**拿返回，再和 FastAPI 里注册的路由表比对 ——
+    比正则解析源码可靠（源码里同时有注册语句和清单文本，容易互相干扰）。
+    """
+    import re
+
+    from fastapi.testclient import TestClient
+
+    import zw_core.api as api_mod
+
+    app = api_mod.build_app() if hasattr(api_mod, "build_app") else None
+    if app is None:
+        pytest.skip("拿不到 app 工厂")
+    # 鉴权只认 `admin_token` 与 `device_id` 两处（见 api.py 顶部说明）
+    TOKEN = "zw_manifest_audit_token"
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", TOKEN)
+    from zw_core import config as _cfg
+
+    _cfg.reset_settings()
+
+    # 必须带令牌：没配凭据时非回环请求一律拒绝（这是设计，不是 bug）
+    with TestClient(app, headers={"Authorization": f"Bearer {TOKEN}"}) as c:
+        r = c.get("/api/v1/ai/manifest")
+        assert r.status_code == 200, r.text[:200]
+        data = (r.json() or {}).get("data") or {}
+        listed = data.get("端点清单") or []
+        assert listed, "manifest 里没有 端点清单"
+
+    norm = lambda x: re.sub(r"\{[^}]+\}", "{}", str(x)).rstrip("/")
+    listed_paths = {norm(x.get("path")) for x in listed}
+
+    real = set()
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if path.startswith("/api/v1"):
+            real.add(norm(path))
+
+    missing = sorted(real - listed_paths)
+    assert not missing, (
+        "这些路由没写进 ai/manifest 的端点清单：\n  " + "\n  ".join(missing)
+    )
