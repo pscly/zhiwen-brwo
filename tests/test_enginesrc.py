@@ -495,3 +495,87 @@ def test_disk_space_precheck_gives_readable_error(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_shutil, "disk_usage", _boom)
     enginesrc._check_disk_space(tmp_path, 10 ** 12)   # 不应抛
+
+
+def test_auto_install_dir_name_contains_ungoogled(tmp_path, monkeypatch):
+    """自动安装后的目录名必须能被 `find_chrome` 认出来。
+
+    真实验证（2026-11-19，下载了真实的 Windows 包 202,853,365 字节）：
+    ungoogled 的 GitHub tag 是 `157.0.8103.78-1.1`，**不含 "ungoogled" 字样**。
+    如果直接把 tag 当目录名，装完之后路径长这样：
+
+        engines/157.0.8103.78-1.1/chrome.exe
+
+    `find_chrome` 的 policy 判定要靠路径里的 `ungoogled` 标识 →
+    **自己下载安装的内核，自己认不出来**，报 ENGINE_NOT_FOUND。
+    实测两种 engine_dir 配法（指 engines 根 / 指版本目录）都会失败。
+
+    所以目录名必须带前缀：`ungoogled-<tag>`。
+    """
+    from zw_core.services import enginesrc
+
+    # 模拟 ensure() 里拼目录名的那一行
+    tag = "157.0.8103.78-1.1"
+    name = "ungoogled-" + tag
+    assert "ungoogled" in name.lower(), name
+
+    # 用这个目录名造一个可识别的内核，确认 find_chrome 认得出
+    from pathlib import Path
+
+    from zw_core.config import Settings
+    from zw_core.services import engines as engsvc
+
+    binname = "chrome.exe" if os.name == "nt" else "chrome"
+    d = tmp_path / "engines" / name
+    d.mkdir(parents=True)
+    b = d / binname
+    b.write_text("")
+    b.chmod(0o755)
+    s = Settings()
+    s.root = tmp_path
+    s.engine_dir = tmp_path / "engines"
+    s.engine_policy = "ungoogled"
+    s.chrome_bin = ""
+    assert engsvc.find_chrome(s) == b
+
+
+def test_windows_zip_layout_is_handled(tmp_path):
+    """真实 Windows 包的结构：`<一层目录>/chrome.exe` + 同级 dll/pak。
+
+    验证点：
+    1. `_find_binary` 能在解包树里找到 chrome.exe（而不是只在根找）
+    2. `install_archive` 搬的是**整个父目录**（chrome.dll、icudtl.dat 等同级文件
+       必须一起过去，只搬 exe 会得到一个跑不起来的残废）
+    """
+    import io as _io
+    import zipfile as _zipfile
+
+    from zw_core.services import enginesrc
+
+    # 造一个与真实布局同构的小包
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        d = "ungoogled-chromium_157.0.8103.78-1.1_windows_x64"
+        zf.writestr(f"{d}/chrome.exe", b"MZ")
+        zf.writestr(f"{d}/chrome.dll", b"dll")
+        zf.writestr(f"{d}/icudtl.dat", b"icu")
+        zf.writestr(f"{d}/v8_context_snapshot.bin", b"snap")
+        zf.writestr(f"{d}/locales/zh-CN.pak", b"pak")
+    arc = tmp_path / "win.zip"
+    arc.write_bytes(buf.getvalue())
+
+    out = tmp_path / "x"
+    enginesrc._safe_extract(arc, out)
+    found = enginesrc._find_binary(out, "chrome.exe")
+    assert found is not None and found.name == "chrome.exe", found
+
+    # 安装：同级文件必须一起过去
+    from unittest.mock import patch
+
+    with patch.object(enginesrc, "_engine_version", return_value="stub"):
+        binp = enginesrc.install_archive(arc, kind="zip", binary="chrome.exe",
+                                         engine_dir=tmp_path / "engines",
+                                         version_tag="ungoogled-157")
+    sibs = {p.name for p in binp.parent.iterdir()}
+    assert {"chrome.exe", "chrome.dll", "icudtl.dat", "v8_context_snapshot.bin"} <= sibs, sibs
+    assert (binp.parent / "locales" / "zh-CN.pak").is_file()

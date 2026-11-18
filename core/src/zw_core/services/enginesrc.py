@@ -507,7 +507,16 @@ def ensure(force: bool = False, s: Settings | None = None) -> dict[str, Any]:
         try:
             bin_path = install_archive(archive, kind=meta["kind"], binary=meta["binary"],
                                        engine_dir=engine_dir,
-                                       version_tag=str(meta.get("tag") or "ungoogled"))
+                                       # 目录名带上来源标识。
+                                       #
+                                       # 只写 tag（`157.0.8103.78-1.1`）的话，
+                                       # `engines/157.0.8103.78-1.1/chrome.exe` 这条
+                                       # 路径里**没有任何 ungoogled 字样** ——
+                                       # 而 `find_chrome` 的 policy 判定要靠它，
+                                       # 结果就是"自己下载安装的内核，自己认不出来"。
+                                       # 实测（2026-11-19，用真实 Windows 包验证）：
+                                       # 两种 engine_dir 配法都报 ENGINE_NOT_FOUND。
+                                       version_tag="ungoogled-" + str(meta.get("tag") or "chromium"))
         finally:
             archive.unlink(missing_ok=True)
         _say("内核安装完成")

@@ -1,5 +1,64 @@
 # CHANGELOG
 
+## 0.7.80 — 2026-11-19
+
+**自己下载安装的内核，自己认不出来 —— 用真实 Windows 包验出来的。**
+
+### 怎么发现的
+
+一直没验过「自动下载的 Windows 包长什么样」。这次直接用本机代理下了真实的
+`ungoogled-chromium_157.0.8103.78-1.1_windows_x64.zip`（**202,853,365 字节，16.4 秒**），
+用 `install_archive` 真解包真落地，然后检查装完的结构：
+
+```
+落点: engines/157.0.8103.78-1.1/chrome.exe      ← 目录名里没有 "ungoogled"
+同级 25 个文件，chrome.dll / icudtl.dat / v8_context_snapshot.bin 都在
+```
+
+解包与整层搬运都是对的（`_find_binary` 正确跳过根层、搬的是整个父目录）。
+但用这个真实结构去 `find_chrome`：
+
+```
+engine_dir 指向 engines 根        → ENGINE_NOT_FOUND
+engine_dir 指向 157.0.8103.78-1.1 → ENGINE_NOT_FOUND
+```
+
+**自己刚装好的内核，自己认不出来。**
+
+### 根因
+
+自动安装时目录名用的是 GitHub 的 tag（`157.0.8103.78-1.1`），而
+`policy=ungoogled` 的判定要靠路径里的 `ungoogled` 标识（那是区分"官方 Chrome"
+与"去谷歌家族"的唯一线索，官方 Chrome 137 起不加载命令行扩展）。
+
+两者一撞，就是这个结果：装成功、判定失败、启动环境报
+「没有找到可用的 ungoogled-chromium 内核」。
+
+### 修法
+
+目录名改成 `ungoogled-<tag>`：
+
+```
+engines/ungoogled-157.0.8103.78-1.1/chrome.exe
+```
+
+改完两种 `engine_dir` 配法都能正确识别（已用真实目录验证）。
+
+### 顺手确认的两件事（本来就对）
+
+- **整层搬运**：`install_archive` 搬的是 `found.parent`，不是单个 exe。
+  用真实包验证：25 个同级文件 + `locales/` 都跟着过去了 —— 只搬 exe 会得到一个
+  跑不起来的残废。
+- **`_find_binary` 的深度限制**：Windows 包是 `<一层目录>/chrome.exe`（深度 2），
+  在限制内。
+
+### 测试
+
+629 → **631 项**：一条验「自动安装的目录名必须含 ungoogled」，
+一条用与真实布局同构的包验「整层搬运 + 同级文件齐全」。
+
+八项门槛全绿（631 / 34 / 73 / 13 / 23 / 81 / 33 / 37）。
+
 ## 0.7.79 — 2026-11-19
 
 **代理凭据会泄露到日志和接口响应里 —— 修掉，并加测试盯住。**

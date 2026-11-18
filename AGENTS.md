@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   629 项单元测试（含真起 hub 的同步集成测试）
+tests/   631 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由内核提供：`fingerprint-chromium`（`--fingerprint=<种子>`）。
@@ -115,7 +115,7 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 想逐项跑（排错时用）：
 
 ```bash
-.venv/bin/python -m pytest tests -q            # 629 passed, 2 skipped
+.venv/bin/python -m pytest tests -q            # 631 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 23 通过 / 0 失败（网关接管）
@@ -145,8 +145,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- 629 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、33 条客户端控制台断言、37 条客户端 GUI 断言、23 项网关接管 —— 全绿
-- hub **0.7.79** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- 631 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、33 条客户端控制台断言、37 条客户端 GUI 断言、23 项网关接管 —— 全绿
+- hub **0.7.80** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
@@ -184,6 +184,9 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
   自动发现本机 `21080` → 下载 141MB → sha256 校验 → 解包 → `Chromium 156.0.8078.79`
   能加载扩展。实测直连 146KB/8s vs 代理 49.4MB/8s。
 - **代理自动发现**：`7892` 端口开着但代理不通 → 正确跳过（只看端口会挑错）。
+- **Windows 版内核包（真实产物）**：下载 202,853,365 字节的真实 zip，
+  `install_archive` 解包 2.6s、整层落地（25 个同级文件 + locales 齐全）、
+  目录名带 `ungoogled-` 前缀后 `find_chrome` 两种配法都能识别。
 
 **未验证**：指纹能否过 browserscan、fingerprint-chromium 的种子一致性、
 带认证的**真实**上游代理握手（落地代理只能经前置访问，本仓库所在网络连不到）。
