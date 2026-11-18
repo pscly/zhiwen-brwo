@@ -154,6 +154,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 - **本机免令牌（真机回环）**：`curl 127.0.0.1:8730/api/v1/meta` 不带令牌 →
   `auth_required=False`，而 host 是 `0.0.0.0`（按请求判定，不是按配置）
 - **版本落后徽章 / 离线陈旧状态**：在线时状态原样显示；离线时变「上次：…」
+- **三个默认检测页确实对得上用途**（云电脑经代理实测，均 200）：
+  `browserleaks.com/ip`（IP）、`ip123.in`（IP 归属/干净度）、`creepjs`（浏览器指纹）
 
 **未验证**：指纹能否过 browserscan、fingerprint-chromium 的种子一致性、
 带认证的**真实**上游代理握手（落地代理只能经前置访问，本仓库所在网络连不到）、
