@@ -146,6 +146,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 - 代理库上行/下行双向同步（云电脑加的传到 3.5；3.5 加的拉回云电脑）
 - **商店装扩展整条链**（经 mihomo 下载 CRX 164717B → 装 → 建包 → 设默认 → 新建环境自动带上）
 - **从 Chrome 用户数据导入「插件 + 数据」**（`with_data=1`、`data_dir` 落地，真实 Windows 环境）
+- **创建后改代理**（无认证→直连上游 `--proxy-server=socks5://…`；带密码→本机中继
+  `--proxy-server=http://127.0.0.1:<port>` + warnings 如实说明），改完立即生效
 - `extensions_active=False`（Chrome 157 忽略 --load-extension，系统如实回报）
 
 **未验证**：指纹能否过 browserscan、fingerprint-chromium 的种子一致性、
