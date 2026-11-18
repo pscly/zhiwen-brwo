@@ -165,8 +165,13 @@ def test_install_delete_only_targets_known_legacy_paths():
     block = text.split("[InstallDelete]", 1)[1].split("[", 1)[0]
     allowed = {
         r'"{autopf}\知纹客户端"',
+        # `{autopf}` 随安装模式变化，所以另两种模式的实际目录也要显式列出，
+        # 否则"旧版用另一种模式安装"时中文目录会残留（卸载也删不掉）。
+        r'"{commonpf}\知纹客户端"',
+        r'"{localappdata}\Programs\知纹客户端"',
         r'"{group}\知纹客户端"',
         r'"{autodesktop}\知纹客户端.lnk"',
+        r'"{commondesktop}\知纹客户端.lnk"',
     }
     for line in block.splitlines():
         line = line.strip()
@@ -174,3 +179,27 @@ def test_install_delete_only_targets_known_legacy_paths():
             continue
         value = line.split("Name:", 1)[1].strip()
         assert value in allowed, f"InstallDelete 出现了未预期的路径：{line}"
+
+
+def test_installer_cleans_legacy_chinese_dir_in_both_install_modes():
+    """`[InstallDelete]` 必须覆盖"两种安装模式"下的旧中文目录。
+
+    `{autopf}` 的含义随本次安装模式变化：
+      管理员安装（/ALLUSERS）→ `C:\\Program Files`
+      按用户安装（默认）    → `%LOCALAPPDATA%\\Programs`
+
+    如果老版本（≤0.4.0，中文目录「知纹客户端」）当初是用**另一种**模式装的，
+    那 `{autopf}\\知纹客户端` 指的不是同一个目录 —— 旧的中文目录会原地残留，
+    用户看到"还有一份"，而且卸载项指向新目录、旧文件再也删不掉。
+
+    所以要显式写 `{commonpf}` 与 `{localappdata}\\Programs` 两条。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    iss = (root / "packaging/windows/zhiwen-client.iss").read_text(encoding="utf-8")
+    block = iss.split("[InstallDelete]", 1)[1].split("[", 1)[0]
+
+    assert "{commonpf}\\知纹客户端" in block, "缺管理员安装模式下的旧目录清理"
+    assert "{localappdata}\\Programs\\知纹客户端" in block, "缺按用户安装模式下的旧目录清理"
+    assert "{autopf}\\知纹客户端" in block

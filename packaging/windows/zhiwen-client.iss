@@ -170,9 +170,20 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; 老版本（≤0.4.0）装在中文目录里。升级到本版本后安装位置变成 ZhiwenClient，
 ; 旧目录如果留着就是一份孤儿文件（卸载项指向新目录，旧文件再也删不掉）。
 ; 这里在安装前清掉它 —— 目录名是我们自己创建的，不会误删别人的东西。
+;
+; **两条路径都要清**：`{autopf}` 的含义取决于本次安装模式 ——
+;   管理员安装（/ALLUSERS）→ {autopf} = C:\Program Files
+;   按用户安装（默认）    → {autopf} = %LOCALAPPDATA%\Programs
+; 如果老版本是用**另一种模式**装的（比如当初点了「为所有用户安装」，
+; 这次默认按用户装），那 `{autopf}\知纹客户端` 指的不是同一个目录，
+; 旧的中文目录会原地残留 —— 用户看到"还有一份"，卸载也删不掉。
+; 所以这里把两个位置都写上（不存在的路径 Inno 会跳过）。
 Type: filesandordirs; Name: "{autopf}\知纹客户端"
+Type: filesandordirs; Name: "{commonpf}\知纹客户端"
+Type: filesandordirs; Name: "{localappdata}\Programs\知纹客户端"
 Type: filesandordirs; Name: "{group}\知纹客户端"
 Type: files; Name: "{autodesktop}\知纹客户端.lnk"
+Type: files; Name: "{commondesktop}\知纹客户端.lnk"
 
 [UninstallDelete]
 ; 安装目录整体删（含运行期掉进来的日志、临时文件）
