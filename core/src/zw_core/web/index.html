@@ -2354,8 +2354,14 @@ function openPackImport() {
     body: `<div class="field">
         <label>User Data 目录</label>
         <input class="input mono" id="pk-path" placeholder="C:\\Users\\你\\AppData\\Local\\RXYCDP\\User Data" style="width:100%">
-        <div class="fs11 faint mt1">给到 <span class="mono">User Data</span> 或 <span class="mono">User Data\\Default</span> 都行。</div>
+        <div class="fs11 faint mt1">给到 <span class="mono">User Data</span> 或 <span class="mono">User Data\\Default</span> 都行。
+          不知道在哪就点右边的「扫描本机」。</div>
       </div>
+      <div class="row" style="gap:8px;align-items:center">
+        <button class="btn sm" id="pk-scan" type="button">扫描本机</button>
+        <span class="fs11 faint" id="pk-scan-msg"></span>
+      </div>
+      <div id="pk-found" class="mt2"></div>
       <div class="field">
         <label>包名（可留空）</label>
         <input class="input" id="pk-name" placeholder="例如 RXYCDP 常用插件" style="width:100%">
@@ -2364,6 +2370,42 @@ function openPackImport() {
     footer: `<div class="grow"></div><button class="btn sm" data-act="dlg-close">取消</button>
       <button class="btn sm primary" id="pk-go">导入</button>`,
     onMount(root) {
+      // 「扫描本机」：把有扩展的浏览器配置目录列出来，点一条就填进输入框。
+      // 没有这一步，用户得自己去找 `User Data` 在哪 —— 大多数人会卡死在这里。
+      $('#pk-scan', root).addEventListener('click', async (ev) => {
+        const b = ev.currentTarget;
+        const msg = $('#pk-scan-msg', root);
+        const box = $('#pk-found', root);
+        b.classList.add('loading');
+        msg.textContent = '正在扫描 …';
+        try {
+          const r = await api('GET', '/api/v1/packs/scan-browsers');
+          const list = (r && r.candidates) || [];
+          if (!list.length) {
+            msg.textContent = '没找到带扩展的浏览器配置目录（可手动填路径）';
+            box.innerHTML = '';
+            return;
+          }
+          msg.textContent = `找到 ${list.length} 个`;
+          box.innerHTML = list.map((c) => `
+            <div class="row" style="gap:8px;align-items:center;padding:4px 0">
+              <button class="btn xs" type="button" data-pick="${escAttr(c.path)}">选这个</button>
+              <span class="mono fs11 ellip" style="max-width:420px" title="${escAttr(c.path)}">${esc(c.path)}</span>
+              <span class="badge">${esc(c.browser || '?')}</span>
+              <span class="fs11 faint">${c.extension_count} 个扩展</span>
+            </div>`).join('');
+          box.querySelectorAll('[data-pick]').forEach((el) => {
+            el.addEventListener('click', () => {
+              $('#pk-path', root).value = el.dataset.pick;
+              msg.textContent = '已填入';
+            });
+          });
+        } catch (e) {
+          msg.textContent = '扫描失败：' + ((e && e.message) || e);
+        } finally {
+          b.classList.remove('loading');
+        }
+      });
       const btn = $('#pk-go', root);
       btn.addEventListener('click', async () => {
         const path_ = ($('#pk-path', root).value || '').trim();

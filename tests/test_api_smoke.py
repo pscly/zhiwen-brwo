@@ -847,3 +847,28 @@ def test_profile_detail_reports_extensions_active(client):
     # 必须是"有值"（True/False 都行），不能是 None
     assert d2.get("extensions_active") is not None, d2.get("extensions_active")
     assert isinstance(d2.get("extensions_note"), str), d2.get("extensions_note")
+
+
+def test_import_with_as_default_actually_sets_default(client, tmp_path):
+    """`POST /packs/import` 的 `as_default: true` 必须真的把包设成默认。
+
+    这是一个"字段定义了却没接上"的 bug：`PackImportBody` 里有 `as_default`，
+    路由却只读了 `path`/`from_profile`/`from_chrome`，于是界面上勾了
+    「设为默认」，返回的 `is_default` 还是 `false` —— 用户会以为开关坏了。
+    （真机复现：`{"as_default": true}` → `is_default: false`）
+    """
+    import json as _json
+
+    d = tmp_path / "extpkg"
+    d.mkdir()
+    (d / "manifest.json").write_text(_json.dumps(
+        {"manifest_version": 3, "name": "AsDefaultExt", "version": "1.0.0"}))
+    (d / "sw.js").write_text("//x")
+
+    r = client.post("/api/v1/packs/import",
+                    json={"path": str(d), "name": "默认自检", "as_default": True},
+                    headers=H).json()["data"]
+    assert r["is_default"] is True, r
+    packs = client.get("/api/v1/packs", headers=H).json()["data"]["packs"]
+    me = [p for p in packs if p["id"] == r["id"]]
+    assert me and me[0]["is_default"] is True, me

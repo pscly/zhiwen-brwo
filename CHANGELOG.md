@@ -1,5 +1,66 @@
 # CHANGELOG
 
+## 0.7.68 — 2026-11-18
+
+**「我不知道 RXYCDP 的 User Data 在哪」—— 现在可以让程序自己扫。顺带修掉 `as_default` 失效。**
+
+### ① 新增「扫描本机」：不用再手找路径
+
+导入扩展包要填一个绝对路径，但 RXYCDP / Roxy 装在哪、Profile 叫 `Default` 还是
+`Profile 1`，用户根本不知道。**卡在这一步就会放弃，功能等于没做。**
+
+新增：
+
+```
+GET /api/v1/packs/scan-browsers
+→ {"candidates": [
+     {"path": "...\RXYCDP\User Data\Default",
+      "user_data": "...\RXYCDP\User Data",
+      "profile": "Default", "browser": "RXYCDP", "extension_count": 3}
+   ]}
+```
+
+- 扫 `%LOCALAPPDATA%` / `%APPDATA%` / `%LOCALAPPDATA%\Programs` /
+  `Program Files` / `Program Files (x86)`（Linux/macOS 扫 `~/.config`、
+  `~/Library/Application Support`），限深度避免扫整盘
+- **只列"有扩展可导入"的**（判据与导入逻辑完全一致）—— 空目录列出来只会更困惑
+- 浏览器名字用上层目录名猜（`...\RXYCDP\User Data` → `RXYCDP`）
+
+web 控制台的导入弹窗里多了一个「扫描本机」按钮：点一下列出候选，点「选这个」
+就自动填进输入框。
+
+实测（造假目录 + 真 core）：
+
+```
+扫描 → RXYCDP | Default | 1 扩展 | /root/.config/RXYCDP/User Data/Default
+用扫到的路径直接导入 → {"extension_count": 1, ...}   ✅
+```
+
+### ② 修掉 `as_default` 传了没用
+
+`PackImportBody` 里**没有** `as_default` 字段（那个字段只加在了安装 .crx 的模型上），
+所以 `POST /packs/import {"as_default": true}` 会被 pydantic **静默忽略**：
+
+```
+真机复现：{"as_default": true} → is_default: false
+```
+
+界面上勾了「设为默认」却不生效，用户只会以为开关坏了。已补字段并接上
+`packs.set_default()`；设默认失败时不让导入失败，而是回 `default_warning`。
+
+### ③ 顺带
+
+- 我自己踩的：新路由 `/packs/scan-browsers` 忘了写进 `docs/04`，
+  被 `test_every_public_route_is_documented` 抓到（这就是那条测试的价值）。
+- 路由顺序：`/packs/scan-browsers` 必须声明在 `/packs/{pack_id}/...` 之前，
+  否则会被当成"包名叫 scan-browsers"。已确认顺序正确并实测 200。
+
+### 测试
+
+597 → **599 项**（`test_scan_browser_profiles_finds_importable_user_data`、
+`test_import_with_as_default_actually_sets_default`）。
+八项门槛全绿（599 / 34 / 73 / 13 / 21 / 81 / 29 / 32）。
+
 ## 0.7.67 — 2026-11-18
 
 **「把插件及其数据打包放到我的控制台」—— 功能在，浏览器控制台里却没有入口。**

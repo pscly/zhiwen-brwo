@@ -668,3 +668,37 @@ def test_same_site_detect_page_does_not_duplicate_restored_url(monkeypatch):
     monkeypatch.delenv("ZW_OPEN_DETECT_ON_START", raising=False)
     monkeypatch.delenv("ZW_DETECT_URLS", raising=False)
     config.reset_settings()
+
+
+def test_scan_browser_profiles_finds_importable_user_data(tmp_path, monkeypatch):
+    """扫描本机要能找出"有扩展可导入"的浏览器配置目录。
+
+    存在的理由：导入扩展包要用户填 `User Data` 绝对路径，而 RXYCDP / Roxy
+    装在哪、Profile 是 `Default` 还是 `Profile 1`，用户根本不知道 ——
+    卡在这一步就会放弃，功能等于没做。所以要能自动扫出来给人点。
+
+    判据必须与导入一致：`Extensions/<id>/<ver>/manifest.json` 能读出来才算。
+    空目录、只有内置组件的目录都不列（列出来只会让人更困惑）。
+    """
+    import json as _json
+    from zw_core.services import packs as packsvc
+
+    root = tmp_path / "fakehome"
+    root.mkdir()
+    # 一个"有扩展"的浏览器
+    good = root / "RXYCDP" / "User Data" / "Default" / "Extensions" / ("a" * 32) / "1.0.0_0"
+    good.mkdir(parents=True)
+    (good / "manifest.json").write_text(_json.dumps({"name": "Ext1", "version": "1.0.0"}))
+    # 一个"空"的浏览器（不该被列出）
+    empty = root / "EmptyBrowser" / "User Data" / "Default" / "Extensions"
+    empty.mkdir(parents=True)
+
+    # 直接指定扫描根，不依赖这台机器的真实目录
+    got = packsvc.scan_browser_profiles(max_depth=4, roots=[root])
+    paths = [g["path"] for g in got]
+    assert any("RXYCDP" in p and "Default" in p for p in paths), got
+    assert not any("EmptyBrowser" in p for p in paths), got
+    hit = [g for g in got if "RXYCDP" in g["path"]][0]
+    assert hit["extension_count"] == 1, hit
+    assert hit["browser"] == "RXYCDP", hit
+

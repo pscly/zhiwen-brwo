@@ -54,6 +54,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import shutil
 import time
 import uuid
@@ -382,6 +383,132 @@ def _default_pack_name(exts: list[dict[str, Any]]) -> str:
     if len(exts) == 1:
         return str(exts[0].get("name") or exts[0]["key"])
     return f"{exts[0].get('name') or exts[0]['key']} 等 {len(exts)} 个扩展"
+
+
+def scan_browser_profiles(max_depth: int = 4, roots: list[Path] | None = None) -> list[dict[str, Any]]:
+    """扫本机常见的"Chromium 系浏览器用户数据目录"，给用户挑。
+
+    ## 为什么需要这个
+
+    导入扩展包要用户填一个 `User Data` 的**绝对路径**，但没人知道它在哪 ——
+    RXYCDP / Roxy 这类浏览器装在哪、叫什么、Profile 是 `Default` 还是 `Profile 1`，
+    全靠猜。用户卡在这一步会直接放弃，功能等于没做。
+
+    所以这里把常见位置都扫一遍，返回"有扩展的那些"，让用户在界面上点一下就行。
+
+    ## 扫哪些地方
+
+    - Windows：`%LOCALAPPDATA%`、`%APPDATA%`、`%LOCALAPPDATA%\\Programs`、
+      `C:\\Program Files`、`C:\\Program Files (x86)`（各向下若干层找 `User Data`）
+    - Linux/macOS：`~/.config`、`~/Library/Application Support`
+
+    只找**目录名里带 User Data 的**，或者本身就有 `Extensions` 子目录的；
+    然后只在**至少有一个扩展**时才收进结果（空目录列出来只会让人更困惑）。
+    """
+    import os as _os
+
+    if roots is None:
+        roots = _default_scan_roots()
+    roots = [Path(r) for r in roots]
+
+    def _walk_for_userdata(root: Path, depth: int) -> list[Path]:
+        """BFS 找 `User Data` 目录（限深度，避免扫整个磁盘）。"""
+        out: list[Path] = []
+        level = [root]
+        for _ in range(depth):
+            nxt: list[Path] = []
+            for d in level:
+                try:
+                    for child in d.iterdir():
+                        if not child.is_dir():
+                            continue
+                        if child.name.lower() == "user data":
+                            out.append(child)
+                            continue          # 不再往里钻，避免重复
+                        nxt.append(child)
+                except (OSError, PermissionError):
+                    continue
+            level = nxt
+            if not level:
+                break
+        return out
+
+    seen: set[str] = set()
+    found: list[dict[str, Any]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for ud in _walk_for_userdata(root, max_depth):
+            # `User Data` 下可能有 Default / Profile 1 / Profile 2 …
+            for prof in sorted(ud.iterdir()) if ud.is_dir() else []:
+                if not prof.is_dir():
+                    continue
+                if not (prof.name == "Default" or prof.name.startswith("Profile")):
+                    continue
+                try:
+                    n = _count_importable(prof / "Extensions")
+                except OSError:
+                    continue
+                if n <= 0:
+                    continue
+                key = str(prof.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append({
+                    "path": str(prof),
+                    "user_data": str(ud),
+                    "profile": prof.name,
+                    # 用上一层目录名猜浏览器（如 `...\\RXYCDP\\User Data` → RXYCDP）
+                    "browser": ud.parent.name or ud.name,
+                    "extension_count": n,
+                })
+    found.sort(key=lambda x: (-int(x["extension_count"]), str(x["path"])))
+    return found
+
+
+def _default_scan_roots() -> list[Path]:
+    """默认扫描位置：按平台给常见浏览器配置根目录。"""
+    import os as _os
+
+    out: list[Path] = []
+    if sys.platform == "win32":
+        for env in ("LOCALAPPDATA", "APPDATA"):
+            v = _os.environ.get(env)
+            if v:
+                out.append(Path(v))
+        la = _os.environ.get("LOCALAPPDATA")
+        if la:
+            out.append(Path(la) / "Programs")
+        for base in ("Program Files", "Program Files (x86)"):
+            p = Path("C:/") / base
+            if p.is_dir():
+                out.append(p)
+    else:
+        out.append(Path.home() / ".config")
+        out.append(Path.home() / "Library" / "Application Support")
+    return out
+
+
+def _count_importable(ext_root: Path) -> int:
+    """数一个 `Extensions` 目录下有多少个**能导入**的扩展（与导入逻辑同判据）。"""
+    if not ext_root.is_dir():
+        return 0
+    n = 0
+    for id_dir in ext_root.iterdir():
+        if not id_dir.is_dir() or id_dir.name.startswith("_"):
+            continue
+        if _read_manifest(id_dir):
+            n += 1
+            continue
+        try:
+            for ver in id_dir.iterdir():
+                if ver.is_dir() and _read_manifest(ver):
+                    n += 1
+                    break
+        except OSError:
+            continue
+    return n
 
 
 def _resolve_chrome_default(raw: str) -> Path:

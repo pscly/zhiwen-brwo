@@ -329,6 +329,13 @@ class PackImportBody(BaseModel):
     from_profile: str = ""
     from_chrome: str = ""
     name: str = ""
+    # 导入后是否顺手设为"新建环境默认带上"。
+    #
+    # 这个字段以前**只加在了安装 .crx 的模型上**，导入扩展包的模型里没有 ——
+    # 于是界面/接口传 `as_default: true` 会被 pydantic 直接忽略（不报错！），
+    # 返回的 `is_default` 仍是 false，用户以为开关坏了。
+    # 真机复现：POST /packs/import {"as_default": true} → is_default: false。
+    as_default: bool = False
 
 
 class PackDefaultBody(BaseModel):
@@ -1056,9 +1063,31 @@ def build_app() -> FastAPI:
         """
         from zw_core.services import packs
 
-        return ok(packs.import_pack(body.path, name=body.name,
-                                    from_profile=body.from_profile,
-                                    from_chrome=body.from_chrome))
+        res = packs.import_pack(body.path, name=body.name,
+                                from_profile=body.from_profile,
+                                from_chrome=body.from_chrome)
+        # `as_default` 以前定义了却**没往下传** —— 界面上勾了「设为默认」，
+        # 返回的 `is_default` 仍是 false，用户会以为开关坏了。
+        # （真机复现过：POST /packs/import {"as_default": true} → is_default: false）
+        if body.as_default and res.get("id"):
+            try:
+                packs.set_default(str(res["id"]), True)
+                res["is_default"] = True
+            except Exception as exc:  # noqa: BLE001 —— 设默认失败不该让导入失败
+                res["is_default"] = False
+                res["default_warning"] = f"包已导入，但设为默认失败：{type(exc).__name__}: {exc}"
+        return ok(res)
+
+    @app.get(f"{API_PREFIX}/packs/scan-browsers", tags=["扩展"], dependencies=[Auth],
+             summary="扫本机可导入的浏览器用户数据目录")
+    def packs_scan_browsers() -> dict[str, Any]:
+        """列出本机"有扩展可导入"的 Chromium 系浏览器配置目录。
+
+        存在的理由：导入扩展包需要用户填 `User Data` 的绝对路径，而 RXYCDP /
+        Roxy 这类浏览器装在哪、Profile 叫什么，用户根本不知道 —— 卡在这一步
+        就放弃了。这里把候选扫出来，界面上点一下就行。
+        """
+        return ok({"candidates": packs.scan_browser_profiles()})
 
     @app.post(f"{API_PREFIX}/packs/{{pack_id}}/default", tags=["扩展"], dependencies=[Auth], summary="设为新建环境默认带上")
     def packs_set_default(pack_id: str, body: PackDefaultBody) -> dict[str, Any]:
