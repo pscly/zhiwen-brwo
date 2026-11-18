@@ -103,6 +103,46 @@ def _call_raw(method: str, path: str, content: bytes | None = None, headers: dic
 
 
 # ── 服务 ──────────────────────────────────────────────────
+def cmd_engine(args: argparse.Namespace) -> None:
+    """内核管理：看状态 / 下载安装 ungoogled-chromium。"""
+    from .services import engines as engsvc
+    from .services import enginesrc
+    from .config import get_settings
+
+    s = get_settings()
+    action = getattr(args, "engine_action", "status")
+    if action == "install":
+        print(f"内核策略：{s.engine_policy}　目标目录：{s.engine_dir}")
+        print("开始下载（约 150–200MB）…")
+        try:
+            res = enginesrc.ensure(force=bool(getattr(args, "force", False)), s=s)
+        except enginesrc.EngineSourceError as exc:
+            print(f"失败：[{exc.code}] {exc.message}")
+            if exc.hint:
+                print(f"建议：{exc.hint}")
+            raise SystemExit(1) from None
+        print(f"完成：{res['version'] or '（版本未知）'}")
+        print(f"路径：{res['path']}")
+        return
+    # status
+    print(f"策略：{s.engine_policy}　自动安装：{s.engine_auto_install}")
+    print(f"引擎目录：{s.engine_dir}")
+    try:
+        p = engsvc.find_chrome(s)
+        print(f"当前内核：{p}")
+        print(f"版本：{engsvc.engine_version(p)}")
+        from .services import extprobe
+
+        r = extprobe.probe(p, timeout=30.0)
+        print(f"能加载命令行扩展：{r['loadable']}（{r.get('reason', '')}）")
+    except Exception as exc:  # noqa: BLE001
+        print(f"没有可用内核：[{getattr(exc, 'code', '?')}] {getattr(exc, 'message', exc)}")
+    prog = enginesrc.progress()
+    if prog.get("state") != "idle":
+        print(f"下载状态：{prog['state']} {prog.get('message', '')}"
+              f"{' ' + str(prog.get('percent')) + '%' if prog.get('percent') else ''}")
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     from .main import run
 
@@ -678,6 +718,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     def j(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--json", action="store_true", help="输出 JSON（给脚本/AI 用）")
+
+    sp = sub.add_parser("engine", help="内核管理（ungoogled-chromium）")
+    esp = sp.add_subparsers(dest="engine_action")
+    esp.add_parser("status", help="看当前内核、能否加载扩展、下载进度")
+    _ei = esp.add_parser("install", help="下载并安装 ungoogled-chromium")
+    _ei.add_argument("--force", action="store_true", help="已存在也重新下载安装")
+    sp.set_defaults(func=cmd_engine)
 
     sp = sub.add_parser("serve", help="启动 HTTP 服务（控制台 + API + 网关）")
     sp.set_defaults(func=cmd_serve)

@@ -214,6 +214,31 @@ class Settings:
     # 根本不知道该配在哪里。留空 = 不显式设代理（仍尊重环境变量）。
     download_proxy: str = field(default_factory=lambda: _env("ZW_DOWNLOAD_PROXY", ""))
 
+    # ── 内核策略（2026-11-18 起默认用 ungoogled-chromium）────
+    #
+    # 为什么默认换：官方 Google Chrome 137 起忽略 `--load-extension`
+    # （实测 Chrome 149/150/157 都不加载），"把插件带进环境"在官方内核上
+    # 等于只放了文件、浏览器不认。要用插件就必须换 ungoogled-chromium。
+    #
+    # `ungoogled`（默认）：只用引擎目录里带 ungoogled 字样的内核；没有就先自动装，
+    #                      装不上会给出可操作的错误，**不静默退回官方 Chrome**
+    #                      （退回去等于悄悄丢掉插件能力，用户不会知情）。
+    # `any`：旧行为（引擎目录 → 系统 Chrome → PATH）。
+    engine_policy: str = field(default_factory=lambda: _env("ZW_ENGINE_POLICY", "ungoogled").lower())
+
+    # 客户端启动时发现没有 ungoogled 内核，是否自动下载安装（约 150–200MB）。
+    engine_auto_install: bool = field(
+        default_factory=lambda: _env_bool("ZW_ENGINE_AUTO_INSTALL", True))
+
+    # 手动指定内核压缩包（给 macOS / 内网镜像 / 离线部署用）。
+    # 给了 `engine_url` 就**必须**同时给 `engine_sha256`，否则拒绝安装。
+    engine_url: str = field(default_factory=lambda: _env("ZW_ENGINE_URL", ""))
+    engine_sha256: str = field(default_factory=lambda: _env("ZW_ENGINE_SHA256", ""))
+    engine_version_tag: str = field(default_factory=lambda: _env("ZW_ENGINE_VERSION_TAG", ""))
+
+    # 覆盖 GitHub 仓库（内网镜像 / 加速站），留空用内置的官方仓库。
+    engine_repo: str = field(default_factory=lambda: _env("ZW_ENGINE_REPO", ""))
+
     # 出口检测用的 IP 回显地址（逗号分隔）。留空 = 用内置那三个境外地址。
     # 国内网络或自建服务时换成自己的：只要返回 {"ip": "1.2.3.4"} 即可。
     egress_endpoints: list[str] = field(
@@ -317,7 +342,11 @@ class Settings:
         self.staging_dir = self.root / "staging"
         # 运行时生成的辅助文件（代理认证扩展等），与用户的扩展库分开
         self.runtime_dir = self.root / "runtime"
-        if not self.engine_dir:
+        # **不能写成 `if not self.engine_dir`**：`Path("")` 就是 `Path(".")`，
+        # 它的真值是 True，于是这条回落逻辑永远不会触发 —— 结果 `engine_dir`
+        # 一直是"当前工作目录"。以前没炸是因为启动环境的测试都用 ZW_CHROME_BIN
+        # 指了绝对路径；但自动安装内核会真的把 150–200MB 解到 cwd 里。
+        if str(self.engine_dir) in ("", "."):
             self.engine_dir = self.root / "engines"
         self.engine_dir = Path(self.engine_dir).expanduser().resolve()
         for d in (

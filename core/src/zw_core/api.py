@@ -36,8 +36,8 @@ from starlette.websockets import WebSocket
 from . import __version__, gateway
 from .config import get_settings
 from .db import get_db
-from .services import (bundle, cookies as ck, engines, extstore, manager as mgr, packs,
-                       proxy as proxysvc, proxylib, proxyrelay as relaysvc,
+from .services import (bundle, cookies as ck, engines, enginesrc, extstore, manager as mgr,
+                       packs, proxy as proxysvc, proxylib, proxyrelay as relaysvc,
                        session as sessionsvc, shell as shellsvc, sync as syncsvc)
 from .services.hub import HubClient, HubError
 from .services.leases import LocalLease
@@ -394,6 +394,19 @@ def build_app() -> FastAPI:
     @app.exception_handler(ApiError)
     async def _api_error(_: Request, exc: ApiError) -> JSONResponse:
         return _err(exc.code, exc.message, exc.status, exc.hint)
+
+    @app.exception_handler(enginesrc.EngineSourceError)
+    async def _engine_src_error(request: Request, exc: enginesrc.EngineSourceError):
+        """内核下载/校验/解包失败。
+
+        这类错误带 `hint`（比如"设 ZW_DOWNLOAD_PROXY"、"装 libnss3"），必须原样带给用户，
+        否则界面上只剩一句"500 Internal Server Error"。
+        """
+        return JSONResponse(
+            status_code=int(getattr(exc, "status", 500) or 500),
+            content={"ok": False, "code": exc.code, "message": exc.message,
+                     "hint": getattr(exc, "hint", "") or ""},
+        )
 
     @app.exception_handler(mgr.ProfileError)
     async def _profile_error(_: Request, exc: mgr.ProfileError) -> JSONResponse:
@@ -773,6 +786,45 @@ def build_app() -> FastAPI:
     @app.get(f"{API_PREFIX}/groups", tags=["环境"], dependencies=[Auth], summary="分组概览")
     def groups_list() -> dict[str, Any]:
         return ok({"groups": mgr.groups()})
+
+    # ══ 内核（ungoogled-chromium）═════════════════════════
+    @app.get(f"{API_PREFIX}/engine", tags=["内核"], dependencies=[Auth],
+             summary="当前内核状态与下载进度")
+    def engine_status() -> dict[str, Any]:
+        from zw_core.services import engines as engsvc
+        from zw_core.services import enginesrc
+
+        s = get_settings()
+        try:
+            bin_path = engsvc.find_chrome(s)
+            path, err = str(bin_path), ""
+        except Exception as exc:  # noqa: BLE001 —— 没内核不是接口错误，照实返回
+            path, err = "", f"{getattr(exc, 'code', 'ENGINE_NOT_FOUND')}: {getattr(exc, 'message', exc)}"
+        loadable: bool | None = None
+        if path:
+            try:
+                from zw_core.services import extprobe
+
+                loadable = bool(extprobe.probe(path, timeout=25.0).get("loadable"))
+            except Exception:  # noqa: BLE001 —— 探不起责任在环境，不影响状态展示
+                loadable = None
+        return ok({
+            "policy": s.engine_policy,
+            "auto_install": bool(s.engine_auto_install),
+            "engine_dir": str(s.engine_dir),
+            "path": path,
+            "version": engsvc.engine_version(bin_path) if path else "",
+            "extensions_loadable": loadable,
+            "error": err,
+            "download": enginesrc.progress(),
+        })
+
+    @app.post(f"{API_PREFIX}/engine/install", tags=["内核"], dependencies=[Auth],
+              summary="下载并安装 ungoogled-chromium（后台进行）")
+    def engine_install(force: bool = False) -> dict[str, Any]:
+        from zw_core.services import enginesrc
+
+        return ok(enginesrc.start_background(force=force))
 
     # ══ 扩展库 ════════════════════════════════════════════
     # 注意：扩展相关端点必须在 /profiles/{ref} 之前不冲突（路径不同，无冲突），

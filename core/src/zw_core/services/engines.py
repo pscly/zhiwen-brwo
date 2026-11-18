@@ -99,45 +99,101 @@ class LaunchResult:
 
 # ── 找引擎 ────────────────────────────────────────────────
 def find_chrome(s: Settings) -> Path:
-    """按优先级找浏览器可执行文件。"""
+    """按优先级找浏览器可执行文件。
+
+    ## `ZW_ENGINE_POLICY=ungoogled`（默认，2026-11-18 起）
+
+    只认**带 ungoogled 字样**的内核，找不到就报错并告诉用户怎么装，
+    **不会静默退回官方 Chrome** —— 官方 Chrome 137 起忽略 `--load-extension`，
+    退回去等于悄悄丢掉插件能力，用户不会知情。
+
+    ## `ZW_ENGINE_POLICY=any`
+
+    旧行为：引擎目录 → 系统 Chrome → PATH。
+    """
     if s.chrome_bin:
         p = Path(s.chrome_bin).expanduser()
         if p.exists():
             return p
         raise EngineError("ENGINE_NOT_FOUND", f"ZW_CHROME_BIN 指向的文件不存在：{p}")
 
+    want_ungoogled = str(getattr(s, "engine_policy", "any") or "any").lower() == "ungoogled"
+
     # 1. 数据目录下的 engines/ 里找（推荐做法，便于版本共存）
     names = ["chrome.exe", "chrome", "chromium.exe", "chromium"] if IS_WIN else ["chrome", "chromium"]
+    hits: list[Path] = []
     if Path(s.engine_dir).exists():
-        hits: list[Path] = []
         for name in names:
             hits.extend(sorted(Path(s.engine_dir).rglob(name)))
         hits = [h for h in hits if h.is_file() and os.access(h, os.X_OK)] if not IS_WIN else [h for h in hits if h.is_file()]
-        # 目录遍历顺序不可靠，优先挑路径里带 fingerprint 字样的那份
-        hits.sort(key=lambda h: (0 if "fingerprint" in str(h).lower() else 1, len(str(h))))
-        if hits:
+        # 目录遍历顺序不可靠：ungoogled 优先（能加载扩展），其次 fingerprint，最后才轮到别的
+        def _rank(h: Path) -> tuple[int, int]:
+            t = str(h).lower()
+            if "ungoogled" in t:
+                return (0, len(t))
+            if "fingerprint" in t:
+                return (1, len(t))
+            return (2, len(t))
+        hits.sort(key=_rank)
+    if hits:
+        if not want_ungoogled:
             return hits[0]
+        un = [h for h in hits if "ungoogled" in str(h).lower()]
+        if un:
+            return un[0]
+        # policy=ungoogled 但引擎目录里只有别的内核 → 不用它，往下走给出明确指引
 
-    # 2. 系统常见位置
-    for cand in _WIN_CANDIDATES if IS_WIN else _POSIX_CANDIDATES:
-        expanded = Path(os.path.expandvars(cand))
-        if expanded.exists():
-            return expanded
+    if not want_ungoogled:
+        # 2. 系统常见位置
+        for cand in _WIN_CANDIDATES if IS_WIN else _POSIX_CANDIDATES:
+            expanded = Path(os.path.expandvars(cand))
+            if expanded.exists():
+                return expanded
 
-    # 3. PATH
-    for name in ("chrome", "chromium", "google-chrome", "chromium-browser", "msedge"):
-        found = shutil.which(name)
-        if found:
-            return Path(found)
+        # 3. PATH
+        for name in ("chrome", "chromium", "google-chrome", "chromium-browser", "msedge"):
+            found = shutil.which(name)
+            if found:
+                return Path(found)
 
+    from . import enginesrc
+
+    prog = enginesrc.progress()
+    if prog.get("state") in ("resolving", "downloading", "extracting", "verifying"):
+        raise EngineError(
+            "ENGINE_PREPARING",
+            f"正在准备 ungoogled-chromium 内核（{prog.get('message') or ''}"
+            f"{'，' + str(prog.get('percent', 0)) + '%' if prog.get('percent') else ''}）。"
+            "下载完成后新建/启动环境即可；进度看控制台或 GET /api/v1/engine。",
+        )
     raise EngineError(
         "ENGINE_NOT_FOUND",
-        "没有找到 Chromium 内核。三种解决办法任选其一：\n"
-        "  1) 把内核解压到 <数据目录>/engines/ 下（推荐，支持多版本共存）\n"
-        "  2) 设置环境变量 ZW_CHROME_BIN 指向 chrome 可执行文件\n"
-        "  3) 安装系统版 Chromium / Chrome\n"
+        "没有找到可用的 ungoogled-chromium 内核（官方 Chrome 137 起不加载命令行扩展，"
+        "所以这里不会退回官方内核）。三种解决办法任选其一：\n"
+        "  1) 让客户端自动下载：POST /api/v1/engine/install，或命令行 `zw engine install`\n"
+        "  2) 把 ungoogled-chromium 解压到 <数据目录>/engines/ 下\n"
+        "  3) 设 ZW_ENGINE_URL + ZW_ENGINE_SHA256 指向你自己的压缩包\n"
         f"当前数据目录：{s.root}",
     )
+
+
+def prepare_engine_async(s: Settings | None = None) -> dict[str, Any]:
+    """客户端启动时调用：policy=ungoogled 且没有内核就在后台装。
+
+    不阻塞启动（下载 150–200MB 可能要几分钟），进度由 `enginesrc.progress()` 暴露。
+    失败不抛：启动阶段抛异常会把整个客户端带下去，而"没内核"是可以稍后重试的状态。
+    """
+    s = s or get_settings()
+    if str(getattr(s, "engine_policy", "any") or "any").lower() != "ungoogled":
+        return {"started": False, "reason": "policy 不是 ungoogled"}
+    if not bool(getattr(s, "engine_auto_install", False)):
+        return {"started": False, "reason": "ZW_ENGINE_AUTO_INSTALL 关闭"}
+    from . import enginesrc
+
+    if enginesrc._existing(Path(s.engine_dir)) is not None:
+        return {"started": False, "reason": "已有 ungoogled 内核"}
+    logger.info("没有 ungoogled 内核，后台开始下载安装（约 150–200MB）")
+    return enginesrc.start_background(force=False)
 
 
 def list_engine_candidates(s: Settings) -> list[dict[str, str]]:

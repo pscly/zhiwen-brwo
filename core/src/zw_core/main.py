@@ -258,6 +258,23 @@ def run() -> None:
     if getattr(s, "host_notice", ""):
         logger.warning("%s", s.host_notice)
     logger.info("监听 http://%s:%s  数据目录 %s", s.host, s.port, s.root)
+
+    # 内核准备：policy=ungoogled 且没有 ungoogled 内核时，后台开始下载。
+    #
+    # 为什么放在启动而不是"用户点启动环境时"：下载 150–200MB 要几分钟，
+    # 放到启动时就等于"开客户端之后自己去泡杯茶，回来就能用"。
+    # 这里**绝不阻塞启动**，也**绝不因为失败就退出** —— 没内核是能稍后重试的状态，
+    # 把整个客户端带下去只会更糟。进度看 GET /api/v1/engine 或 `zw engine status`。
+    try:
+        from .services import engines as _engines
+
+        info = _engines.prepare_engine_async(s)
+        if info.get("started"):
+            logger.info("正在后台下载 ungoogled-chromium 内核（进度见 /api/v1/engine）")
+        elif info.get("reason"):
+            logger.debug("内核准备跳过：%s", info["reason"])
+    except Exception:  # noqa: BLE001
+        logger.warning("内核准备检查失败（不影响启动）", exc_info=True)
     # log_config=None：不让 uvicorn 用 dictConfig 覆盖我们的日志配置
     # （它的 formatter 会碰 sys.stdout，而无控制台环境下那是 None）。
     # `proxy_headers=False` 是**安全必需**，不是可选优化。

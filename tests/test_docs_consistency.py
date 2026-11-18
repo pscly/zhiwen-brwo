@@ -19,9 +19,12 @@ def _raised_codes() -> set[str]:
     codes: set[str] = set()
     for f in list((ROOT / "core/src").rglob("*.py")) + list((ROOT / "hub/src").rglob("*.py")):
         text = f.read_text(encoding="utf-8")
+        # **不要在这里枚举类名**。原来是一份写死的清单
+        # （ApiError|ProfileError|…|PackError），结果新增一个 `EngineSourceError`
+        # 之后，它抛出的错误码既不会被检查、文档里也就一直缺着 ——
+        # 测试看起来"在守规矩"，其实对新类完全失明。改成匹配任意 `XxxError(`。
         for m in re.finditer(
-            r'(?:ApiError|ProfileError|SyncError|HubError|BundleError|EngineError'
-            r'|ProxyError|CDPError|CryptoError|DeviceError|ShellError|PackError)\(\s*(?:\d+\s*,\s*)?"([A-Z][A-Z0-9_]{2,})"',
+            r'[A-Za-z_][A-Za-z0-9_]*Error\(\s*(?:\d+\s*,\s*)?"([A-Z][A-Z0-9_]{2,})"',
             text,
         ):
             codes.add(m.group(1))
@@ -299,7 +302,11 @@ def test_every_custom_exception_has_a_handler():
             classes.add(m.group(1))
 
     api_src = (root / "core/src/zw_core/api.py").read_text(encoding="utf-8")
-    handled = set(re.findall(r"exception_handler\(\s*(?:[a-z_]+\s*,\s*)?(?:mgr\.|syncsvc\.|proxysvc\.|bundle\.|engines\.|ck\.|packs\.|extstore\.|shellsvc\.|sessionsvc\.|relaysvc\.)?([A-Za-z_]+Error)\s*\)", api_src))
+    # 同上：别枚举模块前缀。原来是 (?:mgr\.|syncsvc\.|…|relaysvc\.)，新模块
+    # `enginesrc.` 不在表里 → 明明加了处理器也被判成"没加"。
+    handled = set(re.findall(
+        r"exception_handler\(\s*(?:[a-z_]+\s*,\s*)?(?:[a-z_][a-z0-9_]*\.)?([A-Za-z_]+Error)\s*\)",
+        api_src))
 
     # `ApiError` 自己有处理器；`CryptoError` 只在 bundle 内部抛并被包成 BundleError。
     exempt = {"CryptoError"}

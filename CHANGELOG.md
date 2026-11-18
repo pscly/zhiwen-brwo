@@ -1,5 +1,88 @@
 # CHANGELOG
 
+## 0.7.72 — 2026-11-18
+
+**客户端默认改用 ungoogled-chromium，并且能自己把它装好 —— 不再需要人工下载解压。**
+
+### 为什么必须换内核
+
+官方 Google Chrome **137 起忽略 `--load-extension`**。我在本机用扩展加载探针实测：
+
+| 内核 | 能否加载命令行扩展 | 耗时 |
+|---|---|---|
+| ungoogled-chromium 150 | **能**（内容脚本真的执行） | 1.6s |
+| 官方 Google Chrome 149 | **不能** | 10.4s（超时判定） |
+
+所以在官方内核上"把插件带进环境"只是把文件放过去、浏览器不认 —— 你之前看到的
+`extensions_active: false` 就是这件事。
+
+### 做了什么
+
+**① 新的内核策略（默认 `ungoogled`）**
+
+`ZW_ENGINE_POLICY=ungoogled`（默认）时只认带 ungoogled 字样的内核；
+找不到就报 `ENGINE_NOT_FOUND` 并给出三种解决办法，**不会静默退回官方 Chrome**
+（退回去等于悄悄丢掉插件能力，用户不会知情）。`policy=any` 保留旧行为。
+
+**② 客户端自己装内核（新模块 `services/enginesrc.py`）**
+
+- 查 GitHub `releases/latest`，按平台选资产（Windows `windows_x64.zip` /
+  Linux `x86_64_linux.tar.xz`）
+- 下载**必须**有校验值：用 GitHub API 给的 `sha256:...` 边下边算，不通过就丢弃；
+  资产没有 digest 时**直接拒绝安装**（不闭眼装二进制）
+- 安全解包（拒绝 `../` 越界）、定位 `chrome`/`chrome.exe`、`--version` 自检，
+  落到 `<数据目录>/engines/<版本>/`
+- 启动时后台进行，不阻塞；进度见 `GET /api/v1/engine`
+- 支持 `ZW_ENGINE_URL` + `ZW_ENGINE_SHA256` 手动指定（macOS / 内网镜像 / 离线）
+
+**③ 接口与命令**
+
+```
+GET  /api/v1/engine          内核状态 + 能否加载扩展 + 下载进度
+POST /api/v1/engine/install  后台下载安装（?force=true 重装）
+zw engine status / install
+```
+
+### 实测（本机，真实内核）
+
+用本机已有的 ungoogled 150 作为引擎，policy=ungoogled 起一个 core：
+
+```
+GET /api/v1/engine → path=…/ungoogled-chromium-150/chrome
+                     version=build 150
+                     extensions_loadable=True        ← 官方 Chrome 这里是 False
+建环境 + 应用一个真扩展（带内容脚本）→ extensions_active=True
+启动 → 用 CDP 开一个真实 http 页面 → 读 DOM 上内容脚本写入的标记 → "yes"
+```
+
+最后那条才是硬证据：**内容脚本真的执行了**，不是"文件放进去了"。
+（顺带印证：扩展 target 数仍是 0 —— 所以判据不能看 `/json/list` 有没有
+`chrome-extension://`，只能看内容脚本痕迹。）
+
+打包产物的 138MB 下载在本机被 GitHub 限速（20 分钟只到 32MB），
+所以"联网下载"这条用本地内核等价验证；下载/校验/解包/自检的机制另有 7 项单测覆盖
+（含校验不通过必须丢弃、越界路径必须拒绝、没有 digest 必须拒绝）。
+
+### 顺带修掉的两个既有 bug
+
+1. **`engine_dir` 一直等于"当前工作目录"**：`Path("")` 就是 `Path(".")`，真值为 True，
+   于是 `resolve()` 里"回落到 `<数据目录>/engines`"的逻辑从没执行过。
+   以前没炸是因为测试都用 `ZW_CHROME_BIN`；自动装内核会真往 cwd 解 150MB。
+2. **文档一致性测试对新异常类失明**：它写死了异常类名清单
+   （`ApiError|ProfileError|…|PackError`）和模块前缀清单，新增 `EngineSourceError`
+   既不被检查、也不要求注册处理器。改成通用匹配后，一次揪出 **13 个从没被文档记录的
+   真实错误码**（`EXT_STORE_*`、`SHELL_*`、`SESSION_DEAD` 等），已全部补进 `docs/04`。
+
+### 自己踩的坑
+
+`_engine_version()` 第一版直接 `subprocess.run` —— 被 `test_proc_hidden` 挡住：
+Windows 上会弹出黑色控制台窗口。改成 `proc.run_hidden`。
+
+### 测试
+
+604 → **611 项**（`tests/test_enginesrc.py` 7 项）。
+八项门槛全绿（611 / 34 / 73 / 13 / 21 / 81 / 29 / 35）。
+
 ## 0.7.71 — 2026-11-18
 
 **装商店扩展暴露三个真 bug：库里看不到、名字是 `__MSG_xxx__`、包名也是占位符。**
