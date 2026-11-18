@@ -256,6 +256,16 @@ def test_ensure_full_pipeline_over_real_http(tmp_path, monkeypatch):
         monkeypatch.setenv("ZW_DOWNLOAD_PROXY", "")   # 别让本机代理配置影响
         config.reset_settings()
 
+        # 用桩替掉"跑 --version 拿版本号"这一步。
+        #
+        # 为什么不能靠假脚本自己跑：Windows 上解包出来的 `.exe` 是个文本文件，
+        # 系统根本不会执行它（`--version 无输出`），Linux 上 `#!/bin/sh` 的脚本
+        # 又能跑 —— 同一个测试在两个平台行为不同，正是它连续两次在 Windows CI 红的原因。
+        # 这里要验的是**下载/校验/解包/落盘/可执行位**这条链路，
+        # 版本探测属于另一件事（`_engine_version` 自己也有单独覆盖）。
+        monkeypatch.setattr(enginesrc, "_engine_version",
+                            lambda p: "Chromium 999.0.1.2 (stub)")
+
         res = enginesrc.ensure(force=False, s=config.get_settings())
         assert res["ok"] is True, res
         assert res["skipped"] is False, res
@@ -284,3 +294,60 @@ def test_ensure_full_pipeline_over_real_http(tmp_path, monkeypatch):
         monkeypatch.delenv("ZW_ENGINE_VERSION_TAG", raising=False)
         monkeypatch.delenv("ZW_DOWNLOAD_PROXY", raising=False)
         config.reset_settings()
+
+
+def test_engine_version_reads_output_and_reports_breakage(tmp_path, monkeypatch):
+    """`_engine_version()` 既要能读出输出，也要在"跑不起来"时给出可读错误。
+
+    这条非补不可：上面那条全链路测试为了跨平台稳定，把"跑 --version"替换成了桩；
+    如果这里不单独覆盖，`ENGINE_BROKEN` 这条路就再没有测试盯着了 ——
+    而它恰恰是用户最容易撞上的（Linux 缺 libnss3/atk/gbm，Windows 被杀软拦）。
+    """
+    from zw_core.services import enginesrc
+
+    # ① 正常输出
+    class _Ok:
+        stdout = "Chromium 156.0.8078.79\n"
+        stderr = ""
+
+    monkeypatch.setattr(enginesrc, "run_hidden" if hasattr(enginesrc, "run_hidden") else "_x",
+                        lambda *a, **k: _Ok(), raising=False)
+    monkeypatch.setattr("zw_core.services.proc.run_hidden", lambda *a, **k: _Ok())
+    assert enginesrc._engine_version(tmp_path / "chrome") == "Chromium 156.0.8078.79"
+
+    # ② 跑不起来（无输出）→ 空串，让调用方抛 ENGINE_BROKEN
+    class _Empty:
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr("zw_core.services.proc.run_hidden", lambda *a, **k: _Empty())
+    assert enginesrc._engine_version(tmp_path / "chrome") == ""
+
+    # ③ 抛异常 → 也不能把栈甩出去
+    def _boom(*a, **k):
+        raise OSError("no such file")
+
+    monkeypatch.setattr("zw_core.services.proc.run_hidden", _boom)
+    assert enginesrc._engine_version(tmp_path / "chrome") == ""
+
+
+def test_install_archive_raises_broken_when_version_empty(tmp_path, monkeypatch):
+    """解包成功但跑不起来 → `ENGINE_BROKEN`，提示要装系统库。"""
+    import io as _io
+    import zipfile as _zipfile
+
+    from zw_core.services import enginesrc
+
+    name = "chrome.exe" if os.name == "nt" else "chrome"
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(f"pkg/{name}", b"not-a-real-binary")
+    arc = tmp_path / "broken.zip"
+    arc.write_bytes(buf.getvalue())
+
+    monkeypatch.setattr(enginesrc, "_engine_version", lambda p: "")
+    with pytest.raises(enginesrc.EngineSourceError) as ei:
+        enginesrc.install_archive(arc, kind="zip", binary=name,
+                                  engine_dir=tmp_path / "engines", version_tag="v1")
+    assert ei.value.code == "ENGINE_BROKEN", ei.value.code
+    assert "libnss3" in (ei.value.hint or ""), ei.value.hint

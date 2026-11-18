@@ -80,6 +80,20 @@ Windows 上可执行文件是 `chrome.exe`。Linux/macOS 全绿、Windows CI 红
 **测试的平台假设错了**，不是产品问题。已按 `os.name` 取文件名，
 并把"可执行位"那条断言在 Windows 上跳过（没有 POSIX 可执行位概念）。
 
+改完 Windows 还是红，第二次报的是：
+
+```
+EngineSourceError: 内核装好了但跑不起来（--version 无输出）。可能缺系统库。
+```
+
+假内核是个文本文件：Windows 根本不会执行它（`.exe` 是假的），Linux 上
+`#!/bin/sh` 的脚本又能跑 —— 同一个测试在两个平台行为不同。
+
+于是把"跑 --version"用桩替掉（这条测试要验的是
+下载/校验/解包/落盘/可执行位这条链路），**并补了两条独立测试**专门盯住
+版本探测与 `ENGINE_BROKEN` 这条路，避免被桩掩盖 ——
+后者恰恰是用户最容易撞上的（Linux 缺 libnss3/atk/gbm、Windows 被杀软拦）。
+
 ### 测试
 
 611 → **618 项**（`tests/test_netproxy.py` 6 项 + 其它）。
