@@ -292,13 +292,24 @@ def test_pack_creation_failure_does_not_lose_the_extension(home, tmp_path, monke
 
 # ── 真浏览器集成（需要支持 --load-extension 的内核，CI 上跳过）──
 def _loadable_engine():
-    """找一个真的能加载扩展的内核（官方 Chrome 137+ 不行，ungoogled 可以）。"""
+    """找一个**真的能跑起来**的内核（官方 Chrome 137+ 不行，ungoogled 可以）。
+
+    ## 为什么不再用 `shutil.which("chromium")`
+
+    GitHub 的 ubuntu runner 上装了 snap 版 chromium。`extensions_loadable()` 靠
+    启动一次浏览器做实测，在那里它**能返回可加载**，于是这个"真浏览器"测试就会
+    跑起来 —— 而 snap 版在 CI 的沙箱里行为异常：进程不退、`terminate()` 的
+    `grace*4` 循环一直等到 pytest 的 90 秒超时，整个 job 红掉
+    （实测 2026-11-19，两次连续失败都停在这里）。
+
+    这条测试的价值是"在我自己那台装了 ungoogled 的机器上验端到端"，不是
+    "在任意 CI runner 上碰运气"。所以只认**明确装了 ungoogled** 的位置。
+    """
     import shutil
 
     cands = [
         "/opt/bsm-p0/ungoogled-chromium-150.0.7871.186-1-x86_64_linux/chrome",
         shutil.which("ungoogled-chromium") or "",
-        shutil.which("chromium") or "",
     ]
     from zw_core.services import engines
 
@@ -343,6 +354,9 @@ def test_installed_extension_actually_runs_in_browser(home, tmp_path):
     })))
     import os as _os
 
+    # 记住原值，结束时恢复 —— 否则这条测试会把 ZW_CHROME_BIN 留给后面的用例，
+    # 让它们跑到一个不该用的内核上（CI 上尤其致命）。
+    _prev_chrome_bin = _os.environ.get("ZW_CHROME_BIN")
     _os.environ["ZW_CHROME_BIN"] = engine
     _cfg.reset_settings()
 
@@ -351,6 +365,26 @@ def test_installed_extension_actually_runs_in_browser(home, tmp_path):
 
     prof = _mgr.create_profile({"name": "runner"})
     assert "runner" in (_mgr.get_profile(prof["id"]).get("extensions") or [])
+
+    # 本地页面服务（内容脚本要一个真实 http 文档）
+    import http.server as _hs
+    import threading as _th
+
+    class _H(_hs.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = b"<!doctype html><title>ext-runner</title><h1>ext-runner</h1>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    _lite = _hs.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    _th.Thread(target=_lite.serve_forever, daemon=True).start()
+    _lite_url = f"http://127.0.0.1:{_lite.server_address[1]}/"
 
     res = _mgr.start(prof["id"])
     port = (res.get("local") or {}).get("port")
@@ -371,9 +405,12 @@ def test_installed_extension_actually_runs_in_browser(home, tmp_path):
         import websockets.sync.client as _wsc
 
         with _wsc.connect(pages[0]["webSocketDebuggerUrl"]) as ws:
+            # **不访问外网**：这条测试在 CI 上曾因 example.com 慢而拖到整 job 超时。
+            # 用本地 HTTP 页 —— 注意不能用 `data:` URL：内容脚本匹配的是
+            # `<all_urls>`，其中**不含 data: 方案**，那样断言会假失败（踩过）。
             ws.send(_json.dumps({"id": 1, "method": "Page.navigate",
-                                 "params": {"url": "https://example.com/"}}))
-            _time.sleep(5)
+                                 "params": {"url": _lite_url}}))
+            _time.sleep(2)
             ws.send(_json.dumps({"id": 2, "method": "Runtime.evaluate",
                                  "params": {"expression":
                                      "document.documentElement.getAttribute('data-zw-run')",
@@ -388,6 +425,11 @@ def test_installed_extension_actually_runs_in_browser(home, tmp_path):
             _mgr.stop(prof["id"], force=True)
         except Exception:
             pass
+        if _prev_chrome_bin is None:
+            _os.environ.pop("ZW_CHROME_BIN", None)
+        else:
+            _os.environ["ZW_CHROME_BIN"] = _prev_chrome_bin
+        _cfg.reset_settings()
 
 
 # ── 真 HTTP 下载路径（本地假商店，不需要外网）───────────────

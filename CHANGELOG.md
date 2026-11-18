@@ -1,5 +1,48 @@
 # CHANGELOG
 
+## 0.7.81 — 2026-11-19
+
+**Linux CI 连续两次红在同一处：一条测试在 CI 上跑到 snap chromium 上去了。**
+
+### 症状
+
+`pytest --timeout=90` 卡在这里超时：
+
+```
+tests/test_extstore.py::test_installed_extension_actually_runs_in_browser
+  → _mgr.stop(prof["id"], force=True)
+  → engines.terminate() 的 time.sleep(0.25) 循环
+```
+
+第一次我以为是偶发，重跑一次**又红**，于是把完整日志拉下来定位到具体用例。
+
+### 根因
+
+`_loadable_engine()` 的候选里有一句 `shutil.which("chromium")`。
+GitHub 的 ubuntu runner 上装了 **snap 版 chromium**，而探针是真启动一次浏览器来判断
+"能不能加载扩展" —— 在那里它返回可加载，于是这条"真浏览器"测试就跑起来了。
+snap 版在 CI 沙箱里进程不退，`terminate()` 的 `grace*4` 循环一直等到 90 秒超时。
+
+**本地一直绿**，是因为我这台机器上 `/opt/bsm-p0` 有正经的 ungoogled，候选列表第一个就命中了，
+压根走不到 `which("chromium")` 那条。
+
+### 修法（三处）
+
+1. **只认明确装了 ungoogled 的位置**，删掉 `which("chromium")`。
+   这条测试的价值是"在我装了 ungoogled 的机器上验端到端"，不是"在任意 CI runner 上碰运气"。
+2. **不再访问 `https://example.com`**，改用本地 HTTP 页 —— 和上一轮 `gateway-check`
+   是同一类问题：验收/测试不该依赖外网。
+   （注意不能用 `data:` URL：内容脚本匹配 `<all_urls>`，**不含 data: 方案**，
+   我第一版这么改导致断言假失败，已改回 http。）
+3. **`ZW_CHROME_BIN` 用完恢复**：原来直接写进 `os.environ` 不还原，
+   会把后面的用例带到不该用的内核上。
+
+单文件耗时 30s → **22s**，44 项全过。
+
+### 测试
+
+八项门槛全绿（631 / 34 / 73 / 13 / 23 / 81 / 33 / 37）。
+
 ## 0.7.80 — 2026-11-19
 
 **自己下载安装的内核，自己认不出来 —— 用真实 Windows 包验出来的。**
