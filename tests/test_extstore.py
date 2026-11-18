@@ -692,3 +692,31 @@ def test_check_updates_runs_concurrently_and_isolates_failures(home, monkeypatch
     assert "连不上" in bad_rows[0]["error"], bad_rows
     # 并发：两个各 0.25s，串行要 0.5s+；这里应明显更短
     assert cost < 0.45, f"看起来是串行的（{cost:.2f}s）"
+
+
+def test_download_proxy_is_honored_and_documented(home, monkeypatch):
+    """`ZW_DOWNLOAD_PROXY` 必须真的被用在下载上，且错误提示要指向它。
+
+    实机验证（云电脑直连）：`clients2.google.com` 报
+    `SSL: UNEXPECTED_EOF_WHILE_READING` —— 国内直连不了，装商店扩展必须有代理。
+
+    而原来 `download_crx` 的 httpx 客户端**没有任何代理配置**，只靠
+    `trust_env` 读 `HTTPS_PROXY`；错误提示却写着"请先给客户端配好代理"，
+    用户照着提示不知道该配在哪里。自相矛盾。
+    """
+    from zw_core import config
+    from zw_core.services import extstore as es
+
+    monkeypatch.setenv("ZW_DOWNLOAD_PROXY", "http://127.0.0.1:9")
+    config.reset_settings()
+    assert config.get_settings().download_proxy == "http://127.0.0.1:9"
+
+    # 代理不可用时应当报错，且提示里明确指向 ZW_DOWNLOAD_PROXY
+    import pytest as _pytest
+
+    with _pytest.raises(es.StoreError) as ei:
+        es.download_crx("hdhngoamekjhmnpenphenpaiindoinpo", timeout=5)
+    assert ei.value.code == "EXT_STORE_UNREACHABLE"
+    assert "ZW_DOWNLOAD_PROXY" in ei.value.message, ei.value.message
+    monkeypatch.delenv("ZW_DOWNLOAD_PROXY", raising=False)
+    config.reset_settings()

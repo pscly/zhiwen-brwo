@@ -1,5 +1,80 @@
 # CHANGELOG
 
+## 0.7.60 — 2026-11-18
+
+**云电脑终于上线了 —— 实机验证暴露一个自相矛盾：提示让你"配好代理"，但根本没有配的地方。**
+
+### 云电脑实机状态（v0.7.57，已在线）
+
+```
+版本 0.7.57 | host 0.0.0.0:8730 | auth_required True（机器码可用）
+hub  http://192.168.3.5:8700
+引擎 Chrome 157.0.8103.79
+远程命令行可用
+```
+
+### 实机验证：商店链接装扩展失败，但原因很清楚
+
+```
+POST /api/v1/extensions/install
+{"url": "https://chromewebstore.google.com/detail/cookiemanager-…"}
+→ EXT_STORE_UNREACHABLE
+   连不上 Chrome 应用商店（SSL: UNEXPECTED_EOF_WHILE_READING）
+```
+
+对照实验（同一台机器）：
+
+| 目标 | 结果 |
+|---|---|
+| `http://www.gstatic.com/generate_204` 直连 | **204 成功** |
+| `clients2.google.com` 直连 | **SSL EOF（被重置）** |
+
+所以那台机器有网，但 `clients2.google.com` 被拦 —— 装商店扩展**必须有代理**。
+
+### 真正的问题：说了要配代理，却没地方配
+
+`download_crx()` 里是：
+
+```python
+with httpx.Client(follow_redirects=True, timeout=timeout) as c:
+    r = c.get(url)
+```
+
+**没有任何代理配置项**，只靠 httpx 的 `trust_env` 读 `HTTPS_PROXY` 环境变量。
+而错误提示写着"国内网络请先给客户端配好代理" —— 用户照着提示**根本不知道该配在哪**。
+
+### 修法：加 `ZW_DOWNLOAD_PROXY`
+
+- 新增配置 `ZW_DOWNLOAD_PROXY`（如 `http://127.0.0.1:7890`），留空则不显式设代理
+  （仍尊重环境变量，保持向后兼容）
+- `download_crx()` 读它并传给 `httpx.Client(proxy=…)`
+- 错误提示改成可操作的：
+
+```
+国内网络请设 ZW_DOWNLOAD_PROXY 指向你的代理（例如 http://127.0.0.1:7890），
+然后重启客户端再试
+```
+
+- `docs/03` 配置表补一行，注明**国内必须配**及具体报错样子
+
+### 顺带探测（给用户的线索）
+
+那台机器上 `127.0.0.1:21080` 在监听（就是链式代理常用的前置端口），但实测：
+
+| 当什么用 | 结果 |
+|---|---|
+| HTTP 代理 | 超时（rc=28） |
+| SOCKS5 | 空回复（rc=52） |
+
+也就是说 21080 目前**不是一个可用的 HTTP/SOCKS 代理**，不能直接填进
+`ZW_DOWNLOAD_PROXY`。你那台落地代理需要经前置访问，得先让前置真正能转发。
+
+### 测试
+
+592 → **593 项**：`test_download_proxy_is_honored_and_documented`
+（配置能读到 + 错误提示里必须出现 `ZW_DOWNLOAD_PROXY`）。
+八项门槛全绿（593 / 34 / 73 / 13 / 21 / 81 / 23 / 32）。
+
 ## 0.7.59 — 2026-11-18
 
 **同一份白名单写了两遍，改了一处、CI 就红；顺带把两类偶发失败钉死。**

@@ -134,6 +134,15 @@ class Settings:
     # 用户要的语义是「先恢复上次关闭时的网址，再额外开检测页」，
     # 两个开关分开是为了能单独关掉其中一半（只恢复、不开检测页，或反过来）。
     restore_tabs: bool = field(default_factory=lambda: _env_bool("ZW_RESTORE_TABS", True))
+    # 下载扩展/CRX 时走的代理（例如 `http://127.0.0.1:7890` 或 `socks5://u:p@h:port`）。
+    #
+    # 为什么需要这个开关：`clients2.google.com` 在国内直连不了（实测云电脑上报
+    # `SSL: UNEXPECTED_EOF_WHILE_READING`），而"从商店链接装扩展"必须能下载 CRX。
+    # 以前只靠 httpx 的 `trust_env` 读 `HTTPS_PROXY` 环境变量，但
+    # **没有任何配置项**，错误提示却写着"请先给客户端配好代理" —— 用户照着提示
+    # 根本不知道该配在哪里。留空 = 不显式设代理（仍尊重环境变量）。
+    download_proxy: str = field(default_factory=lambda: _env("ZW_DOWNLOAD_PROXY", ""))
+
     # 出口检测用的 IP 回显地址（逗号分隔）。留空 = 用内置那三个境外地址。
     # 国内网络或自建服务时换成自己的：只要返回 {"ip": "1.2.3.4"} 即可。
     egress_endpoints: list[str] = field(

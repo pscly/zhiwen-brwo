@@ -140,14 +140,27 @@ def download_crx(ext_id: str, *, timeout: float = 60.0,
                  prodversion: str = DEFAULT_PRODVERSION) -> bytes:
     """从商店下载 CRX 并返回 ZIP 字节。"""
     url = crx_url(ext_id, prodversion)
+    # 拿 `ZW_DOWNLOAD_PROXY`（如果配了）。国内直连 clients2.google.com 会
+    # `SSL: UNEXPECTED_EOF_WHILE_READING`（云电脑实测），必须有代理才能装商店扩展。
+    proxy = ""
     try:
-        with httpx.Client(follow_redirects=True, timeout=timeout) as c:
+        from ..config import get_settings
+
+        proxy = (get_settings().download_proxy or "").strip()
+    except Exception:  # noqa: BLE001 —— 配置读不出来就退回环境变量那条路
+        proxy = ""
+    try:
+        kwargs = {"follow_redirects": True, "timeout": timeout}
+        if proxy:
+            kwargs["proxy"] = proxy
+        with httpx.Client(**kwargs) as c:
             r = c.get(url)
     except Exception as exc:  # noqa: BLE001
         raise StoreError(
             "EXT_STORE_UNREACHABLE",
             f"连不上 Chrome 应用商店（{type(exc).__name__}: {exc}）。"
-            "这台机器需要能访问 clients2.google.com；国内网络请先给客户端配好代理",
+            "这台机器需要能访问 clients2.google.com。国内网络请设 ZW_DOWNLOAD_PROXY "
+            "指向你的代理（例如 http://127.0.0.1:7890），然后重启客户端再试",
             502,
         ) from exc
     if r.status_code != 200:
