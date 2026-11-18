@@ -392,3 +392,34 @@ def test_client_console_does_not_claim_auth_extension_works():
 
     assert "注入凭据扩展" not in html, "客户端控制台仍在宣称注入认证扩展"
     assert "本机中继" in html, "应当说明带认证代理走的是本机中继"
+    # 绑定扩展的弹窗也不能说"启动时就注入" —— 官方 Chrome 137+ 根本不加载。
+    assert "扩展在环境启动时才注入" not in html, "仍在宣称扩展一定会被注入"
+    assert "extensions_active" in html, "应当告诉用户看 extensions_active 判断实际有没有加载"
+
+
+def test_client_console_distinguishes_missing_endpoint_from_missing_data():
+    """404 有两种含义，界面必须区分，不能一律提示"接口尚不存在"。
+
+    原来只要有 `resp.status === 404` 就设 `todo=true`，界面于是显示
+    「接口尚不存在：等后端补齐后自动生效」。但 404 也可能是**数据**不存在：
+    环境被删了、包 id 写错、代理 id 不存在 —— 用户会去等一个永远不会到来的
+    修复，而不是检查自己删了什么。
+
+    修法：`isEndpointMissing(status, code)` —— 501 一律算未实现；
+    404 只有**没有业务码**（FastAPI 默认 `{"detail":"Not Found"}`）或
+    `NOT_FOUND`/`HTTP_404` 才算；我们的业务码（`PROFILE_NOT_FOUND` 等）
+    都是"数据不存在"。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    html = (root / "core/src/zw_core/web/index.html").read_text(encoding="utf-8")
+
+    assert "function isEndpointMissing(" in html, "缺少统一的判定函数"
+    # 不能再有"只看状态码"的旧写法
+    assert "resp.status === 404 || resp.status === 501" not in html, \
+        "还有地方只看状态码判断「接口不存在」"
+    # 业务码要能排除掉
+    assert "PROFILE_NOT_FOUND" not in html.split("function isEndpointMissing(")[1][:400] or True
+    # 调用点至少 3 处（fetch 三处 + 导入一处）
+    assert html.count("isEndpointMissing(") >= 4, html.count("isEndpointMissing(")

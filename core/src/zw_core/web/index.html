@@ -964,14 +964,14 @@ async function api(method, path, body, opt) {
       let msg = 'HTTP ' + resp.status;
       let code = 'HTTP_' + resp.status;
       try { const j = await resp.json(); code = j.code || code; msg = j.message || j.detail || msg; } catch (_) {}
-      throw new ZwError(code, msg, '', resp.status, resp.status === 404 || resp.status === 501);
+      throw new ZwError(code, msg, '', resp.status, isEndpointMissing(resp.status, code));
     }
     return resp;
   }
   if (!ct.includes('json')) {
     if (!resp.ok) {
       throw new ZwError('HTTP_' + resp.status, `HTTP ${resp.status}`, '', resp.status,
-        resp.status === 404 || resp.status === 501);
+        isEndpointMissing(resp.status, ''));
     }
     return resp;   // netscape cookie 之类的纯文本
   }
@@ -980,17 +980,37 @@ async function api(method, path, body, opt) {
     throw new ZwError('BAD_JSON', '服务返回的不是合法 JSON', '打开浏览器开发者工具的 Network 面板看原始响应', resp.status);
   }
   if (data && data.ok === false) {
-    throw new ZwError(data.code || 'ERROR', data.message || '请求失败', data.hint || '', resp.status,
-      resp.status === 404 || resp.status === 501);
+    const code = data.code || 'ERROR';
+    throw new ZwError(code, data.message || '请求失败', data.hint || '', resp.status,
+      isEndpointMissing(resp.status, code));
   }
   if (!resp.ok) {
     // FastAPI 的默认错误体是 {detail: [...]} 或 {detail: "Not Found"}，没有 ok 字段
     const d = data && data.detail;
     const msg = typeof d === 'string' ? d : (Array.isArray(d) ? d.map((x) => `${(x.loc || []).join('.')}: ${x.msg}`).join('；') : `HTTP ${resp.status}`);
-    const todo = resp.status === 404 || resp.status === 501;
+    const todo = isEndpointMissing(resp.status, '');
     throw new ZwError('HTTP_' + resp.status, msg, todo ? '这个接口在当前后端版本里还不存在' : '', resp.status, todo);
   }
   return data && data.data !== undefined ? data.data : data;
+}
+
+// 判断一个 4xx/501 到底是"接口还没做"还是"数据不存在"。
+//
+// 原来的写法只看状态码（404 或 501 就当成接口缺失）。
+// 但 404 也可能是**数据**不存在：环境被删了、包 id 写错、代理 id 不存在。
+// 那些情况界面会误报「接口尚不存在，等后端补齐后自动生效」，用户就去等一个
+// 永远不会到来的修复，而不是检查自己删了什么。
+//
+// 规则：501 一律算未实现；404 只有在**没有业务错误码**（FastAPI 默认的
+// {"detail":"Not Found"}）或错误码是 NOT_FOUND / HTTP_404 时才算未实现。
+// 我们自己的业务码（PROFILE_NOT_FOUND / PACK_NOT_FOUND …）都是"数据不存在"。
+function isEndpointMissing(status, code){
+  if (status === 501) return true;
+  if (status !== 404) return false;
+  const c = String(code || '').toUpperCase();
+  if (!c) return true;
+  if (c === 'HTTP_404' || c === 'NOT_FOUND') return true;
+  return false;
 }
 
 function markConn(ok) {
@@ -2310,7 +2330,7 @@ function openExtBind(slug, version) {
   openDialog({
     title: `绑定扩展 ${slug}`,
     body: `<div class="field"><label>选择环境</label><select class="select" id="eb-profile">${opts || '<option value="">还没有环境</option>'}</select></div>
-      <div class="fs11 faint mt2">扩展在环境启动时才注入；已运行的环境需要重启才生效。</div>`,
+      <div class="fs11 faint mt2">绑定后需要重启该环境。注意：能否真的加载取决于内核 —— 官方 Chrome 137 起忽略 --load-extension，装了也不会生效；用 ungoogled-chromium 才加载。启动后看环境详情里的 extensions_active 字段就知道实际有没有加载。</div>`,
     footer: `<div class="grow"></div><button class="btn sm" data-act="dlg-close">取消</button>
       <button class="btn sm" id="eb-unbind">解绑</button><button class="btn sm primary" id="eb-bind">绑定</button>`,
     onMount(root) {
@@ -3260,7 +3280,7 @@ function openImport() {
           if (!resp.ok || (data && data.ok === false)) {
             const code = (data && data.code) || 'HTTP_' + resp.status;
             const msg = (data && data.message) || `HTTP ${resp.status}`;
-            const todo = resp.status === 404 || resp.status === 501;
+            const todo = isEndpointMissing(resp.status, code);
             toast(todo ? '导入功能待后端就绪' : '导入失败：' + msg, todo ? 'pending' : 'err', { code, hint: data && data.hint });
             btn.classList.remove('loading');
             return;

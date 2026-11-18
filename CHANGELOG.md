@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## 0.7.55 — 2026-11-18
+
+**404 有两种含义，界面一律报"接口尚不存在" —— 用户会去等一个永远不会来的修复。**
+
+### 问题
+
+客户端控制台里判断"这个接口还没做"的逻辑是：
+
+```js
+const todo = resp.status === 404 || resp.status === 501;
+```
+
+**只看状态码。** 但 404 也可能是**数据**不存在：
+
+- 环境被删了 → `PROFILE_NOT_FOUND`
+- 包 id 写错 → `PACK_NOT_FOUND`
+- 代理 id 不存在 → `PROXY_NOT_FOUND`
+
+这些情况界面会显示「接口尚不存在：界面会显示占位态，等后端补齐后自动生效」。
+用户于是去等一个**永远不会到来的修复**，而不是检查自己删了什么。
+
+### 修法
+
+统一成一个判定函数（4 处调用点全部换掉）：
+
+```js
+function isEndpointMissing(status, code){
+  if (status === 501) return true;
+  if (status !== 404) return false;
+  const c = String(code || '').toUpperCase();
+  if (!c) return true;                       // 没业务码 = 框架层路由不存在
+  if (c === 'HTTP_404' || c === 'NOT_FOUND') return true;
+  return false;                              // 业务码 → 数据不存在
+}
+```
+
+顺带修掉客户端控制台另一处旧文案：绑定扩展的弹窗原来写着
+「扩展在环境启动时才注入」—— 官方 Chrome 137+ 根本不加载 `--load-extension`，
+装了也不会生效。现在如实说明，并提示看 `extensions_active` 判断实际有没有加载。
+
+### 过程中我自己的一个险情
+
+第一次插入 `isEndpointMissing` 定义时，替换锚点没匹配上（`function markConn(ok){`
+与 `(ok) {` 差一个空格），于是**定义没进去、但 4 处调用都改好了** ——
+等于把页面改成了"调用未定义函数"，比原来的 bug 更糟。
+
+是**测试立刻抓到的**（`assert "function isEndpointMissing(" in html`）。
+这也说明先写断言再改、改完必跑，比"看着改对了"可靠。
+
+### 测试
+
+589 → **590 项**；七个门槛全绿（590 / 73 / 13 / 20 / 78 / 23 / 32）。
+
 ## 0.7.54 — 2026-11-18
 
 **客户端控制台还在教用户"选代理会自动注入凭据扩展" —— 这条路已经不通了。**
