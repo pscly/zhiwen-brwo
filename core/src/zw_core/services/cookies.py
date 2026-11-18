@@ -58,6 +58,8 @@ class CDP:
         self.ws_url = ws_url
         self.timeout = timeout
         self._seq = 0
+        # 诊断用：本次 call 期间跳过了多少条"不是给我的"消息
+        self._skipped = 0
         self._ws: Any = None
         self.session_id: str | None = None
         self.target_id: str | None = None
@@ -155,15 +157,30 @@ class CDP:
         if not method.startswith(self.BROWSER_LEVEL):
             message["sessionId"] = await self.ensure_session()
         await self._ws.send(json.dumps(message))
+        self._skipped = 0
         loop = asyncio.get_running_loop()
         deadline = loop.time() + (timeout or self.timeout)
         while True:
             remain = deadline - loop.time()
             if remain <= 0:
                 raise CDPError("CDP_TIMEOUT", f"CDP 命令 {method} 超时（{(timeout or self.timeout):.0f}s）")
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=remain)
+            try:
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=remain)
+            except (asyncio.TimeoutError, TimeoutError):
+                # 超时时把"收到了多少条别的消息"带出来。
+                #
+                # 没有这个数字就只能猜：是浏览器没响应，还是session 失效导致
+                # 响应永远不来，还是事件洪流把时间吃光了。
+                # 实测 check-all 里 `Network.enable` 卡住时，这条信息是唯一线索。
+                raise CDPError(
+                    "CDP_TIMEOUT",
+                    f"CDP 命令 {method} 超时（{(timeout or self.timeout):.0f}s，"
+                    f"期间收到 {self._skipped} 条其它消息"
+                    f"{'，session=' + str(self.session_id)[:8] if self.session_id else '，无 session'}）",
+                ) from None
             data = json.loads(raw)
             if data.get("id") != msg_id:
+                self._skipped += 1
                 continue  # 事件（含其他 session 的消息），忽略
             if "error" in data:
                 err = data["error"]

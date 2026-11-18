@@ -315,3 +315,22 @@ def test_every_custom_exception_has_a_handler():
     assert not missing, (
         "这些异常类没有 exception_handler，会冒成 500 + traceback：\n  "
         + "\n  ".join(missing) + "\n在 api.py 里补上（照 _pack_error 的写法）。")
+
+
+def test_quickstart_tells_users_engine_is_automatic():
+    """快速开始不能让用户去手动下载内核。
+
+    0.7.72 起客户端会自己下载安装 ungoogled-chromium；而快速开始里原来还留着
+    "curl 下载 fingerprint-chromium 压缩包 + Expand-Archive/tar 手动解压"的旧步骤。
+    那种文档比没有更糟：用户照着做，装完发现和程序自动管理的内核并存，
+    反而搞不清哪个在生效。
+
+    同时必须说明**为什么不能用系统 Chrome**（137 起忽略 --load-extension），
+    否则用户会理所当然地用 `apt install chromium` / 系统里的 Chrome。
+    """
+    text = (ROOT / "docs/01-快速开始.md").read_text(encoding="utf-8")
+    assert "engine install" in text, "快速开始没告诉用户内核是自动装的"
+    assert "Expand-Archive" not in text, "还在教用户手动解压内核压缩包"
+    assert "releases/download" not in text, "还在教用户手动下载内核"
+    assert "137" in text and "load-extension" in text, \
+        "没说清为什么不能用官方 Chrome"

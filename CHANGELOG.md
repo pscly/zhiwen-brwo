@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## 0.7.77 — 2026-11-19
+
+**清自己造成的文档债务：好几份文档还在教用户手动下载内核。**
+
+### 问题
+
+我把默认内核换成 ungoogled-chromium（0.7.72）、并让客户端自己下载安装之后，
+这几处文档没跟上：
+
+| 文档 | 原来写的 |
+|---|---|
+| `docs/01-快速开始.md` | 「方案 B：fingerprint-chromium（推荐）」+ `curl` 下载 + `tar xf` 手动解压 |
+| `docs/01-快速开始.md`（Linux） | `sudo apt install chromium` 当首选方案 |
+| `docs/09-交接说明.md` | 「第 2 步：换指纹内核（重要，10 分钟）」+ 手动 `Invoke-WebRequest` |
+| `AGENTS.md` | 「指纹由 fingerprint-chromium 或**系统 Chrome** 提供」 |
+
+这种文档**比没有更糟**：用户照着做，装完发现和程序自动管理的内核并存，
+反而搞不清哪个在生效。而 `apt install chromium` 装的发行版构建多数也跟随上游
+限制了 `--load-extension`，装完插件照样不生效。
+
+### 改成什么
+
+- 快速开始：先说明「内核不用管，会自动装」，给 `engine status` / `engine install`
+  两条命令；并**写清为什么不能用系统 Chrome**（137 起忽略 `--load-extension`）
+- 保留"想要一号一设备再加 fingerprint-chromium"的说明，但改成
+  「把目录放进 `<数据目录>/engines/` 即可，policy=ungoogled 会自动接受它」
+- 交接说明第 2 步从「换内核（10 分钟手动）」改成「确认内核能加载扩展（1 分钟）」
+- `AGENTS.md` 开头那句改成实际默认：ungoogled + 缺失时自动下载
+
+### 加了一条文档断言
+
+`test_quickstart_tells_users_engine_is_automatic`：快速开始里必须出现
+`engine install`、**不能**再出现 `Expand-Archive` 或 `releases/download`、
+且必须解释 137/`--load-extension`。以后再有人把旧步骤抄回去，CI 直接红。
+
+### 顺带：给 CDP 超时加了诊断
+
+`gateway-check` 的 cookie 断言在 check-all 里偶发失败过一次（单独跑、连续跑两次都过）。
+真正原因没抓到，所以先让**下次失败时能说清**：
+
+```
+CDP 命令 Network.enable 超时（60s，期间收到 1234 条其它消息，session=216fd0f9）
+```
+
+这三个数字能区分三种完全不同的原因：浏览器没响应 / session 失效
+（响应永远不来）/ 事件洪流把时间吃光。没有它只能靠猜。
+
+### 测试
+
+626 → **627 项**。八项门槛全绿（627 / 34 / 73 / 13 / 22 / 81 / 33 / 35）。
+
 ## 0.7.76 — 2026-11-19
 
 **不铺新功能，专门加固我这几轮快速加的两块代码（`netproxy` / `enginesrc`）。**
