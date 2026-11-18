@@ -249,6 +249,31 @@ def main() -> int:
                      "ask_import_from_chrome", "ask_import_from"):
             check(f"PacksOverlay 有处理函数 {name}", hasattr(packs, name))
 
+        # 「从 Chrome 目录导入」的弹窗里要有「扫描本机」。
+        # 用户不知道 RXYCDP 的 User Data 在哪 —— 这是最常见的卡点。
+        # web 控制台 0.7.68 已有，桌面客户端这一侧也要有，否则两边不一致。
+        check("CoreApi 有 scan_browsers", hasattr(api, "scan_browsers"))
+        packs.ask_import_from_chrome()
+        t.update()
+        # 注意：`_Overlay` 不是 Toplevel —— 它用 `tk.Frame` 贴在父窗口里
+        # （为了盖住整个窗口、卡片按整窗居中）。所以按 Toplevel 找是找不到的，
+        # 第一版就这么写，断言直接红。
+        # 浮层不是 Toplevel，是贴在窗口里的 Frame（`_Overlay.root`），
+        # 所以直接在整棵控件树上找"扫描本机"这个按钮，连同它的可点性一起验。
+        # （第一版试图按 `TextOverlay` 类型找再遍历 `.root`，结果拿到空列表 ——
+        #  `_Overlay.root` 挂在 `master.winfo_toplevel()` 上，不在 overlay 对象树里。）
+        all_w = _all_widgets(t)
+        scan_btns = [b for b in all_w
+                     if b.winfo_class() in ("TButton", "Button")
+                     and "扫描本机" in str(b.cget("text") or "")]
+        check("「从 Chrome 目录导入」弹窗里有「扫描本机」按钮", len(scan_btns) == 1,
+              "count=" + str(len(scan_btns)))
+        # 弹窗里还应该有「开始导入」，证明这是那个导入弹窗而不是别的
+        dlg_btns = [str(b.cget("text") or "") for b in all_w
+                    if b.winfo_class() in ("TButton", "Button")]
+        check("导入弹窗里的按钮齐全（扫描本机 / 开始导入 / 取消）",
+              all(k in dlg_btns for k in ("扫描本机", "开始导入", "取消")), str(dlg_btns))
+
         print("\n— 代理库面板 —")
         lib = gp.ProxyLibraryOverlay(t, theme, fonts, api=api,
                                      on_log=lambda m, k="": logs.append(m),
@@ -395,6 +420,24 @@ def _find_button(widget, want: str):
         except Exception:
             pass
     return None
+
+
+def _all_widgets(root) -> list:
+    """递归列出 root 下所有控件（含 root 自己）。
+
+    `_Overlay` 这类浮层不是 Toplevel，而是贴在窗口里的 Frame，
+    所以找它们只能遍历控件树。
+    """
+    out: list = []
+    stack: list = [root]
+    while stack:
+        w = stack.pop()
+        out.append(w)
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+    return out
 
 
 def _button_texts(widget) -> list[str]:

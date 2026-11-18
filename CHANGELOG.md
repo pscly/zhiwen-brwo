@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## 0.7.69 — 2026-11-18
+
+**桌面客户端也加「扫描本机」—— 两边不一致，而你日常用的是桌面客户端。**
+
+### 问题
+
+0.7.68 给 web 控制台的导入弹窗加了「扫描本机」，但**桌面客户端（tkinter）的
+「从 Chrome 目录导入」没有**。用户日常打开的就是桌面客户端，等于那个便利性
+改动他们碰不到。
+
+### 修法
+
+`PacksOverlay.ask_import_from_chrome()` 的弹窗里补一行：
+
+```
+[扫描本机]  找到 2 个，点一下选它
+  [选这个]  RXYCDP · Default · 3 个扩展   C:\Users\…\RXYCDP\User Data\Default
+  [选这个]  Chrome  · Default · 1 个扩展   C:\Users\…\Chrome\User Data\Default
+```
+
+- 扫描走 `call_async()`（后台线程 + `after(0)` 回主线程）—— Windows 上扫
+  Program Files 要几秒，同步跑会把界面卡住；Tk 控件只能在主线程动，这是硬约束
+- 只列前 6 条（弹窗空间有限），点「选这个」把路径填进输入框
+- 配套 `CoreApi.scan_browsers()`（`GET /api/v1/packs/scan-browsers`，超时 120s）
+
+### 验收（gui-check 32 → 35）
+
+```
+✅ 「从 Chrome 目录导入」弹窗里有「扫描本机」按钮
+✅ 导入弹窗里的按钮齐全（扫描本机 / 开始导入 / 取消）
+✅ CoreApi 有 scan_browsers
+```
+
+### 过程中我错了两次（都记下来）
+
+1. **按 `tk.Toplevel` 找浮层** —— 找不到。`_Overlay` 不是 Toplevel，它用
+   `tk.Frame` 贴在 `master.winfo_toplevel()` 上（为了盖住整窗、卡片居中）。
+2. 改成按 `TextOverlay` 类型找、再遍历 `.root` —— **按钮列表还是空**。
+   因为 `.root` 挂在窗口顶层，不在 overlay 对象的控件树里。
+
+最后直接把控件树打出来看，才确认按钮其实一直在（`TButton [扫描本机]`），
+是断言找错了地方。改成在整棵树上找按钮文本，两个断言都过了。
+
+> 教训：**"断言红"不等于"功能没做"**。先在真控件树上打印出来看一眼，
+> 比继续改断言猜下去快得多。
+
+### 测试
+
+600 项不变；gui-check **35** 条。八项门槛全绿
+（600 / 34 / 73 / 13 / 21 / 81 / 29 / **35**）。
+
 ## 0.7.68 — 2026-11-18
 
 **「我不知道 RXYCDP 的 User Data 在哪」—— 现在可以让程序自己扫。顺带修掉 `as_default` 失效。**

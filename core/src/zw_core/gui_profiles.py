@@ -567,6 +567,15 @@ class CoreApi:
     def list_packs(self) -> tuple[bool, Any, dict[str, Any] | None]:
         return self.call("GET", "/api/v1/packs", timeout=10.0)
 
+    def scan_browsers(self) -> tuple[bool, Any, dict[str, Any] | None]:
+        """扫本机"有扩展可导入"的浏览器配置目录（给导入弹窗的「扫描本机」用）。
+
+        扫的是 `%LOCALAPPDATA%` / `%APPDATA%` / `Programs` / `Program Files…`，
+        限深度；Windows 上磁盘慢时可能要几秒，所以调用方必须走后台线程。
+        """
+        return _unwrap_business(*self.call(
+            "GET", "/api/v1/packs/scan-browsers", timeout=120.0))
+
     def import_pack(self, *, path: str = "", from_profile: str = "",
                     from_chrome: str = "",
                     name: str = "") -> tuple[bool, Any, dict[str, Any] | None]:
@@ -1776,6 +1785,64 @@ class PacksOverlay(_Overlay):
             submit_text="开始导入",
             on_submit=self._import_from_chrome_path,
         )
+        # 「扫描本机」：不知道 RXYCDP / Roxy 装在哪、Profile 叫什么，这是最常见的卡点。
+        # web 控制台已有这个按钮（0.7.68），桌面客户端没有 —— 两边不一致，
+        # 而用户日常用的是桌面客户端。
+        scan_row = tk.Frame(ov.body, bg=self.theme.card2)
+        scan_row.pack(fill="x", pady=(8, 0))
+        scan_btn = ttk.Button(scan_row, text="扫描本机", style="Tiny.TButton")
+        scan_btn.pack(side="left")
+        scan_msg = tk.Label(scan_row, text="", bg=self.theme.card2, fg=self.theme.faint,
+                            font=self.fonts["tiny"], anchor="w")
+        scan_msg.pack(side="left", padx=(8, 0))
+        found_box = tk.Frame(ov.body, bg=self.theme.card2)
+        found_box.pack(fill="x", pady=(4, 0))
+
+        def _show(res: Any) -> None:
+            ok_, data, err = res
+            if not ok_:
+                scan_msg.configure(text=f"扫描失败：{err.get('message', '')}")
+                return
+            cands = (data or {}).get("candidates") or []
+            if not cands:
+                scan_msg.configure(text="没找到带扩展的浏览器配置目录（可手动填路径）")
+                return
+            scan_msg.configure(text=f"找到 {len(cands)} 个，点一下选它")
+            for w in found_box.winfo_children():
+                w.destroy()
+            for c in cands[:6]:
+                row = tk.Frame(found_box, bg=self.theme.card2)
+                row.pack(fill="x", pady=1)
+                ttk.Button(
+                    row, text="选这个", style="Tiny.TButton",
+                    command=lambda p_=c["path"]: (
+                        ov.vars["path"].set(p_), scan_msg.configure(text="已填入")),
+                ).pack(side="left")
+                tk.Label(
+                    row, text=f"{c.get('browser', '?')} · {c.get('profile', '')} · "
+                              f"{c.get('extension_count', 0)} 个扩展",
+                    bg=self.theme.card2, fg=self.theme.dim, font=self.fonts["tiny"],
+                ).pack(side="left", padx=(6, 0))
+                tk.Label(
+                    row, text=str(c.get("path", "")), bg=self.theme.card2,
+                    fg=self.theme.faint, font=self.fonts["tiny"],
+                    anchor="w", justify="left",
+                ).pack(side="left", padx=(6, 0), fill="x", expand=True)
+
+        def _scan() -> None:
+            scan_btn.state(["disabled"])
+            scan_msg.configure(text="正在扫描 …")
+
+            def done(res: Any) -> None:
+                try:
+                    scan_btn.state(["!disabled"])
+                except Exception:
+                    pass
+                _show(res)
+
+            call_async(ov, lambda: self.api.scan_browsers(), done)
+
+        scan_btn.configure(command=_scan)
         ov.open()
 
     def _import_from_chrome_path(self, values: dict[str, str]) -> None:

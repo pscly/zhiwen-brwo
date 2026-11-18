@@ -12,5 +12,5 @@
 3. 每一个错误都有稳定的 code，供 AI 与脚本判断，而不是靠猜 message。
 """
 
-__version__ = "0.7.68"
+__version__ = "0.7.69"
 APP_NAME = "知纹"
