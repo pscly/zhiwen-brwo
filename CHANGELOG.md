@@ -1,5 +1,64 @@
 # CHANGELOG
 
+## 0.7.66 — 2026-11-18
+
+**文档一直说"配置来自环境变量 / .env 文件"，但代码里从来没读过 .env。**
+
+### 问题
+
+`config.py` 顶部第一行就写着：
+
+> 核心配置。全部来自环境变量 / .env 文件，便于 Docker 与裸装两种部署。
+
+而 `_env()` 只读 `os.environ` —— **没有任何 .env 加载逻辑**。对 Docker 没影响
+（compose 里直接给 environment），但对**单文件客户端**影响很大：
+
+想配 `ZW_DOWNLOAD_PROXY`，用户只能去「系统属性 → 环境变量」里加，改完还要
+重开程序 —— 绝大多数人不会做，于是那个功能等于没开。
+
+### 修法
+
+新增 `load_dotenv_once()`，在 `get_settings()` 里第一次取配置前调用：
+
+- 查找顺序：`ZW_ENV_FILE` → 配置目录（Windows `%LOCALAPPDATA%\zhiwen-client`，
+  Linux/macOS `~/.config/zhiwen-client`）→ 当前工作目录，各找 `zhiwen.env` / `.env`
+- **只读第一个找到的**
+- **不覆盖已存在的环境变量**（命令行 / CI 显式设的永远优先，Docker 行为不变）
+- 支持 `#` 注释、`export KEY=VALUE`、值两侧引号、带 BOM 的文件
+
+于是用户只要在配置目录放一个文本文件：
+
+```
+ZW_DOWNLOAD_PROXY=http://127.0.0.1:7890
+```
+
+重开客户端就生效，不用碰系统环境变量。`docs/03` 新增 §4.0 写清这件事。
+
+### 我自己踩的坑（记下来）
+
+第一版测试通过后就发了，结果 **`check-all` 一下红了 6 个**：
+
+```
+test_download_crx_over_real_http_with_redirect   FAILED
+test_download_crx_http_error_is_readable         FAILED
+test_compose_start_urls_restores_then_detects    FAILED
+…（共 6 个）
+```
+
+原因：`load_dotenv_once()` 是**直接写 `os.environ`** 的（它就该这样），
+而我的测试只 `monkeypatch.delenv("ZW_ENV_FILE")` —— 那只能撤掉"文件路径"，
+**撤不掉文件里注入的键**。于是 `ZW_DOWNLOAD_PROXY=http://127.0.0.1:9`
+留在了进程环境里，后面所有走下载的测试都连那个死代理。
+
+单独跑 `test_extstore.py` 是全绿的（41 passed），只有跟 `test_client_extra.py`
+一起跑才红 —— **典型的测试间污染，最容易被"我这条过了"骗过去**。
+修法：测试里显式 `os.environ.pop()` 清掉文件注入的键 + `reset_settings()`。
+
+### 测试
+
+596 → **597 项**（`test_dotenv_file_is_actually_loaded`）。
+八项门槛全绿（597 / 34 / 73 / 13 / 21 / 81 / 23 / 32）。
+
 ## 0.7.65 — 2026-11-18
 
 **在云电脑在线状态下，把三个界面判断逐个用真实数据核了一遍。**

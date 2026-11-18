@@ -19,6 +19,77 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# ── .env 文件支持 ────────────────────────────────────────────
+#
+# 模块顶部的注释一直写着"全部来自环境变量 / .env 文件"，但**代码里从来没有
+# 加载过 .env**：`_env()` 只读 `os.environ`。对 Docker 部署没影响（compose 里
+# 直接给 environment），但对**单文件客户端**影响很大 —— 用户在 Windows 上想配
+# `ZW_DOWNLOAD_PROXY`，只能去"系统属性 → 环境变量"里加，改完还要重开程序，
+# 绝大多数人根本不会做。
+#
+# 这里补上真正的 .env 读取：启动时从两处按顺序找，**先找到的赢**，
+# 且**不覆盖已有的真实环境变量**（环境变量优先级永远更高，Docker/CI 行为不变）。
+_PREFERRED_ENV_FILES: tuple[str, ...] = ("zhiwen.env", ".env")
+_dotenv_loaded = False
+
+
+def _dotenv_candidates() -> list[Path]:
+    """找 .env 的位置：先配置目录（用户容易找到），再数据目录/工作目录。"""
+    out: list[Path] = []
+    override = os.environ.get("ZW_ENV_FILE", "").strip()
+    if override:
+        out.append(Path(override).expanduser())
+    home_env = os.environ.get("ZW_CLIENT_HOME", "").strip()
+    if home_env:
+        base = Path(home_env).expanduser()
+    elif sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "zhiwen-client"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "zhiwen-client"
+    for name in _PREFERRED_ENV_FILES:
+        out.append(base / name)
+    cwd = Path.cwd()
+    for name in _PREFERRED_ENV_FILES:
+        out.append(cwd / name)
+    return out
+
+
+def load_dotenv_once() -> Path | None:
+    """读第一个存在的 .env，返回它用了哪个文件（没读就返回 None）。
+
+    规则与常见实践一致：`KEY=VALUE`，`#` 开头是注释，允许 `export KEY=VALUE`，
+    值两端的引号会被去掉。**已存在的环境变量不会被覆盖** —— 这样命令行/CI
+    里显式设的值永远优先，行为可预期。
+    """
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return None
+    _dotenv_loaded = True
+    for path in _dotenv_candidates():
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.lower().startswith("export "):
+                line = line[7:].lstrip()
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if not key:
+                continue
+            val = val.strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+                val = val[1:-1]
+            os.environ.setdefault(key, val)
+        return path
+    return None
+
+
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
@@ -321,6 +392,9 @@ _settings: Settings | None = None
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
+        # 先把 .env 读进来。放在这里而不是模块导入时，是为了不干扰测试
+        # （测试用 `reset_settings()` + monkeypatch 环境变量，不该被磁盘上的文件影响）。
+        load_dotenv_once()
         s = Settings()
         _settings = s.resolve()
     return _settings

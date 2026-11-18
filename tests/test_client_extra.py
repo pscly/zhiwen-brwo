@@ -576,3 +576,45 @@ def test_gui_connect_failure_tells_user_about_offline_serve():
     assert "serve" in src
     # 用了 Path 就必须真的导入，否则该分支一走到就 NameError
     assert "from pathlib import Path" in src, "gui.py 用了 Path 但没有导入"
+
+
+def test_dotenv_file_is_actually_loaded(tmp_path, monkeypatch):
+    """`.env` 必须真的被读进来（以前只在注释里说支持，代码根本没实现）。
+
+    影响最大的是单文件客户端：用户在 Windows 上想配 `ZW_DOWNLOAD_PROXY`，
+    以前只能去"系统属性 → 环境变量"加，改完还要重开程序 —— 绝大多数人不会做。
+    现在把 `zhiwen.env` / `.env` 放在配置目录或当前目录即可。
+
+    两条硬规则：
+      1. 只读**第一个**存在的文件（先找到的赢）
+      2. **不覆盖**已有的真实环境变量（命令行/CI 里显式设的值永远优先）
+    """
+    from zw_core import config as cfg
+
+    (tmp_path / "zhiwen.env").write_text(
+        "# 注释会被忽略\n"
+        "ZW_DOWNLOAD_PROXY=http://127.0.0.1:7890\n"
+        "export ZW_OPEN_DETECT_ON_START='false'\n"
+        "ZW_EXISTING=from-file\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZW_ENV_FILE", str(tmp_path / "zhiwen.env"))
+    monkeypatch.delenv("ZW_DOWNLOAD_PROXY", raising=False)
+    monkeypatch.setenv("ZW_EXISTING", "from-env")     # 环境变量必须赢
+    cfg._dotenv_loaded = False
+
+    used = cfg.load_dotenv_once()
+    assert used is not None and used.name == "zhiwen.env", used
+    import os as _os
+    assert _os.environ.get("ZW_DOWNLOAD_PROXY") == "http://127.0.0.1:7890"
+    assert _os.environ.get("ZW_OPEN_DETECT_ON_START") == "false"   # 引号被去掉
+    assert _os.environ.get("ZW_EXISTING") == "from-env"            # 不覆盖
+
+    # **必须手动清掉文件注入的键**：`load_dotenv_once()` 是直接写 `os.environ` 的
+    # （不能只靠 monkeypatch —— 它不是通过 monkeypatch 设的，所以不会被自动还原）。
+    # 漏这一步的后果实测过：后面 test_extstore.py 的两个下载测试会全红，
+    # 因为 `ZW_DOWNLOAD_PROXY` 还指着那个死代理（127.0.0.1:9）。
+    for k in ("ZW_DOWNLOAD_PROXY", "ZW_OPEN_DETECT_ON_START", "ZW_EXISTING"):
+        os.environ.pop(k, None)
+    cfg._dotenv_loaded = False
+    cfg.reset_settings()
