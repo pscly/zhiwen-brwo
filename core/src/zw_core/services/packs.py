@@ -131,7 +131,12 @@ def _read_manifest(folder: Path) -> dict[str, Any] | None:
     if not mf.is_file():
         return None
     try:
-        data = json.loads(mf.read_text(encoding="utf-8", errors="replace"))
+        # **必须用 utf-8-sig**：有些扩展的 manifest.json 带 UTF-8 BOM
+        # （Windows 上的编辑器、以及某些构建工具会加）。用 `utf-8` 读进来会多一个
+        # \ufeff，`json.loads` 直接抛 JSONDecodeError —— 结果是"这个扩展被静默跳过"，
+        # 用户只会看到「里面没有可导入的扩展」，完全想不到是 BOM 的问题。
+        # 实测踩到：用 PowerShell `Set-Content -Encoding UTF8` 造的文件就带 BOM。
+        data = json.loads(mf.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None

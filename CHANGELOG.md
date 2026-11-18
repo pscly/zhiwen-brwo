@@ -1,5 +1,66 @@
 # CHANGELOG
 
+## 0.7.62 — 2026-11-18
+
+**带 UTF-8 BOM 的 manifest.json 会被静默跳过 —— 用户只会看到"里面没有扩展"。**
+
+### 怎么发现的（云电脑实机）
+
+想在那台机器上验证「插件**及其数据**一起打包」。先确认它到底装了什么浏览器：
+
+```
+C:\Program Files        → Google、Clash Verge、RustDesk、ctyun…
+User Data 目录          → Google\Chrome、Microsoft\Edge
+```
+
+**没有 RXYCDP / Roxy** —— 所以那台机器上没法导入 RXYCDP 的实物数据
+（需要用户指出它到底在哪台机器/哪个目录）。
+
+退一步用**真实 Chrome 用户数据**验证 `from_chrome` 路径，成功（932KB、1 个组件扩展）。
+但 `with_data: 0` —— Chrome 里没有第三方扩展的 `Local Extension Settings`。
+
+于是我造了一份带扩展数据的假 Chrome 结构再导入，结果：
+
+```
+PACK_NO_EXTENSION  ← 明明有 manifest.json
+```
+
+查下去发现：`_read_manifest()` 用 `read_text(encoding="utf-8")` + `json.loads`，
+而 **PowerShell 的 `Set-Content -Encoding UTF8` 会写 BOM**，解码后多一个 `\ufeff`，
+`json.loads` 直接抛 `JSONDecodeError` → 被 `except` 吞掉 → 返回 None → "没有扩展"。
+
+### 这是真问题，不只是我的测试脚本
+
+**现实里确实有扩展的 manifest.json 带 BOM**（Windows 上某些编辑器/构建工具会加）。
+一旦碰上：
+
+- 从 Chrome / RXYCDP 导入 → 「里面没有可导入的扩展」，用户完全想不到是 BOM
+- 装 .crx → 同样读不出名字和版本
+
+修法：`packs._read_manifest()` 与 `extstore.read_manifest()` 全部改用
+**`utf-8-sig`**（容忍 BOM）。修完后同一份文件立刻能导入：
+
+```
+with_data: 1, has_data: true, data_dir: "data/<ext-id>"
+```
+
+**「插件及其数据一起打包」这条路径 = 真实 Windows 环境验证通过。**
+
+### 云电脑上的收尾
+
+| 动作 | 结果 |
+|---|---|
+| 删测试包 | 200 |
+| 删假 Chrome 目录 | REMOVED |
+| 现有包 | 只剩 `CookieManager - Cookie Editor`（默认开启） |
+
+用户自己的 4 个环境（`tests5`/`3`/`2`/`1`）原样未动。
+
+### 测试
+
+594 → **595 项**（`test_manifest_with_utf8_bom_is_recognized`）。
+八项门槛全绿（595 / 34 / 73 / 13 / 21 / 81 / 23 / 32）。
+
 ## 0.7.61 — 2026-11-18
 
 **云电脑实机跑通了「商店装扩展 → 建包 → 默认带上」整条链，顺带发现详情页看不到"扩展到底加载没"。**

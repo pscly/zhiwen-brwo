@@ -212,7 +212,9 @@ def read_manifest(zip_bytes: bytes) -> dict[str, Any]:
                     with zf.open(name) as f:
                         import json
 
-                        return json.loads(f.read().decode("utf-8", "replace"))
+                        # utf-8-sig：有些扩展的 manifest.json 带 BOM，
+                        # 用 utf-8 解码会多一个 \ufeff 让 json.loads 直接抛。
+                        return json.loads(f.read().decode("utf-8-sig", "replace"))
     except (zipfile.BadZipFile, OSError) as exc:
         raise StoreError("EXT_STORE_BAD_CRX", f"ZIP 解不开：{exc}") from exc
     raise StoreError("EXT_STORE_NO_MANIFEST", "这个包里没有 manifest.json，不像一个扩展")
@@ -468,7 +470,7 @@ def _installed_version(d: Path) -> str:
     meta = d / ".zw-ext-meta.json"
     if meta.is_file():
         try:
-            v = str(json.loads(meta.read_text(encoding="utf-8")).get("version") or "")
+            v = str(json.loads(meta.read_text(encoding="utf-8-sig")).get("version") or "")
             if v:
                 return v
         except (OSError, ValueError, TypeError):

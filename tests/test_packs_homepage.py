@@ -615,3 +615,27 @@ def test_apply_works_when_profile_has_no_engine_path(tmp_path, monkeypatch):
 
 
 # ── "默认带上插件数据 + 可以关掉" 这个开关（0.7.43）────────
+
+
+def test_manifest_with_utf8_bom_is_recognized(tmp_path):
+    """带 UTF-8 BOM 的 manifest.json 必须能读出来。
+
+    真实场景：Windows 上用某些编辑器/构建工具做出来的 manifest 会带 BOM；
+    PowerShell 的 `Set-Content -Encoding UTF8` 默认就写 BOM。
+    用 `utf-8` 解码会多一个 `\\ufeff`，`json.loads` 直接抛 JSONDecodeError ——
+    结果是这个扩展被**静默跳过**，用户只看到「里面没有可导入的扩展」，
+    完全想不到是 BOM 的问题（实测在云电脑上就踩到了）。
+    """
+    import json as _json
+    import pathlib
+
+    from zw_core.services import packs as packsvc
+
+    d = tmp_path / "ext_with_bom"
+    d.mkdir()
+    payload = {"manifest_version": 3, "name": "BomExt", "version": "1.0.0"}
+    (d / "manifest.json").write_bytes(b"\xef\xbb\xbf" + _json.dumps(payload).encode())
+
+    got = packsvc._read_manifest(d)
+    assert got is not None, "带 BOM 的 manifest 被当成读不出来（已被静默跳过）"
+    assert got.get("name") == "BomExt", got
