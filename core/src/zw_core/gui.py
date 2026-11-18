@@ -261,6 +261,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     env_running = tk.StringVar(value="—")
     port_used = tk.StringVar(value="—")
     disk_used = tk.StringVar(value="—")
+    # 内核：能不能加载扩展直接决定"插件是否会生效"，必须让用户在客户端里就看到。
+    # 以前 `engine` 这个值从本机取到了却没展示（收集了没人用）。
+    engine_text = tk.StringVar(value="—")
 
     def log(text: str, level: str = "info") -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -369,7 +372,8 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     grid = ttk.Frame(stat_card, style="Card.TFrame")
     grid.pack(fill="x")
     for i, (label, var) in enumerate((("环境", env_total), ("运行中", env_running),
-                                      ("端口占用", port_used), ("磁盘", disk_used))):
+                                      ("端口占用", port_used), ("磁盘", disk_used),
+                                      ("内核", engine_text))):
         cell = ttk.Frame(grid, style="Card.TFrame")
         cell.grid(row=0, column=i, sticky="w", padx=(0, 26))
         ttk.Label(cell, textvariable=var, style="Big.TLabel").pack(anchor="w")
@@ -645,12 +649,30 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
                 env_running.set("—")
                 port_used.set("—")
                 disk_used.set("—")
+                engine_text.set("—")
                 return
             env_total.set(str(st.get("profiles", "—")))
             env_running.set(f"{st.get('running', 0)} / {st.get('max_running', '—')}")
             pp = st.get("port_pool") or {}
             port_used.set(f"{pp.get('used', '—')}")
             disk_used.set(str(st.get("disk_human", "—")))
+            eng = core.engine() if state["core_on"] else None
+            if not eng:
+                engine_text.set("—")
+            elif (eng.get("download") or {}).get("state") in (
+                    "resolving", "downloading", "extracting", "verifying"):
+                d = eng.get("download") or {}
+                engine_text.set(f"下载 {d.get('percent', 0)}%")
+            elif not eng.get("path"):
+                engine_text.set("缺失")
+            elif eng.get("extensions_loadable") is True:
+                engine_text.set("可加载扩展")
+            elif eng.get("extensions_loadable") is False:
+                engine_text.set("不加载扩展")
+            elif eng.get("probe_pending"):
+                engine_text.set("检测中")
+            else:
+                engine_text.set("未检测")
         except Exception:
             pass
 

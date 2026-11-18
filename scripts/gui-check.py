@@ -243,10 +243,13 @@ def main() -> int:
         t.update()
         pbtns = _button_texts(packs)
         print(f"    面板按钮：{pbtns}")
-        for want in ("从环境导入", "从 Chrome 目录导入", "商店链接安装", "选 .crx 文件", "检查更新"):
+        # 「下载内核」必须在：插件能否生效取决于内核能否加载扩展
+        # （官方 Chrome 137 起不加载 --load-extension）
+        for want in ("从环境导入", "从 Chrome 目录导入", "商店链接安装", "选 .crx 文件",
+                     "检查更新", "下载内核"):
             check(f"扩展包面板有「{want}」", any(want in b for b in pbtns), str(pbtns))
         for name in ("ask_install_from_store", "pick_crx_file", "check_updates",
-                     "ask_import_from_chrome", "ask_import_from"):
+                     "ask_import_from_chrome", "ask_import_from", "ask_install_engine"):
             check(f"PacksOverlay 有处理函数 {name}", hasattr(packs, name))
 
         # 「从 Chrome 目录导入」的弹窗里要有「扫描本机」。

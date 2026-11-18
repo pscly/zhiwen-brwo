@@ -567,6 +567,11 @@ class CoreApi:
     def list_packs(self) -> tuple[bool, Any, dict[str, Any] | None]:
         return self.call("GET", "/api/v1/packs", timeout=10.0)
 
+    def start_engine_install(self) -> tuple[bool, Any, dict[str, Any] | None]:
+        """让 core 后台下载 ungoogled-chromium。"""
+        return _unwrap_business(*self.call(
+            "POST", "/api/v1/engine/install", timeout=30.0))
+
     def scan_browsers(self) -> tuple[bool, Any, dict[str, Any] | None]:
         """扫本机"有扩展可导入"的浏览器配置目录（给导入弹窗的「扫描本机」用）。
 
@@ -1513,6 +1518,11 @@ class PacksOverlay(_Overlay):
                    command=self.ask_install_from_store).pack(side="right", padx=(0, 6))
         ttk.Button(self.buttons, text="选 .crx 文件", style="Tiny.TButton",
                    command=self.pick_crx_file).pack(side="right", padx=(0, 6))
+        # 「下载内核」：插件能不能生效取决于内核能否加载扩展。
+        # 官方 Chrome 137 起不加载命令行扩展，所以这一步必须能在客户端里一键做，
+        # 不能让用户去翻文档找命令。
+        ttk.Button(self.buttons, text="下载内核", style="Tiny.TButton",
+                   command=self.ask_install_engine).pack(side="right", padx=(0, 6))
         ttk.Button(self.buttons, text="检查更新", style="Tiny.TButton",
                    command=self.check_updates).pack(side="right", padx=(0, 6))
         ttk.Button(self.buttons, text="刷新", style="Tiny.TButton",
@@ -1764,6 +1774,28 @@ class PacksOverlay(_Overlay):
                           for u in up[:4])
         self.set_status(f"{len(up)} 个扩展有新版本：{detail}", bad=True)
         self.on_log(f"可更新：{detail}（重新用链接装一次即可升级）", "warn")
+
+    def ask_install_engine(self) -> None:
+        """后台下载 ungoogled-chromium，并在状态行显示进度。
+
+        为什么要做在这里：「扩展包」面板是用户装插件的地方，而"插件到底会不会生效"
+        由内核决定。把内核下载放在插件旁边，用户就不必知道两条命令的关系。
+        """
+        if self._inflight:
+            self.set_status("上一个操作还没完成，稍等一下", bad=True)
+            return
+        try:
+            ok_, data, err = self.api.start_engine_install()
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"发起下载失败：{type(exc).__name__}: {exc}", bad=True)
+            return
+        if not ok_:
+            self.set_status(f"发起下载失败：{(err or {}).get('message', '')}", bad=True)
+            return
+        started = bool((data or {}).get("started"))
+        self.set_status("已开始后台下载内核（约 150–200MB），完成后新建环境就会用它"
+                        if started else "内核已在下载中，稍等", ok=True)
+        self.on_log("开始下载内核（ungoogled-chromium）" if started else "内核已在下装中", "info")
 
     def ask_import_from_chrome(self) -> None:
         """从任意 Chrome / Roxy 的用户数据目录导入扩展包。

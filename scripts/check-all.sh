@@ -69,6 +69,29 @@ export ZW_DEVICE_ID="$DEV"
 # `Cannot read properties of undefined (reading 'cookies')`，看起来像网关坏了，
 # 实际是测试脚手架自己在打架。
 export ZW_PORT_POOL_START=22001 ZW_PORT_POOL_END=22040
+export ZW_PORT_POOL_START_TABS=22101 ZW_PORT_POOL_END_TABS=22140
+
+# 起 core 之前先看端口池干不干净。
+#
+# 真踩过（2026-11-19）：上一次 check-all 被 Ctrl-C/超时中断时，它拉起的 headless
+# 浏览器不会被回收，继续占着 22001/22002。下一次运行时新浏览器拿不到调试端口 →
+# 环境其实没真起来 → 读 cookie 拿到空 → gateway-check 报
+# `Cannot read properties of undefined (reading 'cookies')`。
+# 看起来像网关或 cookie 代码坏了，实际是"自己上一次的残留把自己绊倒"。
+#
+# 这里不自动去杀（杀错东西代价更大），只把占用者列出来并明确提示怎么清。
+_busy=""
+for _p in $(seq 22001 22040) $(seq 22101 22140); do
+  if ss -tln 2>/dev/null | grep -q ":$_p "; then
+    _who=$(ss -tlnp 2>/dev/null | grep ":$_p " | grep -oP 'users:\(\("\K[^"]+' | head -1)
+    _busy="$_busy $_p($_who)"
+  fi
+done
+if [ -n "$_busy" ]; then
+  echo "⚠ 端口池里有端口被占用：$_busy"
+  echo "  如果不清理，浏览器可能拿不到调试端口，gateway-check 会以 cookie 断言失败的形式报出来。"
+  echo "  清理办法：pkill -f zw-checkall   （只杀本脚本留下的进程）"
+fi
 if [ -n "${ZW_HUB_URL:-}" ]; then
   export ZW_HUB_URL ZW_HUB_TOKEN="${ZW_HUB_TOKEN:-}"
   echo "  已配 hub：$ZW_HUB_URL（会真跑同步那几项）"
@@ -127,7 +150,7 @@ echo "════════ 4/8 标签页行为（真浏览器）════
 if [ -x "$CHROME" ]; then
   if out=$(ZW_ROOT="$TMP/tabs" ZW_HOST=127.0.0.1 ZW_PORT=$((PORT+1)) ZW_ADMIN_TOKEN= \
             ZW_SHELL_ENABLED=false ZW_CHROME_BIN="$CHROME" \
-            ZW_PORT_POOL_START=22101 ZW_PORT_POOL_END=22140 \
+            ZW_PORT_POOL_START="$ZW_PORT_POOL_START_TABS" ZW_PORT_POOL_END="$ZW_PORT_POOL_END_TABS" \
             "$VENV" scripts/tabs-check.py 2>&1); then
     pass "tabs-check" "$(echo "$out"|grep -E '断言通过'|tail -1)"
   else

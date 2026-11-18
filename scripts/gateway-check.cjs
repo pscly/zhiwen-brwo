@@ -9,6 +9,7 @@
  *   （可选 ZW_PROFILE 指定环境名，默认 gw-check）
  */
 const path = require('node:path');
+const http = require('node:http');
 
 let chromium = null;
 const candidates = [
@@ -93,10 +94,42 @@ async function j(method, path_, body) {
   check('拿到 context', !!ctx);
 
   const page = await ctx.newPage();
-  await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 45000 });
-  check('通过网关导航成功', page.url().includes('example.com'), page.url());
-  const title = await page.title();
-  check('能读到页面标题', title.includes('Example'), title);
+
+  // **导航用本地页面，不依赖公网**。
+  //
+  // 真踩过（2026-11-19）：这里原来访问 https://example.com，某次 check-all 里
+  // 那条 CDP 连接挂了 **643 秒**才断 —— 期间没有任何日志，后面所有 cookie 断言
+  // 全部失败。单跑时网络好就过、跑全套时偶发红，看起来像网关/cookie 代码坏了，
+  // 实际是"验收步骤依赖了外网"。
+  //
+  // 验收要证明的是"经网关的 CDP 能开页面、能读 DOM"，用本地 HTTP 页足够，
+  // 而且结果确定。外网连通性另有专门的检测（browserleaks/ip123），不在这里做。
+  const lite = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    // 注意：JS **不会**把相邻的两个字符串字面量自动拼接（那是 Python 的行为），
+    // 必须显式加 `+`，否则整个文件都是语法错误（missing ) after argument list）。
+    res.end('<!doctype html><html><head><title>GW Check Page</title></head>'
+            + '<body><h1 id="gw-h1">hello gateway</h1></body></html>');
+  });
+  await new Promise((r) => lite.listen(0, '127.0.0.1', r));
+  const litePort = lite.address().port;
+  try {
+    await page.goto(`http://127.0.0.1:${litePort}/`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    check('通过网关导航成功', page.url().includes(`:${litePort}`), page.url());
+    // `title()` 也可能挂住（导航后渲染卡死时），给它单独的超时上限
+    const title = await Promise.race([
+      page.title(),
+      new Promise((r) => setTimeout(() => r(''), 15000)),
+    ]);
+    check('能读到页面标题', title.includes('GW Check Page'), title);
+    const h1 = await Promise.race([
+      page.textContent('#gw-h1'),
+      new Promise((r) => setTimeout(() => r(''), 15000)),
+    ]);
+    check('能读到页面 DOM 内容', (h1 || '').includes('hello gateway'), h1);
+  } finally {
+    lite.close();
+  }
 
   // 等它真的 running 再读 cookie：否则会拿到 STATE_CONFLICT，
   // 而 `r.data.data` 是 undefined → 报 "Cannot read properties of undefined (reading 'cookies')"
