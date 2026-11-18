@@ -134,7 +134,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - 596 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.64** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- hub **0.7.65** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
@@ -151,6 +151,9 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 - **创建后改代理**（无认证→直连上游 `--proxy-server=socks5://…`；带密码→本机中继
   `--proxy-server=http://127.0.0.1:<port>` + warnings 如实说明），改完立即生效
 - `extensions_active=False`（Chrome 157 忽略 --load-extension，系统如实回报）
+- **本机免令牌（真机回环）**：`curl 127.0.0.1:8730/api/v1/meta` 不带令牌 →
+  `auth_required=False`，而 host 是 `0.0.0.0`（按请求判定，不是按配置）
+- **版本落后徽章 / 离线陈旧状态**：在线时状态原样显示；离线时变「上次：…」
 
 **未验证**：指纹能否过 browserscan、fingerprint-chromium 的种子一致性、
 带认证的**真实**上游代理握手（落地代理只能经前置访问，本仓库所在网络连不到）、
