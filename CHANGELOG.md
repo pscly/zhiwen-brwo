@@ -1,5 +1,66 @@
 # CHANGELOG
 
+## 0.7.74 — 2026-11-19
+
+**顺手修掉一个反复出现的偶发失败，并让"去谷歌内核家族"的判定不再被骗。**
+
+### ① `Cannot read properties of undefined (reading 'cookies')` 的真根因
+
+这个报错在 `check-all` 里偶发出现过三次，我前两次都是加等待（`waitRunning`）绕过去。
+这次拿到保留日志才看清真正原因：
+
+```
+File ".../services/cookies.py", line 176, in _dump_cookies
+    await cdp.call("Network.enable")
+TimeoutError
+2026-11-19 00:06:59 ERROR [uvicorn.error] Exception in ASGI application
+```
+
+**`Network.enable` 冷启动时 40 秒都没回**，而它只被包在 `CDPError` 的处理器里 ——
+裸 `TimeoutError` 直接冒成 **500 + 整段栈**，前端拿到 `undefined`，
+界面上就只剩那句 JS 报错。
+
+三处一起修：
+
+1. `Network.enable` 单独给 60s（它会触发建网络域、枚举 target，冷启动确实慢）
+2. `dump_cookies()` **超时/断连时重连重试一次**（第一根 ws 常常已经半死）
+3. 裸 `TimeoutError` / 连接异常**统一包成 `CDPError`** —— 这样才会走 api 层那套
+   结构化处理器，而不是 500。错误消息也改成人话：
+   「浏览器还没准备好（读 cookie 超时）。等它启动完成再试一次。」
+
+`gateway-check` 侧也改了：连续 5 次退避重试，并**打印真实错误**，
+不再只丢一句 `undefined`。断言数 21 → **22**。
+
+### ② `policy=ungoogled` 会把 fingerprint-chromium 拒掉
+
+`fingerprint-chromium` **本身就是 ungoogled-chromium 的分支**（上游 README 原话：
+based on Ungoogled Chromium），同样能加载 `--load-extension`。原来只认路径里带
+"ungoogled" 字样，用户装了 fingerprint-chromium 反而被判定"没有可用内核"，
+然后被引导去下载一个其实已经有的东西。
+
+改成「不是官方发行版即可」：带 `ungoogled` 或 `fingerprint` 都接受。
+真正决定能不能加载扩展的仍是**探针实测**，名字只用于排序/初筛。
+
+### ③ 判定不能看绝对路径（被自己的测试目录名骗了）
+
+写"必须拒掉官方内核"的测试时，它一直失败，查了半天发现：
+
+```
+/tmp/pytest-of-root/pytest-538/test_ungoogled_policy_rejects_0/engines/official-chrome-157/chrome
+                                                     ^^^^^^^^^^ 路径里有 "ungoogled"
+```
+
+`tmp_path` 里含测试函数名，而函数名里有 `ungoogled` —— 于是"官方内核"被判成
+ungoogled 家族。**同样的事也会发生在用户身上**：把引擎放在 `D:\ungoogled测试\`
+下，任何内核都会被当成优先项。
+
+修法：判定只看**引擎目录内的相对路径**。`enginesrc._existing()` 里同样的写法也一并改了。
+
+### 测试
+
+620 → **622 项**（fingerprint 接受 / 官方内核拒绝 各一条）。
+八项门槛全绿（622 / 34 / 73 / 13 / **22** / 81 / 29 / 35）。
+
 ## 0.7.73 — 2026-11-18
 
 **客户端自己找本机代理 —— 不用再教用户配 `ZW_DOWNLOAD_PROXY`。**

@@ -173,14 +173,64 @@ class CDP:
 
 # ── cookie ────────────────────────────────────────────────
 async def _dump_cookies(cdp: CDP) -> list[dict[str, Any]]:
-    await cdp.call("Network.enable")
+    """读全部 cookie。
+
+    ## 为什么 `Network.enable` 要单独给更宽的超时
+
+    实测（check-all 的并发场景）：浏览器刚被拉起、或者机器正忙时，
+    `Network.enable` 的响应会**超过默认 30 秒**，于是整个 `/cookies` 请求
+    500 失败，前端拿到 `undefined` 再去取 `.cookies` 就是
+    `Cannot read properties of undefined` —— 看起来像接口坏了，其实只是慢。
+
+    `Network.enable` 会触发浏览器建立网络域、枚举 target，在冷启动时确实慢，
+    所以给它 60s；`getAllCookies` 本来就有 60s。
+    """
+    await cdp.call("Network.enable", timeout=60)
     res = await cdp.call("Network.getAllCookies", timeout=60)
     return res.get("cookies", [])
 
 
-async def dump_cookies(ws_url: str) -> list[dict[str, Any]]:
-    async with CDP(ws_url) as cdp:
-        return await _dump_cookies(cdp)
+async def dump_cookies(ws_url: str, *, retries: int = 1) -> list[dict[str, Any]]:
+    """读 cookie；超时/断连时**重连一次**再试。
+
+    为什么需要重试：浏览器冷启动（或机器正忙）时，第一根 CDP 连接经常不好用 ——
+    `Network.enable` 一直不回，等到超时。此时那根 ws 往往已经半死，
+    重连一次基本都能成功（实测 check-all 并发场景下就是这样）。
+
+    重试仍失败才把错误抛出去；错误码沿用 `CDP_TIMEOUT` / `CDP_*`，
+    由 api 层映射成结构化响应（不会变成 500 + 栈）。
+    """
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            async with CDP(ws_url) as cdp:
+                return await _dump_cookies(cdp)
+        except CDPError as exc:
+            last = exc
+            if attempt >= retries:
+                break
+            await asyncio.sleep(0.4)
+        except Exception as exc:  # noqa: BLE001 —— 连接层异常同样重试一次
+            last = exc
+            if attempt >= retries:
+                break
+            await asyncio.sleep(0.4)
+    assert last is not None
+    # 把裸的 `TimeoutError` / 连接异常统一包成 `CDPError`。
+    #
+    # 为什么必须包：`api.py` 只给 `CDPError` 注册了处理器。裸 `TimeoutError`
+    # 会冒成 500 + 整段栈，前端拿到的是 `undefined`，于是界面上只剩
+    # "Cannot read properties of undefined (reading 'cookies')" ——
+    # 看着像接口坏了，实际只是"浏览器刚起来还没准备好"。
+    if isinstance(last, CDPError):
+        raise last
+    if isinstance(last, (asyncio.TimeoutError, TimeoutError)):
+        raise CDPError(
+            "CDP_TIMEOUT",
+            "浏览器还没准备好（读 cookie 超时）。等它启动完成再试一次。",
+        ) from last
+    raise CDPError("CDP_NOT_CONNECTED",
+                   f"连不上浏览器（{type(last).__name__}: {last}）") from last
 
 
 def _sanitize_cookie(c: dict[str, Any]) -> dict[str, Any] | None:

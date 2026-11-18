@@ -105,8 +105,22 @@ async function j(method, path_, body) {
 
   // 写一个 cookie，再通过 REST 读回来 —— 证明两条路径看的是同一个浏览器
   await ctx.addCookies([{ name: 'gw_marker', value: 'from-playwright', domain: '.example.com', path: '/', secure: true }]);
-  r = await j('GET', `/api/v1/profiles/${pid}/cookies`);
-  const got = (r.data.data.cookies || []).find(c => c.name === 'gw_marker');
+  // 读 cookie 要有耐心：浏览器冷启动时 CDP 的 `Network.enable` 可能几十秒才回，
+  // 服务端已在 dump_cookies 里做了一次重连兜底，这里再给几次机会并**打印真实错误**。
+  // 以前这里直接 `r.data.data.cookies`，服务端一旦 500 就只看到
+  // "Cannot read properties of undefined (reading 'cookies')" —— 看不出真正原因。
+  let cookieList = null;
+  let lastErr = '';
+  for (let i = 0; i < 5; i++) {
+    r = await j('GET', `/api/v1/profiles/${pid}/cookies`);
+    const d = r.data && r.data.data;
+    if (d && Array.isArray(d.cookies)) { cookieList = d.cookies; break; }
+    lastErr = JSON.stringify(r.data || {}).slice(0, 240);
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+  check('REST 能读到 cookie 列表', cookieList !== null,
+    lastErr || '连续 5 次都没拿到 cookies 字段');
+  const got = (cookieList || []).find(c => c.name === 'gw_marker');
   check('REST 能读到 Playwright 写的 cookie', !!got && got.value === 'from-playwright', JSON.stringify(got || {}).slice(0, 200));
 
   // 反向：REST 写入，Playwright 读

@@ -138,10 +138,10 @@ def find_chrome(s: Settings) -> Path:
     if hits:
         if not want_ungoogled:
             return hits[0]
-        un = [h for h in hits if "ungoogled" in str(h).lower()]
+        un = [h for h in hits if _is_ungoogled_family(h, Path(s.engine_dir))]
         if un:
             return un[0]
-        # policy=ungoogled 但引擎目录里只有别的内核 → 不用它，往下走给出明确指引
+        # policy=ungoogled 但引擎目录里只有"官方内核" → 不用它，往下走给出明确指引
 
     if not want_ungoogled:
         # 2. 系统常见位置
@@ -175,6 +175,36 @@ def find_chrome(s: Settings) -> Path:
         "  3) 设 ZW_ENGINE_URL + ZW_ENGINE_SHA256 指向你自己的压缩包\n"
         f"当前数据目录：{s.root}",
     )
+
+
+def _is_ungoogled_family(bin_path: Path, engine_dir: Path | None = None) -> bool:
+    """这个内核算不算"去谷歌化家族"。
+
+    ## 为什么不能只看路径里有没有 "ungoogled"
+
+    `fingerprint-chromium` **本身就是 ungoogled-chromium 的分支**
+    （上游 README 原话：an open source fingerprint browser **based on Ungoogled
+    Chromium**），它同样能加载 `--load-extension`。如果只认 "ungoogled"，用户装了
+    fingerprint-chromium 反而会被判成"没有可用内核" —— 这是把人往错误方向推。
+
+    所以判据是"**不是官方发行版**"：带 ungoogled 或 fingerprint 字样都接受。
+    真正决定能不能加载扩展的是**探针实测**（`extprobe.probe`），名字只用来排序/初筛。
+    """
+    # **只看引擎目录内的相对路径**，不要拿绝对路径做判断。
+    #
+    # 真实踩到过：pytest 的 `tmp_path` 里含测试函数名
+    # （`.../test_ungoogled_policy_rejects_0/engines/official-chrome-157/chrome`），
+    # 路径里有 "ungoogled"，于是"官方内核"被判定成 ungoogled 家族 ——
+    # 测试表现成"拒不掉官方内核"，查了半天才发现是被自己的目录名骗了。
+    # 同理，用户把引擎放在 `D:\ungoogled测试\` 这种目录下也会误判。
+    if engine_dir is not None:
+        try:
+            t = str(bin_path.relative_to(engine_dir)).lower()
+        except (ValueError, OSError):
+            t = bin_path.name.lower()
+    else:
+        t = bin_path.name.lower()
+    return "ungoogled" in t or "fingerprint" in t
 
 
 def prepare_engine_async(s: Settings | None = None) -> dict[str, Any]:

@@ -502,7 +502,16 @@ def _existing(engine_dir: Path) -> Path | None:
                     if p.is_file() and (IS_WIN or os.access(p, os.X_OK)))
     if not hits:
         return None
-    hits.sort(key=lambda p: (0 if "ungoogled" in str(p).lower() else 1, len(str(p))))
+    # 只看引擎目录内的相对路径，别拿绝对路径判断 —— 否则用户把引擎放在
+    # `D:\ungoogled测试\` 这种目录下，任何内核都会被评为"优先"。
+    def _rank(p: Path) -> tuple[int, int]:
+        try:
+            rel = str(p.relative_to(engine_dir)).lower()
+        except (ValueError, OSError):
+            rel = p.name.lower()
+        return (0 if ("ungoogled" in rel or "fingerprint" in rel) else 1, len(rel))
+
+    hits.sort(key=_rank)
     return hits[0]
 
 

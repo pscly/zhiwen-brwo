@@ -173,10 +173,13 @@ def test_policy_ungoogled_does_not_fall_back_to_system_chrome(tmp_path, monkeypa
     monkeypatch.setenv("PATH", str(fake.parent) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setattr(engsvc, "_POSIX_CANDIDATES", (str(fake),))
 
-    with pytest.raises(engsvc.EngineError) as ei:
-        engsvc.find_chrome(s)
-    assert ei.value.code in ("ENGINE_NOT_FOUND", "ENGINE_PREPARING"), ei.value.code
-    assert "ungoogled" in str(ei.value).lower()
+    try:
+        got = engsvc.find_chrome(s)
+    except engsvc.EngineError as exc:
+        assert exc.code in ("ENGINE_NOT_FOUND", "ENGINE_PREPARING"), exc.code
+        assert "ungoogled" in str(exc).lower(), str(exc)[:80]
+    else:
+        raise AssertionError(f"官方内核被接受了：{got}（policy={s.engine_policy}）")
 
 
 def test_policy_ungoogled_uses_engine_dir_ungoogled_build(tmp_path, monkeypatch):
@@ -351,3 +354,57 @@ def test_install_archive_raises_broken_when_version_empty(tmp_path, monkeypatch)
                                   engine_dir=tmp_path / "engines", version_tag="v1")
     assert ei.value.code == "ENGINE_BROKEN", ei.value.code
     assert "libnss3" in (ei.value.hint or ""), ei.value.hint
+
+
+def test_ungoogled_policy_accepts_fingerprint_chromium(tmp_path, monkeypatch):
+    """`policy=ungoogled` 必须接受 fingerprint-chromium —— 它本身就是 ungoogled 的分支。
+
+    只认路径里 "ungoogled" 字样的话，用户装了 fingerprint-chromium 会被判成
+    "没有可用内核"，然后被引导去下载一个其实已经有的东西。
+    （fingerprint-chromium 上游 README 明写：based on Ungoogled Chromium。）
+    """
+    from zw_core.config import Settings
+    from zw_core.services import engines as engsvc
+
+    s = Settings()
+    s.root = tmp_path
+    s.engine_dir = tmp_path / "engines"
+    s.engine_policy = "ungoogled"
+    s.chrome_bin = ""
+
+    fp = s.engine_dir / "fingerprint-chromium-150" / "chrome"
+    fp.parent.mkdir(parents=True)
+    fp.write_text("#!/bin/sh\n")
+    fp.chmod(0o755)
+
+    got = engsvc.find_chrome(s)
+    assert "fingerprint" in str(got).lower(), got
+
+
+def test_ungoogled_policy_rejects_official_chrome_build(tmp_path, monkeypatch):
+    """但官方 Chrome/Chromium 仍必须被拒 —— 这才是 policy 要挡的东西。"""
+    from zw_core.config import Settings
+    from zw_core.services import engines as engsvc
+
+    s = Settings()
+    s.root = tmp_path
+    s.engine_dir = tmp_path / "engines"
+    s.engine_policy = "ungoogled"
+    s.chrome_bin = ""
+
+    # 注意目录名不能带 "ungoogled"：pytest 的 tmp_path 里含测试函数名，
+    # 而函数名是 `test_ungoogled_policy_rejects_...` —— 路径里出现 "ungoogled"
+    # 会让 `_is_ungoogled_family` 误判成"这是 ungoogled 内核"。
+    # （第一版就是这么写的，表现是"拒不掉官方内核"，其实是被自己的路径名骗了。）
+    off = s.engine_dir / "official-chrome-157" / "chrome"
+    off.parent.mkdir(parents=True)
+    off.write_text("#!/bin/sh\n")
+    off.chmod(0o755)
+
+    try:
+        got = engsvc.find_chrome(s)
+    except engsvc.EngineError as exc:
+        assert exc.code in ("ENGINE_NOT_FOUND", "ENGINE_PREPARING"), exc.code
+        assert "ungoogled" in str(exc).lower(), str(exc)[:80]
+    else:
+        raise AssertionError(f"官方内核被接受了：{got}（policy={s.engine_policy}）")
