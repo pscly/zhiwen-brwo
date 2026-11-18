@@ -56,6 +56,7 @@ from zw_core.client import (
     cjk_font_missing,
     Heartbeat,
     LocalCore,
+    _resolve_core_port,
     autostart_enabled,
     enroll,
     ensure_device_id,
@@ -208,7 +209,7 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     from zw_core.gui_profiles import CoreApi, LogPanel, ProfilePanel, Theme
 
     cfg = load_config()
-    core = LocalCore(port=int(cfg.get("core_port") or 8730))
+    core = LocalCore(port=_resolve_core_port(cfg))
 
     root = tk.Tk()
     tk._default_root = root
@@ -1118,7 +1119,7 @@ def run_cli() -> int:
     if not res.get("ok"):
         print(f"注册失败：[{res.get('code')}] {res.get('error')}")
         return 1
-    core = LocalCore(port=int(cfg.get("core_port") or 8730))
+    core = LocalCore(port=_resolve_core_port(cfg))
     if not core.start(device_id=ensure_device_id(), hub_url=base):
         print(f"本机服务启动失败：{core.error}")
         return 1

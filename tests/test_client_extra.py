@@ -618,3 +618,32 @@ def test_dotenv_file_is_actually_loaded(tmp_path, monkeypatch):
         os.environ.pop(k, None)
     cfg._dotenv_loaded = False
     cfg.reset_settings()
+
+
+def test_client_honors_zw_port_env(monkeypatch):
+    """客户端必须认 `ZW_PORT`，否则"端口可通过配置文件更改"是假的。
+
+    文档（docs/03 §4）把 `ZW_PORT` 列为"默认端口，可改"，但客户端 GUI/`serve`
+    原来**只读自己的 JSON 配置**（`cfg["core_port"]`），完全不看这个变量 ——
+    用户在 `zhiwen.env` 里写 `ZW_PORT=8731`，GUI 照样去起 8730。
+
+    真实场景：用户故意把 8730 留给别的程序（比如远程调试用的便携版），
+    让知纹换 8731。虽然 `LocalCore` 有"端口被占就回退"的兜底，
+    但那是"随便找个空闲端口"——用户要的是确定性。
+
+    优先级：ZW_PORT → cfg["core_port"] → 8730。
+    """
+    from zw_core.client import _resolve_core_port
+
+    monkeypatch.delenv("ZW_PORT", raising=False)
+    assert _resolve_core_port({}) == 8730
+    assert _resolve_core_port({"core_port": 9000}) == 9000
+
+    monkeypatch.setenv("ZW_PORT", "8731")
+    assert _resolve_core_port({}) == 8731, "ZW_PORT 没生效"
+    assert _resolve_core_port({"core_port": 9000}) == 8731, "ZW_PORT 应优先于客户端配置"
+
+    # 非法值不能炸，回落到默认
+    monkeypatch.setenv("ZW_PORT", "abc")
+    assert _resolve_core_port({}) == 8730
+    monkeypatch.delenv("ZW_PORT", raising=False)

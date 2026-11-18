@@ -475,6 +475,33 @@ class Heartbeat:
                     return
 
 
+def _resolve_core_port(cfg: dict[str, Any]) -> int:
+    """客户端该监听哪个端口。
+
+    优先级：`ZW_PORT` 环境变量（或 `zhiwen.env` 里的一行）→ 客户端配置里的
+    `core_port` → 8730。
+
+    ## 为什么必须认 ZW_PORT
+
+    文档（docs/03 §4）把 `ZW_PORT` 列为"默认端口，可改"的配置项，而客户端 GUI
+    原来**只读自己的 JSON 配置**（`cfg["core_port"]`），完全不看这个环境变量 ——
+    用户在 `zhiwen.env` 里写 `ZW_PORT=8731`，GUI 照样去起 8730。
+    文档与实际不符，用户按文档做却不起作用。
+
+    （端口被占时 `LocalCore` 还有回退逻辑，所以不会彻底起不来；但那是"随便找个
+    空闲端口"，用户要的是确定性——比如他故意让 8730 留给别的程序。）
+    """
+    import os as _os
+
+    raw = (_os.environ.get("ZW_PORT") or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    try:
+        return int(cfg.get("core_port") or 8730)
+    except (TypeError, ValueError):
+        return 8730
+
+
 class LocalCore:
     """在后台线程里跑 zw-core。嵌入（打包）与源码运行都走这条路径。"""
 
@@ -861,7 +888,7 @@ def run_cli() -> int:
     if not res.get("ok"):
         print(f"注册失败：[{res.get('code')}] {res.get('error')}")
         return 1
-    core = LocalCore(port=int(cfg.get("core_port") or 8730))
+    core = LocalCore(port=_resolve_core_port(cfg))
     if not core.start(device_id=ensure_device_id(), hub_url=base):
         print(f"本机服务启动失败：{core.error}")
         return 1
