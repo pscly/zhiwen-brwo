@@ -125,3 +125,52 @@ def test_probe_accepts_proxy_when_any_target_works(monkeypatch):
     monkeypatch.setattr(netproxy.httpx, "Client", _Client)
     assert netproxy._proxy_works("http://127.0.0.1:1") is True
     assert len(seen) >= 2, f"应当试到第二个目标，实际只试了 {seen}"
+
+
+def test_proxy_credentials_are_masked_everywhere(monkeypatch):
+    """代理 URL 里的 `user:pass@` 必须在**日志、错误消息、接口响应**里打码。
+
+    项目硬约束第 7 条：任何日志/响应里不得出现密码原文。
+    而 `ZW_DOWNLOAD_PROXY` 允许写成 `http://user:pass@host:port`。
+
+    实测过的三个泄露点：
+      1. `enginesrc._proxy()` 的 info 日志会打印整个 URL
+      2. `extstore` 的 "连不上商店（当前走的代理：…）" 错误消息会返回给界面
+      3. `GET /api/v1/engine` 的 `download_proxy` 字段直接回显缓存里的 URL
+    """
+    from zw_core.services import netproxy
+
+    masked = netproxy.mask_proxy("http://user:secret123@127.0.0.1:7890")
+    assert "secret123" not in masked
+    assert "user" not in masked
+    assert "127.0.0.1:7890" in masked, "主机端口要保留，排查问题需要"
+
+    # 没有凭据的原样返回（不要平白加 ***）
+    assert netproxy.mask_proxy("http://127.0.0.1:21080") == "http://127.0.0.1:21080"
+    assert netproxy.mask_proxy("") == ""
+
+    # 接口响应走 describe()，也必须脱敏
+    netproxy.reset_cache()
+    netproxy._cache.update({"key": "", "proxy": "http://user:secret123@1.2.3.4:8080",
+                            "source": "autodetect:8080"})
+    d = netproxy.describe()
+    assert "secret123" not in str(d), d
+    assert "1.2.3.4:8080" in str(d), d
+    netproxy.reset_cache()
+
+
+def test_enginesrc_log_masks_proxy(monkeypatch, caplog):
+    """`enginesrc` 选代理时打的日志不能带凭据。"""
+    import logging as _logging
+
+    from zw_core.config import Settings
+    from zw_core.services import enginesrc, netproxy
+
+    monkeypatch.setattr(netproxy, "resolve",
+                        lambda *a, **k: ("http://user:secret123@127.0.0.1:7890", "explicit"))
+    s = Settings()
+    s.download_proxy = "http://user:secret123@127.0.0.1:7890"
+    with caplog.at_level(_logging.INFO, logger="zw.enginesrc"):
+        enginesrc._proxy(s)
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "secret123" not in joined, joined

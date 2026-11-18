@@ -189,7 +189,8 @@ def _proxy(s: Settings) -> str:
         ports=s.download_proxy_ports,
     )
     if url and source != "explicit":
-        log_msg = f"下载将使用自动发现的代理 {url}（{source}）"
+        # 日志里**必须打码**：代理 URL 可能带 `user:pass@`
+        log_msg = f"下载将使用自动发现的代理 {netproxy.mask_proxy(url)}（{source}）"
         try:
             import logging
 

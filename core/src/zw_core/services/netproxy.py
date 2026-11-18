@@ -57,6 +57,38 @@ _cache: dict[str, Any] = {"key": None, "proxy": "", "source": "none"}
 _lock = threading.Lock()
 
 
+def mask_proxy(url: str) -> str:
+    """把代理 URL 里的凭据打码，**用于日志与接口响应**。
+
+    ## 为什么必须有
+
+    `ZW_DOWNLOAD_PROXY` 允许写 `http://user:pass@host:port`。这类 URL 一旦被
+    原样写进日志、或者塞进 `GET /api/v1/engine` 的响应，密码就泄露了 ——
+    项目硬约束第 7 条明确禁止"日志/响应里出现密码原文"。
+
+    实测过：`enginesrc._proxy()` 的日志和 `extstore` 的"当前走的代理：…"
+    都会原样打印整个 URL。加了自动发现之后这条路径更容易被走到。
+
+    保留主机端口（排查问题时需要），只把 `user:pass@` 换成 `***@`。
+    """
+    raw = str(url or "")
+    if not raw or "@" not in raw:
+        return raw
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(raw)
+        if not parts.username and not parts.password:
+            return raw
+        host = parts.hostname or ""
+        netloc = f"***@{host}"
+        if parts.port:
+            netloc += f":{parts.port}"
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except Exception:  # noqa: BLE001 —— 解析失败就整体打码，宁可少信息也不泄露
+        return "***"
+
+
 def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.35) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -140,6 +172,13 @@ def reset_cache() -> None:
 
 
 def describe() -> dict[str, Any]:
-    """给状态接口用：当前缓存到的代理与来源（不触发探测）。"""
+    """给状态接口用：当前缓存到的代理与来源（不触发探测）。
+
+    **代理 URL 已打码**：这个字典会原样进 `GET /api/v1/engine` 的响应，
+    而 `ZW_DOWNLOAD_PROXY` 允许带 `user:pass@`。接口响应里出现密码原文
+    违反硬约束第 7 条（实测过这条路径确实会把凭据吐出去）。
+    """
     with _lock:
-        return dict(_cache)
+        out = dict(_cache)
+    out["proxy"] = mask_proxy(str(out.get("proxy") or ""))
+    return out

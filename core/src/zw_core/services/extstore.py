@@ -191,7 +191,11 @@ def download_crx(ext_id: str, *, timeout: float = 60.0,
     except Exception as exc:  # noqa: BLE001
         # 把"当时用的是哪个代理"写进消息。自动发现挑中了一个不可用的本地端口时，
         # 用户看到的会是"连不上商店"，很容易去查网络而不是查那个代理。
-        used = f"（当前走的代理：{proxy}）" if proxy else "（未使用代理，直连）"
+        # 打码后再进错误消息：这条消息会一路返回到界面上
+        from . import netproxy as _np
+
+        used = (f"（当前走的代理：{_np.mask_proxy(proxy)}）" if proxy
+                else "（未使用代理，直连）")
         raise StoreError(
             "EXT_STORE_UNREACHABLE",
             f"连不上 Chrome 应用商店（{type(exc).__name__}: {exc}）{used}。"
