@@ -556,3 +556,23 @@ def test_client_entrypoint_explains_missing_display(monkeypatch, capsys):
     assert rc == 2, f"应当给出可操作提示并以 2 退出，实际 {rc}"
     err = capsys.readouterr().err
     assert "serve" in err and "--selftest" in err, err
+
+
+def test_gui_connect_failure_tells_user_about_offline_serve():
+    """连不上服务器时，GUI 必须告诉用户"还能用 serve 单机跑"。
+
+    工具的本机能力（环境管理、浏览器、CDP）**不依赖服务器**，`zw serve` 照样工作
+    （docs/11 明确写了）。但单文件客户端只有图形界面入口，用户不知道还有这条路，
+    连不上就以为软件坏了。
+
+    这条只验文案与代码路径存在（GUI 交互本身由 scripts/gui-check.py 覆盖）。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    src = (root / "core/src/zw_core/gui.py").read_text(encoding="utf-8")
+
+    assert "想先在本机用（不连服务器）" in src, "连不上服务器时没有给出单机用法"
+    assert "serve" in src
+    # 用了 Path 就必须真的导入，否则该分支一走到就 NameError
+    assert "from pathlib import Path" in src, "gui.py 用了 Path 但没有导入"

@@ -42,6 +42,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+from pathlib import Path
 import threading
 import time
 import webbrowser
@@ -787,6 +788,11 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         if not info.get("ok"):
             set_phase("error", "连不上")
             log(f"连接失败：{info.get('error')}", "bad")
+            # 连不上服务器**不等于这个工具不能用**：本机环境管理不依赖服务器。
+            # 但单文件客户端只有图形界面入口，用户不知道还有 `serve` 这条路，
+            # 于是就卡在"连不上"这里，以为软件坏了。
+            log("想先在本机用（不连服务器）？关掉这个窗口，在本程序目录执行："
+                f"{Path(sys.argv[0]).name} serve  —— 会启动本机服务并打开控制台。", "warn")
             address_failed(info.get("error", ""))
             connect_btn.state(["!disabled"])
             return
