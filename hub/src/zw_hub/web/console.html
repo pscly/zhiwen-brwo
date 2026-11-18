@@ -1257,11 +1257,47 @@ function fillCard(card, dev){
   r.name.textContent = devName(dev);
 
   const bits = [];
+  let upgrade = '';
   if (dev.hostname && dev.hostname !== dev.label) bits.push(dev.hostname);
-  if (dev.app_version) bits.push('v' + dev.app_version);
+  if (dev.app_version) {
+    bits.push('v' + dev.app_version);
+    // 服务器知道每台机器上报的版本，也知道自己是什么版本 —— 但以前从不对比，
+    // 于是"这台已经落后 40 个版本"这件事没有任何地方告诉用户。
+    // 客户端没有自更新，用户不说就永远不会升级（实测：云电脑停在 v0.7.16，
+    // 服务器已经 0.7.56）。这里给一个可点开的提示，写清怎么升级。
+    // 用归一化后的 overview（`state.data.server.version`），不要用 `state.meta` ——
+    // meta 是并行加载的，渲染机器卡片时可能还没赋值，徽章就永远不出现
+    // （第一版就是这么写的，断言直接超时）。
+    const hubVer = ((state.data && state.data.server && state.data.server.version) ||
+                    (state.meta && state.meta.version) || '');
+    // 注意：`r.sub` 是 textContent，**不能**把 HTML 徽章塞进 bits ——
+    // 那样只会显示成字面文本（第一版就这么写的，断言找不到 .badge.warn）。
+    // 所以这里只记下"要不要提示"，等 sub 文本写完后再单独插入一个徽章节点。
+    upgrade = (hubVer && cmpVer(dev.app_version, hubVer) < 0)
+      ? ('这台客户端是 v' + String(dev.app_version) + '，服务器是 v' + String(hubVer) +
+         '。客户端不会自动更新：退出客户端 → 下载新的安装包 → 覆盖安装（配置与机器码保留，不用重新配对）')
+      : '';
+  }
   const pa = [dev.platform, dev.arch].filter(Boolean).join(' / ');
   if (pa) bits.push(pa);
   r.sub.textContent = bits.join(' · ') || '未上报机型信息';
+  // 版本落后提示：作为一个**真元素**插在机型信息后面（不是字符串）
+  // 注意：`card` 是包装对象（{root, refs}），**不是 DOM 节点** ——
+  // 对它调 querySelector 会抛 TypeError，而这个循环里没有 try/catch，
+  // 一抛就整屏卡片都渲染不出来（第一版就这么写的，控制台直接空白）。
+  let upEl = r.sub.parentNode ? r.sub.parentNode.querySelector('[data-upgrade]') : null;
+  if (upgrade){
+    if (!upEl){
+      upEl = document.createElement('span');
+      upEl.className = 'badge warn';
+      upEl.setAttribute('data-upgrade', '1');
+      upEl.textContent = '可升级';
+      r.sub.parentNode.appendChild(upEl);
+    }
+    upEl.title = upgrade;
+  } else if (upEl){
+    upEl.remove();
+  }
 
   const revoked = dev.status === 'revoked';
   const pending = dev.status === 'pending';
@@ -1423,6 +1459,18 @@ function renderMachines(){
 }
 
 /* ── 浏览器视图 ─────────────────────────────────────────────────────────── */
+// 比版本号：返回 a<b 是否成立（-1/0/1 语义）。
+// 只用于"提醒该升级"，不用于任何判断逻辑，所以简单的点分数字比较就够。
+function cmpVer(a, b){
+  const pa = String(a || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b || '').replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++){
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
 // `stale=true` 表示"这台机器现在离线，这个状态是它**最后一次上报**的"。
 //
 // 为什么必须区分：机器离线后设备清单（inventory）还是旧的，

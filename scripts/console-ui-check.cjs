@@ -77,7 +77,8 @@ const OVERVIEW = {
     },
     {
       device_id: B_ID, label: '云电脑', hostname: 'cloud-pc',
-      platform: 'Windows', arch: 'AMD64', app_version: '0.4.2',
+      // 故意比服务器版本（0.4.2）旧，用来验「可升级」徽章
+      platform: 'Windows', arch: 'AMD64', app_version: '0.3.9',
       status: 'active', online: false, last_seen_ago: 5400, last_ip: '10.0.0.9',
       shell_enabled: false, profiles: 1, running: 1, max_running: 4,
       disk_human: '', engine: '', core_base: '', core_reachable: null,
@@ -390,6 +391,17 @@ function setupRoutes(page, opts){
     (await cardA.locator('[data-r="code"]').textContent()) === A_ID);
   // 控制台后来加了「待授权」这一格（免授权码审批流程），所以是 5 个而不是 4 个。
   // 之前这里断言 '2,1,2,1' 已经过时，一直在报假失败。
+  // 版本落后的机器要出现「可升级」徽章。
+  // 服务器知道每台机器上报的版本、也知道自己是什么版本，但以前从不对比 ——
+  // 于是"这台落后几十个版本"没有任何地方告诉用户（实测云电脑停在 0.7.16）。
+  const upBadge = await page.locator('.mach', { hasText: '云电脑' }).locator('.badge.warn', { hasText: '可升级' }).count();
+  check('版本落后的机器显示「可升级」徽章', upBadge >= 1, 'count=' + upBadge);
+  const upTitle = await page.locator('.badge.warn', { hasText: '可升级' }).first().getAttribute('title');
+  check('「可升级」的悬停说明写清了怎么升级',
+    (upTitle || '').includes('覆盖安装') && (upTitle || '').includes('机器码保留'), upTitle);
+  const upToDate = await page.locator('.mach', { hasText: 'psubs3.6' }).locator('.badge.warn', { hasText: '可升级' }).count();
+  check('版本相同的机器不显示「可升级」', upToDate === 0, 'count=' + upToDate);
+
   check('KPI：机器 2 / 在线 1 / 待授权 0 / 浏览器 2 / 运行中 1',
     (await page.locator('.kpi-val').allTextContents()).join(',') === '2,1,0,2,1',
     'got=' + (await page.locator('.kpi-val').allTextContents()).join(','));
