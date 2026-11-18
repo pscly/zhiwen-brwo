@@ -276,14 +276,65 @@ def _extract_zip(src: Path, staging: Path) -> Path:
     return out
 
 
+def _resolve_manifest_name(code_dir: Path, manifest: dict[str, Any], key: str) -> str:
+    """把 manifest 里的 `name` 解析成人能看的字面值。
+
+    Chromium 系扩展经常把名字写成占位符 `__MSG_extName__`，真实文案在
+    `_locales/<lang>/messages.json` 里。不解析的话，列表里就是一堆
+    `__msg_extname__` —— 用户根本分不清那是哪个插件。
+
+    实测来源：云电脑上扫描 Edge 用户数据、导入后列表显示 `__msg_extname__`。
+
+    解析顺序：先按浏览器界面语言（`_locales/<lang>`），再 `zh_CN` / `zh`，
+    最后 `en` / `en_US`；都没有就保留原样（总比空着强）。
+    """
+    import json as _json
+    import re as _re
+
+    raw = str(manifest.get("name") or "").strip()
+    m = _re.fullmatch(r"__MSG_(.+?)__", raw, _re.IGNORECASE)
+    if not m:
+        return raw or key
+    msg_key = m.group(1)
+
+    locales = code_dir / "_locales"
+    if not locales.is_dir():
+        return raw
+    # 只取目录名，不要 `itertools` 那套复杂排序
+    try:
+        have = {d.name.lower(): d for d in locales.iterdir() if d.is_dir()}
+    except OSError:
+        return raw
+    prefer = ("zh_cn", "zh", "en", "en_us", "en_gb")
+    order = [have[k] for k in prefer if k in have]
+    order += [d for k, d in have.items() if k not in prefer]
+    for d in order:
+        mf = d / "messages.json"
+        if not mf.is_file():
+            continue
+        try:
+            data = _json.loads(mf.read_text(encoding="utf-8-sig", errors="replace"))
+        except (OSError, _json.JSONDecodeError):
+            continue
+        ent = data.get(msg_key) or data.get(msg_key.lower()) or data.get(msg_key.upper())
+        if isinstance(ent, dict):
+            val = str(ent.get("message") or "").strip()
+            if val:
+                return val
+        elif isinstance(ent, str) and ent.strip():
+            return ent.strip()
+    return raw
+
+
 def _ext_meta(code_dir: Path, key: str, ext_id: str = "", data_dir: Path | None = None) -> dict[str, Any]:
     manifest = _read_manifest(code_dir) or {}
+    resolved = _resolve_manifest_name(code_dir, manifest, key)
     return {
         "key": key,
         # 源环境里实测到的扩展 ID（没有就空）。apply 时用作"数据双写"的第二位置。
         "ext_id": ext_id,
-        "slug": _slugify(str(manifest.get("name") or key), fallback=key),
-        "name": str(manifest.get("name") or key),
+        "slug": _slugify(resolved, fallback=key),
+        "name": resolved,
         "version": str(manifest.get("version") or "0"),
         "code_dir": f"{CODE_DIR}/{key}",
         "data_dir": f"{DATA_DIR}/{key}" if data_dir else "",

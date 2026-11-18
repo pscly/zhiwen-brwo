@@ -731,3 +731,36 @@ def test_default_scan_roots_cover_windows_locations(monkeypatch, tmp_path):
     assert str(ra) in roots, roots
     assert any(r.endswith("Programs") for r in roots), roots
     # 不断言 Program Files：本机没有 C:/Program Files，函数会按 is_dir() 跳过
+
+
+def test_manifest_msg_placeholder_resolved_from_locales(tmp_path):
+    """`__MSG_xxx__` 要解析成 `_locales` 里的真实名字。
+
+    实测来源：云电脑上扫描 Edge 用户数据导入后，列表里显示 `__msg_extname__` ——
+    Chromium 系扩展常把 name 写成占位符，真实文案在 `_locales/<lang>/messages.json`。
+    不解析的话用户分不清那是哪个插件。
+
+    解析顺序：浏览器界面语言优先（zh_CN / zh），再 en；都没有就保留原样。
+    """
+    import json as _json
+    from zw_core.services import packs as packsvc
+
+    root = tmp_path / "ext"
+    (root / "_locales" / "zh_CN").mkdir(parents=True)
+    (root / "_locales" / "en").mkdir(parents=True)
+    (root / "_locales" / "zh_CN" / "messages.json").write_text(
+        _json.dumps({"extName": {"message": "广告拦截助手"}}, ensure_ascii=False),
+        encoding="utf-8")
+    (root / "_locales" / "en" / "messages.json").write_text(
+        _json.dumps({"extName": {"message": "Ad Blocker"}}), encoding="utf-8")
+
+    got = packsvc._resolve_manifest_name(root, {"name": "__MSG_extName__"}, "k")
+    assert got == "广告拦截助手", got          # 中文优先
+
+    # 没有 locale 目录时保留原样，不能变成空字符串
+    plain = tmp_path / "noloc"
+    plain.mkdir()
+    assert packsvc._resolve_manifest_name(plain, {"name": "__MSG_x__"}, "k") == "__MSG_x__"
+
+    # 普通名字原样返回
+    assert packsvc._resolve_manifest_name(root, {"name": "普通名字"}, "k") == "普通名字"

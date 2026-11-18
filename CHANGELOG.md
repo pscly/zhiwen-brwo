@@ -1,5 +1,61 @@
 # CHANGELOG
 
+## 0.7.70 — 2026-11-18
+
+**云电脑升到 0.7.69 后，真机验证「扫描本机 → 导入 → 默认带上」整条链，顺带修掉扩展名显示成 `__msg_extname__`。**
+
+### 真机验证（Windows，客户端 0.7.69）
+
+**① 扫描本机（Windows 分支第一次真正跑起来）**
+
+```
+GET /api/v1/packs/scan-browsers
+→ 2 个候选：
+   Edge    Default  2 扩展  C:\Users\Administrator\AppData\Local\Microsoft\Edge\User Data\Default
+   Chrome  Default  1 扩展  C:\Users\Administrator\AppData\Local\Google\Chrome\User Data\Default
+```
+
+（没有 RXYCDP —— 再次确认它不在云电脑上。但 Windows 的路径扫描逻辑是对的。）
+
+**② 用扫到的路径直接导入（走界面同一条链路）**
+
+```
+POST /packs/import {"from_chrome": "<扫到的 Edge 路径>", "as_default": true}
+→ id: 7e96af76c968 | 扩展数: 2 | is_default: true
+```
+
+`as_default: true` 真机确认生效（这是 0.7.68 修的"字段定义了却没接上"那个 bug）。
+
+**③ 新建环境自动带上**
+
+```
+POST /profiles {"name": "Edge插件自检-可删"}
+→ extensions: ['__msg_extname__', 'edge-relevant-text-changes', 'cookiemanager---cookie-editor']
+```
+
+默认包生效。测试环境与测试包随后都已删除，服务器只剩用户自己的 4 个环境。
+
+### 修：扩展名显示成 `__msg_extname__`
+
+第 ③ 步暴露的：Chromium 系扩展常把 `name` 写成占位符 `__MSG_extName__`，
+真实文案在 `_locales/<lang>/messages.json`。不解析的话，列表里就是一堆
+`__msg_extname__`，用户分不清那是哪个插件（中文市场上很常见）。
+
+新增 `_resolve_manifest_name()`：按 `zh_CN` → `zh` → `en` → `en_US` 顺序找
+`_locales`，取 `messages[<key>].message`；找不到就保留原样（宁可留着占位符，
+也不要变成空字符串）。
+
+```
+__MSG_extName__ + _locales/zh_CN → "广告拦截助手"
+__MSG_x__      + 无 _locales     → "__MSG_x__"（原样）
+"普通名字"                        → "普通名字"
+```
+
+### 测试
+
+600 → **601 项**（`test_manifest_msg_placeholder_resolved_from_locales`）。
+八项门槛全绿（601 / 34 / 73 / 13 / 21 / 81 / 29 / 35）。
+
 ## 0.7.69 — 2026-11-18
 
 **桌面客户端也加「扫描本机」—— 两边不一致，而你日常用的是桌面客户端。**
