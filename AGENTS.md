@@ -120,6 +120,8 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 23 通过 / 0 失败（网关接管）
 node scripts/ui-check.cjs                      # 33 通过 / 0 失败（客户端控制台，含扩展包与内核卡片）
+ZW_CORE_IP=<本机LAN> ZW_CORE=http://127.0.0.1:8730 ZW_DEVICE_ID=zwd_xxx \
+  node scripts/remote-console-check.cjs        # 12 通过 / 0 失败（远程凭机器码进控制台）
 node scripts/console-ui-check.cjs              # 81 通过 / 0 失败（hub 主控台，mock 后端）
 DISPLAY=:78 .venv/bin/python scripts/gui-check.py  # 37 通过 / 0 失败（客户端 tkinter GUI，含真改代理、扫描本机、下载内核）
 ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失败（检测页 + 标签恢复）
@@ -145,8 +147,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- 631 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、33 条客户端控制台断言、37 条客户端 GUI 断言、23 项网关接管 —— 全绿
-- hub **0.7.81** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- **九项门槛**：631 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、33 条客户端控制台断言、37 条客户端 GUI 断言、23 项网关接管 —— 全绿
+- hub **0.7.82** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
@@ -165,6 +167,9 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 - `extensions_active=False`（Chrome 157 忽略 --load-extension，系统如实回报）
 - **本机免令牌（真机回环）**：`curl 127.0.0.1:8730/api/v1/meta` 不带令牌 →
   `auth_required=False`，而 host 是 `0.0.0.0`（按请求判定，不是按配置）
+- **远程凭机器码进控制台（真浏览器，LAN IP）**：非回环 401 →
+  登录框文案「机器码」→ 输入 `zwd_…` → 登录层隐藏、控制台渲染。
+  另注意：没配 token 与 device_id 时 `0.0.0.0` 会降级成 `127.0.0.1`（安全默认）
 - **版本落后徽章 / 离线陈旧状态**：在线时状态原样显示；离线时变「上次：…」
 - **三个默认检测页确实对得上用途**（云电脑经代理实测，均 200）：
   `browserleaks.com/ip`（IP）、`ip123.in`（IP 归属/干净度）、`creepjs`（浏览器指纹）

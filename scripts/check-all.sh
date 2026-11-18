@@ -191,6 +191,14 @@ if command -v node >/dev/null; then
   else
     fail "ui-check" "$(echo "$out"|grep -E '失败项|通过 [0-9]+ 项'|tail -1)"
   fi
+  # 远程控制台：**从非回环地址**打开，验证"凭机器码进入"。
+  # 这是用户需求里独立的一半（本机免令牌是另一半），而 ui-check 只走 127.0.0.1。
+  if out=$(ZW_CORE_IP="$LAN" ZW_CORE="http://127.0.0.1:$PORT" ZW_DEVICE_ID="$DEV" \
+            node scripts/remote-console-check.cjs 2>&1); then
+    pass "remote-console" "$(echo "$out"|grep -E '通过 [0-9]+ 项'|tail -1)"
+  else
+    fail "remote-console" "$(echo "$out"|grep -E '失败 [0-9]+ 项|❌'|tail -1)"
+  fi
 else
   skipn "ui-check" "没有 node"
 fi
