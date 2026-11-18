@@ -800,12 +800,21 @@ def build_app() -> FastAPI:
             path, err = str(bin_path), ""
         except Exception as exc:  # noqa: BLE001 —— 没内核不是接口错误，照实返回
             path, err = "", f"{getattr(exc, 'code', 'ENGINE_NOT_FOUND')}: {getattr(exc, 'message', exc)}"
+        # **只读缓存，不同步跑探针**。探针要真启动浏览器（10–25 秒），
+        # 放在状态接口里会让界面像卡死（实测把 ui-check 拖到 120s 超时）。
+        # 没有缓存时先返回 null 并后台补探，下次刷新就能看到结果。
         loadable: bool | None = None
+        probe_pending = False
         if path:
             try:
                 from zw_core.services import extprobe
 
-                loadable = bool(extprobe.probe(path, timeout=25.0).get("loadable"))
+                hit = extprobe.peek(path)
+                if hit is not None:
+                    loadable = bool(hit.get("loadable"))
+                else:
+                    probe_pending = True
+                    extprobe.probe_async(path)
             except Exception:  # noqa: BLE001 —— 探不起责任在环境，不影响状态展示
                 loadable = None
         from zw_core.services import netproxy
@@ -819,6 +828,7 @@ def build_app() -> FastAPI:
             "path": path,
             "version": engsvc.engine_version(bin_path) if path else "",
             "extensions_loadable": loadable,
+            "probe_pending": probe_pending,
             "error": err,
             "download": enginesrc.progress(),
         })

@@ -113,6 +113,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.reload({ waitUntil: 'networkidle' });
   await page.click('.nav-item[data-view="extensions"]');
   await page.waitForTimeout(1500);
+  // 「内核」卡片：默认内核已换成 ungoogled-chromium，装没装、能不能加载扩展
+  // 必须在界面上看得见，否则启动失败时用户不知道该干什么。
+  console.log('== 内核卡片 ==');
+  await page.click('.nav-item[data-view="ops"]');
+  await page.waitForTimeout(1500);
+  const opsText = await page.textContent('#view-ops, .view-inner');
+  check('运维页有「内核」卡片', /内核/.test(opsText), (opsText || '').slice(0, 100));
+  check('显示内核策略 ungoogled', /ungoogled/.test(opsText), (opsText || '').slice(0, 160));
+  check('有「下载内核 / 重新下载」按钮',
+    (await page.locator('[data-act="engine-install"]').count()) >= 1);
+  // 探针在后台跑（接口不同步阻塞），首次可能显示「检测中…」
+  check('显示能否加载扩展（或检测中）',
+    /能加载扩展|不能加载扩展|未检测|检测中/.test(opsText), (opsText || '').slice(0, 200));
+
+  // **切回扩展页**：上面为了看内核卡片切到了 ops，
+  // 不切回来的话后面那条"扩展包出现在列表里"会在运维页上找，必然失败。
+  await page.click('.nav-item[data-view="extensions"]');
+  await page.waitForTimeout(1200);
+
   const afterText = await page.textContent('.view-inner');
   check('新建的扩展包出现在控制台列表里', /界面自检包|UICheckPack/.test(afterText),
     (afterText || '').slice(0, 200));

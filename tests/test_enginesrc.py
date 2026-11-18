@@ -408,3 +408,62 @@ def test_ungoogled_policy_rejects_official_chrome_build(tmp_path, monkeypatch):
         assert "ungoogled" in str(exc).lower(), str(exc)[:80]
     else:
         raise AssertionError(f"官方内核被接受了：{got}（policy={s.engine_policy}）")
+
+
+def test_engine_dir_pointing_at_kernel_folder_still_recognized(tmp_path):
+    """`ZW_ENGINE_DIR` 直接指向内核目录时，必须仍被认成 ungoogled。
+
+    很多人（我们的 check 脚本也是）把引擎目录设成内核本身的路径：
+
+        ZW_ENGINE_DIR=/opt/xxx/ungoogled-chromium-150.0.7871.186/
+
+    这时 `chrome` 的**相对路径**只有 `chrome`，不含 ungoogled 字样。
+    如果判定只看相对路径，这个内核会被当成"官方发行版"拒掉 ——
+    启动环境直接报 ENGINE_NOT_FOUND（实测被 ui-check 的
+    "点启动后变成运行中" 超时抓出来）。
+    """
+    from zw_core.config import Settings
+    from zw_core.services import engines as engsvc
+
+    s = Settings()
+    s.root = tmp_path
+    kernel = tmp_path / "ungoogled-chromium-150.0.7871.186"
+    binp = kernel / "chrome"
+    binp.parent.mkdir(parents=True)
+    binp.write_text("#!/bin/sh\n")
+    binp.chmod(0o755)
+    s.engine_dir = kernel          # ← 直接指内核目录
+    s.engine_policy = "ungoogled"
+    s.chrome_bin = ""
+
+    got = engsvc.find_chrome(s)
+    assert got == binp, got
+
+
+def test_engine_dir_whose_parent_mentions_ungoogled_does_not_fool_official_kernel(tmp_path):
+    """但目录名带 "ungoogled" 不能把"官方内核"洗白。
+
+    用户可能把引擎放在名字里带 ungoogled 的目录下（例如 D 盘的
+    `ungoogled-tmp`）。此时目录名里虽有这个词，
+    但相对路径 `official-chrome/chrome` 明确说明了它是什么 —— 必须以相对路径为准。
+    """
+    from zw_core.config import Settings
+    from zw_core.services import engines as engsvc
+
+    s = Settings()
+    base = tmp_path / "ungoogled-tmp"
+    off = base / "official-chrome" / "chrome"
+    off.parent.mkdir(parents=True)
+    off.write_text("#!/bin/sh\n")
+    off.chmod(0o755)
+    s.root = tmp_path
+    s.engine_dir = base
+    s.engine_policy = "ungoogled"
+    s.chrome_bin = ""
+
+    try:
+        got = engsvc.find_chrome(s)
+    except engsvc.EngineError as exc:
+        assert exc.code in ("ENGINE_NOT_FOUND", "ENGINE_PREPARING"), exc.code
+    else:
+        raise AssertionError(f"官方内核被目录名洗白了：{got}")

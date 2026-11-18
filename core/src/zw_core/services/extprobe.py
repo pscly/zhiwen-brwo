@@ -133,6 +133,33 @@ def _wait_json(url: str, timeout: float) -> dict[str, Any] | None:
     return None
 
 
+def peek(engine_path: Path | str) -> dict[str, Any] | None:
+    """**只读缓存**，不启动浏览器。没有缓存时返回 None。
+
+    为什么需要它：`GET /api/v1/engine` 这种状态接口不能同步跑探针 ——
+    探针要真启动一次浏览器，慢的时候 10–25 秒，界面会像卡死一样
+    （实测把 ui-check 的直接拖到 120s 超时）。
+    """
+    bin_path = Path(str(engine_path)).expanduser()
+    if not bin_path.exists():
+        return None
+    hit = _load_cache().get(_cache_key(bin_path))
+    return dict(hit) if isinstance(hit, dict) and "loadable" in hit else None
+
+
+def probe_async(engine_path: Path | str, *, timeout: float = 25.0) -> None:
+    """后台跑一次探针把结果写进缓存，立刻返回。"""
+    import threading
+
+    def _run() -> None:
+        try:
+            probe(engine_path, timeout=timeout, use_cache=True)
+        except Exception:  # noqa: BLE001 —— 后台任务失败只影响"下次能否显示"
+            pass
+
+    threading.Thread(target=_run, name="zw-extprobe", daemon=True).start()
+
+
 def probe(engine_path: Path | str, *, timeout: float = 25.0, use_cache: bool = True) -> dict[str, Any]:
     """实测这个内核会不会加载 `--load-extension`。返回 {loadable, reason, cached, ms}。"""
     bin_path = Path(str(engine_path)).expanduser()

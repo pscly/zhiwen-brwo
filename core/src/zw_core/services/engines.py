@@ -199,9 +199,28 @@ def _is_ungoogled_family(bin_path: Path, engine_dir: Path | None = None) -> bool
     # 同理，用户把引擎放在 `D:\ungoogled测试\` 这种目录下也会误判。
     if engine_dir is not None:
         try:
-            t = str(bin_path.relative_to(engine_dir)).lower()
+            rel = str(bin_path.relative_to(engine_dir)).lower()
         except (ValueError, OSError):
-            t = bin_path.name.lower()
+            rel = bin_path.name.lower()
+        # **还要看 engine_dir 自己的目录名**。
+        #
+        # 很多人（包括我们的测试）是把 `ZW_ENGINE_DIR` 直接指到内核目录：
+        #   ZW_ENGINE_DIR=/opt/xxx/ungoogled-chromium-150.0.7871.186/
+        # 此时 `chrome` 的相对路径就只有 `chrome`，不含 ungoogled 字样 ——
+        # 只看相对路径会把这个内核判成"官方发行版"然后拒绝掉。
+        # （这是改「别拿绝对路径判断」之后引入的回归，被 ui-check 的
+        #  "点启动后变成运行中" 超时抓到。）
+        # 相对路径里"有信息"（含目录层级）就以它为准；只有相对路径就是裸文件名
+        # （`chrome` / `chrome.exe`）时，才允许参考 engine_dir 的目录名。
+        #
+        # 这条分界很重要，两个方向都踩过：
+        #   · `ZW_ENGINE_DIR=/opt/ungoogled-chromium-150/` + `chrome`
+        #     → 相对路径无信息，必须看目录名，否则真内核被拒
+        #   · `ZW_ENGINE_DIR=.../test_x/engines` + `official-chrome-157/chrome`
+        #     → 相对路径明确说了是官方内核，绝不能被上层目录名里的
+        #       "ungoogled"（测试名/用户自建目录名）洗白
+        has_structure = os.sep in rel or "/" in rel
+        t = rel if has_structure else (rel + " " + engine_dir.name.lower())
     else:
         t = bin_path.name.lower()
     return "ungoogled" in t or "fingerprint" in t
