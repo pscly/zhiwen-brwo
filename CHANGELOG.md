@@ -1,5 +1,78 @@
 # CHANGELOG
 
+## 0.7.71 — 2026-11-18
+
+**装商店扩展暴露三个真 bug：库里看不到、名字是 `__MSG_xxx__`、包名也是占位符。**
+
+### 场景
+
+用户给了 5 个商店链接要在云电脑上装（YesCaptcha / ScriptCat / 沉浸式翻译 /
+Cookie-Editor / Bitwarden），装完发现：
+
+```
+GET /extensions（扩展库）  → 只返回 4 条旧记录，刚装的 5 个**全都不在**
+扩展包列表                → 4 个包名是 __MSG_extName__ / __MSG_scriptcat__ / __MSG_brandName__
+磁盘 ext_dir/             → 9 个目录都在（含 5 个新装的）
+```
+
+### ① 装了但「扩展库」看不到（最严重）
+
+`GET /extensions` 读的是 **SQLite 的 `extensions` 表**，而 `extstore.install()`
+以前只做两件事：把文件放进 `ext_dir/`、建扩展包 —— **从不写这张表**。
+只有被应用到环境时（`packs.register_extension`）才登记，太晚了。
+
+用户装完一刷新列表还是空的，只会以为装失败了。已补 upsert（含 sha256）。
+
+> 修的时候我自己还踩了一下：登记代码里漏了 `import time`，而它被
+> `except Exception` 包着 —— **静默吞掉，测试照样绿**。是加了一条"真的去查表"
+> 的断言才暴露的。这种"吞异常 + 测试只验返回码"的组合特别容易骗过人。
+
+### ② 扩展名显示 `__msg_extname__`
+
+0.7.70 只把 `__MSG_xxx__` → `_locales` 的解析加在了**扩展包**这条路径，
+**单扩展库这条路径没用上**。抽出 `services/extmeta.py` 两边共用。
+
+顺带修一个连带问题：`slug`/目录名原本在**解包之前**用原始 name 算出来，
+所以目录也叫 `__msg_extname__-2026.10.2`。改成解包后再解析、再算 slug。
+
+### ③ 包名是占位符（扩展名却是中文）
+
+`extstore` 建包时把 manifest 的**原始 name** 当包名传进去，绕过了自动取名：
+
+```python
+_make_pack(dest, name=str(manifest.get("name") or slug), ...)   # ← 旧
+_make_pack(dest, name=display or slug, ...)                     # ← 新
+```
+
+于是包里的扩展叫「脚本猫」「沉浸式翻译…」，包名却是 `__MSG_scriptcat__`。
+
+### 顺带：`prodversion` 写死 130 导致 Bitwarden 装不上
+
+`clients2.google.com` 对 Bitwarden（`nngceckbapebfimnlniiiahkandclblb`）回
+**HTTP 204**（无可用包）。同一 ID 换成 `prodversion=157.0.0.0` 立刻能下
+（实测 26,044,856 字节）。默认值改成 `157.0.0.0`。
+
+### 实机交付（云电脑 12.162，v0.7.70）
+
+5 个扩展全部装好，并**下发到你那 4 个环境**：
+
+```
+tests5 / 3 / 2 / 1  →  各 5 个扩展
+   bitwarden-password-manager
+   cookie-editor
+   沉浸式翻译---ai-双语网页翻译--pdf翻译--视频翻译--漫画翻译
+   脚本猫
+   yescaptcha-人机助手
+```
+
+5 个包都设成了「新建环境默认带上」。顺带清掉了 `2` 号环境里我之前测试留下的
+`probewin`。
+
+### 测试
+
+601 → **604 项**（库登记 / 包名解析 / 扫到的名称三条）。
+八项门槛全绿（604 / 34 / 73 / 13 / 21 / 81 / 29 / 35）。
+
 ## 0.7.70 — 2026-11-18
 
 **云电脑升到 0.7.69 后，真机验证「扫描本机 → 导入 → 默认带上」整条链，顺带修掉扩展名显示成 `__msg_extname__`。**

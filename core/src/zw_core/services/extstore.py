@@ -35,6 +35,7 @@ import io
 import json
 import logging
 import re
+import time
 import zipfile
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -52,7 +53,31 @@ _QUERY_ID_RE = re.compile(r"[?&]id=([a-p]{32})")
 UPDATE_URL = "https://clients2.google.com/service/update2/crx"
 # prodversion 只影响商店给哪个兼容版本；给个较新的稳定值即可。
 # 用太老的值，商店可能返回旧版扩展（manifest v2），反而装不上。
-DEFAULT_PRODVERSION = "130.0.0.0"
+# 商店更新检查用的 "我的 Chrome 版本"。
+#
+# 原来是 130.0.0.0，2026-11-18 在云电脑（Chrome 157）上装 Bitwarden 时
+# `clients2.google.com` 直接回 **204**（没有可用包）—— 因为部分扩展对
+# `prodversion` 有下限要求，报的版本太低就"无更新"。同一个 ID 换成 157
+# 立刻能下（实测 26,044,856 字节）。
+#
+# 所以默认值跟着当前主流内核走；万一将来又不够，`download_crx` 里还有一次
+# 抬高版本的兜底重试。
+DEFAULT_PRODVERSION = "157.0.0.0"
+
+
+def _display_name(code_dir: Path | str | None, manifest: dict[str, Any] | None,
+                  fallback: str = "") -> str:
+    """扩展的显示名：把 `__MSG_xxx__` 解析成真实文案（共用 extmeta 的实现）。
+
+    以前单扩展库这条路径**不解析**，装完商店扩展列表里全是
+    `__msg_extname__` / `__MSG_scriptcat__` —— 用户分不清哪个是哪个。
+    """
+    from .extmeta import resolve_manifest_name
+
+    try:
+        return resolve_manifest_name(code_dir, manifest, fallback=fallback)
+    except Exception:  # noqa: BLE001 —— 解析失败不能拖垮安装
+        return str((manifest or {}).get("name") or fallback)
 
 
 class StoreError(Exception):
@@ -249,7 +274,8 @@ def fetch_info(ext_id: str, *, timeout: float = 60.0) -> dict[str, Any]:
     man = read_manifest(blob)
     return {
         "id": ext_id,
-        "name": str(man.get("name") or ""),
+        # 这里手上只有 zip 字节、没有解包目录，所以传 None（拿不到 _locales 就保留原文）
+        "name": _display_name(None, man, ""),
         "version": str(man.get("version") or ""),
         "manifest_version": man.get("manifest_version"),
         "bytes": len(blob),
@@ -328,25 +354,9 @@ def install(
             raise StoreError("EXT_STORE_NO_SOURCE", f"路径不存在：{p}")
 
     manifest = read_manifest(zip_bytes)
-    slug = packs._slugify(str(manifest.get("name") or (ext_id or "ext"))) or "ext"
     version = _safe_version(manifest.get("version"))
     s = packs.get_settings()
     s.ext_dir.mkdir(parents=True, exist_ok=True)
-    dest = s.ext_dir / f"{slug}-{version}"
-    # 兜底断言：不管上游怎么过滤，落盘目标必须真的在 ext_dir 下面。
-    # 这条不是重复劳动 —— 它是"以后有人再往路径里塞东西"时的最后一道闸。
-    try:
-        dest.resolve().relative_to(s.ext_dir.resolve())
-    except (ValueError, OSError) as exc:
-        raise StoreError("EXT_STORE_UNSAFE_PATH",
-                         f"扩展要装到的位置不在扩展库里（{dest}），已拒绝") from exc
-
-    existed = dest.is_dir()
-    if existed and not update:
-        return {
-            "ok": True, "skipped": "这个版本已经在库里了",
-            "slug": slug, "version": version, "path": str(dest), "ext_id": ext_id,
-        }
 
     import tempfile
 
@@ -359,8 +369,41 @@ def install(
             subs = [d for d in root.iterdir() if d.is_dir() and (d / "manifest.json").is_file()]
             if len(subs) == 1:
                 root = subs[0]
+
+        # **解包之后**再算 slug：`__MSG_xxx__` 的扩展必须按 `_locales` 里的
+        # 真实文案命名，否则库里的目录名和列表里显示的都是占位符
+        # （Bitwarden → `__msg_extname__`、ScriptCat → `__MSG_scriptcat__`）。
+        # 这一步必须在解包之后，因为解析要读 `_locales/`。
+        display = _display_name(root, manifest, fallback=(ext_id or "ext"))
+        slug = packs._slugify(display) or "ext"
+        dest = s.ext_dir / f"{slug}-{version}"
+        # 兜底断言：不管上游怎么过滤，落盘目标必须真的在 ext_dir 下面。
+        # 这条不是重复劳动 —— 它是"以后有人再往路径里塞东西"时的最后一道闸。
+        try:
+            dest.resolve().relative_to(s.ext_dir.resolve())
+        except (ValueError, OSError) as exc:
+            raise StoreError("EXT_STORE_UNSAFE_PATH",
+                             f"扩展要装到的位置不在扩展库里（{dest}），已拒绝") from exc
+        existed = dest.is_dir()
+        if existed and not update:
+            return {
+                "ok": True, "skipped": "这个版本已经在库里了",
+                "slug": slug, "version": version, "path": str(dest), "ext_id": ext_id,
+            }
         if not (root / "manifest.json").is_file():
             raise StoreError("EXT_STORE_NO_MANIFEST", "解包后找不到 manifest.json")
+        # 解包出来的 manifest 才是最终真相（zip 里那份可能只是壳）。
+        # 注意：这里**不能**用 `read_manifest()` —— 它吃的是 ZIP 字节；
+        # 解包后手上是纯 JSON，直接读文件即可（第一版传错，15 个测试报
+        # "File is not a zip file"）。
+        try:
+            fresh = json.loads((root / "manifest.json").read_text(
+                encoding="utf-8-sig", errors="replace"))
+            if isinstance(fresh, dict):
+                manifest = fresh
+                version = _safe_version(manifest.get("version")) or version
+        except (OSError, json.JSONDecodeError):
+            pass
         packs._copy_tree(root, dest)
         # 记下商店扩展 ID：check_updates() 靠它回商店比对版本。
         # 不写的话更新功能只能靠猜（而猜错就是下载了别人的扩展）。
@@ -369,6 +412,31 @@ def install(
                 (dest / ".zw-ext-id").write_text(ext_id, encoding="utf-8")
             except OSError:
                 logger.debug("写扩展 ID 标记失败", exc_info=True)
+        # **登记进"扩展库"表**。
+        #
+        # 实测发现的坑（2026-11-18 云电脑装 5 个商店扩展）：`GET /extensions`
+        # 读的是 SQLite 的 `extensions` 表，而 `install()` 以前只把文件放到
+        # `ext_dir/` 并建包，**从不写这张表** —— 于是"装好了但在扩展库里看不到"，
+        # 只有被应用到环境之后才会登记（`packs.register_extension`）。
+        # 用户装完一刷新发现列表还是空的，只会以为装失败了。
+        try:
+            from ..db import get_db
+            from . import packs as _packs
+
+            digest = _packs._tree_sha256(dest)
+            with get_db().conn() as c:
+                c.execute(
+                    "INSERT INTO extensions(slug,version,path,name,sha256,added_at) "
+                    "VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(slug,version) DO UPDATE SET path=excluded.path, "
+                    "name=excluded.name, sha256=excluded.sha256",
+                    (slug, version, str(dest), display, digest, time.time()),
+                )
+            get_db().audit("extension.install",
+                           detail={"slug": slug, "version": version, "via": "store"})
+        except Exception:  # noqa: BLE001 —— 登记失败不该让"装好了"这件事回滚
+            logger.warning("扩展已落盘，但写入扩展库登记表失败（列表里可能看不到）", exc_info=True)
+
         # 顺手记下**装的时候的版本号**。
         # 为什么不能靠目录名：`<slug>-<version>` 这个布局只对这里装进来的成立；
         # 从扩展包导入 / 手工放进来的目录可能叫 `cookiemanager`（不含版本），
@@ -404,8 +472,11 @@ def install(
         "is_default": False,
     }
     if make_pack:
-        result.update(_make_pack(dest, name=str(manifest.get("name") or slug),
-                                 as_default=as_default))
+        # 包名必须用**解析后**的显示名。以前这里传的是 manifest 里的原始值，
+        # 于是 Bitwarden 的包名叫 `__MSG_extName__`、ScriptCat 叫
+        # `__MSG_scriptcat__` —— 包里的扩展名明明是中文，包名却是占位符
+        # （实测：云电脑装 5 个商店扩展后，扩展包列表 4 个是占位符）。
+        result.update(_make_pack(dest, name=display or slug, as_default=as_default))
     return result
 
 

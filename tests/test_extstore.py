@@ -720,3 +720,107 @@ def test_download_proxy_is_honored_and_documented(home, monkeypatch):
     assert "ZW_DOWNLOAD_PROXY" in ei.value.message, ei.value.message
     monkeypatch.delenv("ZW_DOWNLOAD_PROXY", raising=False)
     config.reset_settings()
+
+
+def test_install_resolves_msg_placeholder_to_locale_name(home):
+    """装商店扩展时，`__MSG_xxx__` 要解析成 `_locales` 里的真实名字。
+
+    实测来源（2026-11-18 云电脑装 5 个商店扩展）：单扩展库这条路径**不解析**
+    占位符，列表里就成了
+
+        __msg_extname__   v2026.10.2   ← Bitwarden
+        __MSG_scriptcat__ v1.5.2       ← ScriptCat
+        __MSG_brandName__ v1.35.2      ← 沉浸式翻译
+
+    用户根本分不清哪个是哪个。解析必须在**解包之后**做（要读 `_locales/`），
+    并且 slug / 目录名也要用解析后的名字，否则库里一堆占位符目录。
+    """
+    import io as _io
+    import json as _json
+    import zipfile as _zipfile
+
+    from zw_core.services import extstore as es
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("manifest.json", _json.dumps({
+            "manifest_version": 3, "name": "__MSG_extName__", "version": "2.0.0",
+        }))
+        zf.writestr("_locales/zh_CN/messages.json",
+                    _json.dumps({"extName": {"message": "比特warden"}}, ensure_ascii=False))
+        zf.writestr("sw.js", "//x")
+    crx = home / "x.crx"
+    crx.write_bytes(buf.getvalue())
+
+    res = es.install(crx_path=str(crx), update=False, make_pack=False)
+    assert res.get("slug") != "__msg_extname__", res
+    assert "比特warden" in str(res.get("slug")), res
+    assert res.get("version") == "2.0.0", res
+
+
+def test_store_install_appears_in_extension_library(home):
+    """装完商店扩展后，`GET /extensions`（读 SQLite 表）必须能看到它。
+
+    实测来源（2026-11-18 云电脑装 5 个商店扩展）：`install()` 只把文件放进
+    `ext_dir/` 并建包，**从不写 `extensions` 表** —— 而「扩展库」页面读的就是
+    这张表。于是"装好了但列表还是空的"，用户只会以为装失败。
+    只有被应用到环境后（`packs.register_extension`）才会登记，太晚了。
+
+    这条测试同时防住一个更阴的坑：登记代码在 `except Exception` 里，
+    如果里面写错（比如漏了 `import time`），会被静默吞掉、测试照样绿。
+    所以这里必须**真的去查表**。
+    """
+    import io as _io
+    import json as _json
+    import zipfile as _zipfile
+
+    from zw_core.db import get_db
+    from zw_core.services import extstore as es
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("manifest.json", _json.dumps(
+            {"manifest_version": 3, "name": "LibCheckExt", "version": "3.1.4"}))
+        zf.writestr("sw.js", "//x")
+    crx = home / "lib.crx"
+    crx.write_bytes(buf.getvalue())
+
+    res = es.install(crx_path=str(crx), update=False, make_pack=False)
+    slug, version = res["slug"], res["version"]
+
+    with get_db().conn() as c:
+        row = c.execute("SELECT * FROM extensions WHERE slug=? AND version=?",
+                        (slug, version)).fetchone()
+    assert row is not None, f"装完没有登记进扩展库表（slug={slug} version={version}）"
+    assert row["name"] == "LibCheckExt", dict(row)
+
+
+def test_pack_created_on_install_uses_resolved_name(home):
+    """装商店扩展自动建包时，包名要用解析后的名字，不能是 `__MSG_xxx__`。
+
+    实测来源：云电脑装 5 个商店扩展后，包里的扩展名是中文（`脚本猫`、
+    `沉浸式翻译…`），但**扩展包列表**里 4 个包名是 `__MSG_scriptcat__` /
+    `__MSG_brandName__` 这种占位符 —— 因为建包时把 manifest 的原始 name
+    直接传进去当包名了，绕过了自动取名逻辑。
+    """
+    import io as _io
+    import json as _json
+    import zipfile as _zipfile
+
+    from zw_core.services import extstore as es
+
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("manifest.json", _json.dumps(
+            {"manifest_version": 3, "name": "__MSG_appName__", "version": "1.0.0"}))
+        zf.writestr("_locales/zh_CN/messages.json",
+                    _json.dumps({"appName": {"message": "脚本猫"}}, ensure_ascii=False))
+        zf.writestr("sw.js", "//x")
+    crx = home / "cat.crx"
+    crx.write_bytes(buf.getvalue())
+
+    res = es.install(crx_path=str(crx), update=False, make_pack=True, as_default=False)
+    assert res.get("pack_created") is True, res
+    from zw_core.services import packs as packsvc
+    pk = [p for p in packsvc.list_packs() if p["id"] == res["pack_id"]][0]
+    assert pk["name"] == "脚本猫", pk
