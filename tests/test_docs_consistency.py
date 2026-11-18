@@ -334,3 +334,73 @@ def test_quickstart_tells_users_engine_is_automatic():
     assert "releases/download" not in text, "还在教用户手动下载内核"
     assert "137" in text and "load-extension" in text, \
         "没说清为什么不能用官方 Chrome"
+
+
+def test_documented_env_vars_actually_exist_in_code():
+    """文档里出现的每个 `ZW_*` 变量，代码里必须真的读它。
+
+    用户照着部署文档配环境变量，配了个代码从不读取的名字，表现是"配了没效果" ——
+    最难查的一类问题（没有任何报错，行为就是不变）。
+
+    实测抓到过：`docs/03` 第五节写「设不同的 `ZW_PORT_POOL`」，而真实配置项是
+    `ZW_PORT_POOL_START` / `ZW_PORT_POOL_END` 两个变量，压根没有 `ZW_PORT_POOL`。
+    照那行做，两台 core 仍然抢同一段 CDP 端口。
+
+    同时这条能防止另一种错：文档把默认值写错。同一份文档里
+    `ZW_PORT_POOL_START` 的默认值曾同时出现 `21001` 和 `22001` 两种说法。
+    """
+    import pathlib
+    import re
+
+    # 只认**配置表里**的行（`| \`ZW_XXX\` | 默认值 | 说明 |`）。
+    #
+    # 不能全文扫：文档里还有大量非配置项的同形字符串 ——
+    # 示例命令里的 `ZW_CORE` / `ZW_CHROME`、脚本变量 `ZW_EXT_DIR`、`ZW_SHOT_DIR`、
+    # 以及正文里"没有叫 ZW_PORT_POOL 的配置项"这种**否定式提及**。
+    # 全文扫会把这些全报成"文档有、代码没有"，噪音盖住真问题。
+    #
+    # 配置表才是"用户照着配"的权威清单，只查它。
+    doc_vars: set[str] = set()
+    for doc in (ROOT / "docs").glob("*.md"):
+        for line in doc.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("|"):
+                continue
+            for name in re.findall(r"`(ZW_[A-Z0-9_]+)`", stripped):
+                doc_vars.add(name)
+
+    code = ""
+    for sub in ("core/src", "hub/src"):
+        for p in (ROOT / sub).rglob("*.py"):
+            code += p.read_text(encoding="utf-8", errors="ignore")
+    code_vars = set(re.findall(r"\b(ZW_[A-Z0-9_]+)\b", code))
+
+    missing = sorted(doc_vars - code_vars)
+    assert not missing, (
+        "配置表里列了但代码从不读取的环境变量："
+        + ", ".join(missing)
+        + "（用户照文档配会配了没效果，且没有任何报错）"
+    )
+
+
+def test_port_pool_defaults_are_consistent_in_docs():
+    """同一份部署文档里，端口池默认值不能有两种说法。
+
+    曾出现：一处写 `21001 / 21100`，另一处写 `22001 / 22100`。
+    用户不知道该信哪个，而代码实际是 21001/21100。
+    """
+    import re
+
+    text = (ROOT / "docs/03-部署指南.md").read_text(encoding="utf-8")
+    # 只取"端口池"那几行里的默认值
+    vals: set[str] = set()
+    for line in text.splitlines():
+        if "ZW_PORT_POOL" in line and "|" in line:
+            for m in re.findall(r"`(\d{5})`", line):
+                vals.add(m)
+    assert vals, "文档里没找到端口池默认值"
+    from zw_core.config import Settings
+
+    s = Settings()
+    assert str(s.port_pool_start) in vals, f"文档默认值与代码不符：文档={vals} 代码={s.port_pool_start}"
+    assert str(s.port_pool_end) in vals, f"文档默认值与代码不符：文档={vals} 代码={s.port_pool_end}"
