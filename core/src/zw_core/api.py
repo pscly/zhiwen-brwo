@@ -808,7 +808,11 @@ def build_app() -> FastAPI:
                 loadable = bool(extprobe.probe(path, timeout=25.0).get("loadable"))
             except Exception:  # noqa: BLE001 —— 探不起责任在环境，不影响状态展示
                 loadable = None
+        from zw_core.services import netproxy
+
         return ok({
+            # 下载内核/扩展时实际用的代理与来源（explicit / autodetect:PORT / none）
+            "download_proxy": netproxy.describe(),
             "policy": s.engine_policy,
             "auto_install": bool(s.engine_auto_install),
             "engine_dir": str(s.engine_dir),

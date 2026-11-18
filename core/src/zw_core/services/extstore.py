@@ -171,7 +171,15 @@ def download_crx(ext_id: str, *, timeout: float = 60.0,
     try:
         from ..config import get_settings
 
-        proxy = (get_settings().download_proxy or "").strip()
+        # 显式配置优先，否则自动发现本机代理（理由见 services/netproxy.py）
+        from . import netproxy
+
+        _s = get_settings()
+        proxy = netproxy.for_download(
+            _s.download_proxy,
+            autodetect=_s.download_proxy_autodetect,
+            ports=_s.download_proxy_ports,
+        )
     except Exception:  # noqa: BLE001 —— 配置读不出来就退回环境变量那条路
         proxy = ""
     try:
@@ -181,9 +189,12 @@ def download_crx(ext_id: str, *, timeout: float = 60.0,
         with httpx.Client(**kwargs) as c:
             r = c.get(url)
     except Exception as exc:  # noqa: BLE001
+        # 把"当时用的是哪个代理"写进消息。自动发现挑中了一个不可用的本地端口时，
+        # 用户看到的会是"连不上商店"，很容易去查网络而不是查那个代理。
+        used = f"（当前走的代理：{proxy}）" if proxy else "（未使用代理，直连）"
         raise StoreError(
             "EXT_STORE_UNREACHABLE",
-            f"连不上 Chrome 应用商店（{type(exc).__name__}: {exc}）。"
+            f"连不上 Chrome 应用商店（{type(exc).__name__}: {exc}）{used}。"
             "这台机器需要能访问 clients2.google.com。国内网络请设 ZW_DOWNLOAD_PROXY "
             "指向你的代理（例如 http://127.0.0.1:7890），然后重启客户端再试",
             502,

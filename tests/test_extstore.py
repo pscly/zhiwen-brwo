@@ -485,9 +485,19 @@ def test_download_crx_http_error_is_readable(home, monkeypatch):
 
 
 def test_download_crx_unreachable_host(home, monkeypatch):
-    """连不上时要说清"需要能访问 clients2.google.com"，并建议配代理。"""
-    from zw_core.services import extstore as es
+    """连不上时要说清"需要能访问 clients2.google.com"，并建议配代理。
 
+    注意：这里必须**关掉代理自动发现**。开了之后，程序会把本机代理挑上，
+    于是"连不上 127.0.0.1:1"变成"代理回了一个 HTTP 错误码"——
+    两种情形都算失败，但错误码不同（HTTP_ERROR vs UNREACHABLE），
+    这条测试要钉的是后者。
+    （这个副作用是加了自动发现之后真实出现过的：本机 21080 有此代理。）
+    """
+    from zw_core.services import extstore as es
+    from zw_core.services import netproxy
+
+    netproxy.reset_cache()
+    monkeypatch.setattr(netproxy, "resolve", lambda *a, **k: ("", "none"))
     # 127.0.0.1:1 基本不可能有服务
     monkeypatch.setattr(es, "UPDATE_URL", "http://127.0.0.1:1/service/update2/crx")
     with pytest.raises(es.StoreError) as ei:

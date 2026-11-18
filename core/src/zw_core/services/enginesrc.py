@@ -172,7 +172,28 @@ def is_running() -> bool:
 
 # ── 解析：找到当前平台的资产 ─────────────────────────────
 def _proxy(s: Settings) -> str:
-    return (s.download_proxy or "").strip()
+    """下载内核用的代理：显式配置优先，否则自动发现本机代理。
+
+    自动发现很关键：用户机器上常常本来就跑着 Clash/mihomo，
+    只是没设 `ZW_DOWNLOAD_PROXY`。实测同一台机器直连 146KB/8s、
+    经本机 21080 是 49.4MB/8s —— 不自动发现就会一直按直连速度卡着。
+    """
+    from . import netproxy
+
+    url, source = netproxy.resolve(
+        s.download_proxy,
+        autodetect=s.download_proxy_autodetect,
+        ports=s.download_proxy_ports,
+    )
+    if url and source != "explicit":
+        log_msg = f"下载将使用自动发现的代理 {url}（{source}）"
+        try:
+            import logging
+
+            logging.getLogger("zw.enginesrc").info("%s", log_msg)
+        except Exception:  # noqa: BLE001
+            pass
+    return url
 
 
 def _client(s: Settings, timeout: float = 30.0) -> httpx.Client:

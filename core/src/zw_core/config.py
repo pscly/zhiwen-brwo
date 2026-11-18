@@ -214,6 +214,18 @@ class Settings:
     # 根本不知道该配在哪里。留空 = 不显式设代理（仍尊重环境变量）。
     download_proxy: str = field(default_factory=lambda: _env("ZW_DOWNLOAD_PROXY", ""))
 
+    # 没显式配 `ZW_DOWNLOAD_PROXY` 时，自动探一遍本机常见代理端口
+    # （7890/7891/7892/21080/7897/1080/10808），找到真能用的就用。
+    #
+    # 为什么默认开：内核 140–200MB、CRX 也在境外。实测同一台机器，
+    # 直连 8 秒拿 146KB，经本机 21080 拿 49.4MB —— 差三个数量级。
+    # 而用户机器上大概率本来就跑着 Clash/mihomo，只是没人告诉本程序。
+    download_proxy_autodetect: bool = field(
+        default_factory=lambda: _env_bool("ZW_DOWNLOAD_PROXY_AUTODETECT", True))
+    # 自定义候选端口（逗号分隔），留空用内置清单
+    download_proxy_ports: str = field(
+        default_factory=lambda: _env("ZW_DOWNLOAD_PROXY_PORTS", ""))
+
     # ── 内核策略（2026-11-18 起默认用 ungoogled-chromium）────
     #
     # 为什么默认换：官方 Google Chrome 137 起忽略 `--load-extension`
