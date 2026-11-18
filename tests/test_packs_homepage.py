@@ -702,3 +702,32 @@ def test_scan_browser_profiles_finds_importable_user_data(tmp_path, monkeypatch)
     assert hit["extension_count"] == 1, hit
     assert hit["browser"] == "RXYCDP", hit
 
+
+
+def test_default_scan_roots_cover_windows_locations(monkeypatch, tmp_path):
+    """Windows 上要扫的这些位置一个都不能少。
+
+    上一轮的测试只走了 `roots=[...]` 这条显式路径，**没验平台分支**。而真实用户
+    用的是 Windows：RXYCDP 可能装在 `%LOCALAPPDATA%\\RXYCDP`（按用户安装）、
+    `%LOCALAPPDATA%\\Programs\\RXYCDP`、或者 `C:\\Program Files\\RXYCDP`
+    （管理员安装）—— 少扫一个，用户就会"扫描找不到"。
+    """
+    from zw_core.services import packs as packsvc
+
+    la = tmp_path / "Local"
+    ra = tmp_path / "Roaming"
+    pf = tmp_path / "PF"
+    for d in (la, ra, pf):
+        d.mkdir()
+    monkeypatch.setenv("LOCALAPPDATA", str(la))
+    monkeypatch.setenv("APPDATA", str(ra))
+    monkeypatch.setattr(packsvc.sys, "platform", "win32")
+    # `Program Files` 在函数里是硬编码 `C:/` 下的路径；本机（Linux）上不存在，
+    # 所以断言只要求"LOCALAPPDATA / APPDATA / Programs"三项，
+    # Program Files 那两条在这里天然为空（真实 Windows 上目录存在才会加）。
+
+    roots = [str(r) for r in packsvc._default_scan_roots()]
+    assert str(la) in roots, roots
+    assert str(ra) in roots, roots
+    assert any(r.endswith("Programs") for r in roots), roots
+    # 不断言 Program Files：本机没有 C:/Program Files，函数会按 is_dir() 跳过
