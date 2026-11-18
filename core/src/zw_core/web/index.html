@@ -1545,7 +1545,12 @@ function openProfileForm(profile) {
       <h3>网络</h3>
       <div class="form-grid">
         ${field('代理库', proxySelect, proxyOpts.length ? '选库里的代理会自动补上凭据：带用户名密码的代理不能写进 --proxy-server（Chromium 不支持），会由本机中继代填认证头再转发给真实代理。早年"生成认证扩展"那条路已不通（Chrome 137 起忽略 --load-extension），现在一律走中继。' : '')}
-        ${field('代理地址', `<input class="input mono" id="f-proxy" value="${escAttr(p.proxy || '')}" placeholder="http://127.0.0.1:7890 或 socks5://user:pass@host:port">`, '这里是上游地址的唯一真相；代理库只是填进来的便捷来源。')}
+        ${field('代理地址', `<input class="input mono" id="f-proxy" value="${escAttr(p.proxy_id ? '' : (p.proxy || ''))}" placeholder="${p.proxy_id ? '（当前用代理库里的条目，留空即可）' : 'http://127.0.0.1:7890 或 socks5://user:pass@host:port'}">`,
+          // 绑了库条目时**不要**把这个框填成库里的地址：那会变成"库 + 手填"两个来源，
+          // 而手填的优先级更高（proxy 字段优先于 proxy_id），用户一保存就把库绑定挤掉了。
+          // 实测过：`proxy` 现在会被后端补成展示串，直接回填进这个框就会造成这个后果。
+          p.proxy_id ? '当前用的是代理库里的条目；要改回手填，先把上面「代理库」选成"不使用代理库"。'
+                     : '这里是上游地址的唯一真相；代理库只是填进来的便捷来源。')}
       </div>
     </div>
 
@@ -1712,7 +1717,15 @@ function renderProfileDetail(p) {
     ['CPU 核数', p.fp_hardware ?? '宿主机', false],
     ['时区 / 语言', [p.fp_timezone, p.fp_lang].filter(Boolean).join(' / ') || '宿主机', false],
     ['禁用伪装', p.fp_disable_spoofing || '—', true],
-    ['代理', p.proxy || '直连', true],
+    // 「代理」列：绑的是代理库（proxy_id）时 `p.proxy` 是空的（库是唯一真相，
+    // `assign_to_profile` 有意置空），必须读 `proxy_info` 才知道实际用哪个 ——
+    // 否则会把"在用代理"显示成「直连」，与事实相反。
+    ['代理', (() => {
+      const pi = p.proxy_info || {};
+      if (pi.source === 'library') return pi.upstream || '代理库';
+      if (pi.source === 'missing') return '库条目已删除';
+      return p.proxy || '直连';
+    })(), true],
     ['起始网址', (p.start_urls || []).length ? p.start_urls.join('\n') : '—', true],
     ['窗口', `${p.window_w}×${p.window_h}${p.headless ? ' · headless' : ''}`, false],
     ['扩展', (p.extensions || []).join(', ') || '—', true],

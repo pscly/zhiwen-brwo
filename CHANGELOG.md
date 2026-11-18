@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## 0.7.83 — 2026-11-19
+
+**界面上「代理」那一列，绑了代理库的环境会显示成「直连」——与事实相反。**
+
+### 问题
+
+用户要求过"控制台要多一列显示代理"。那一列确实在，渲染的是：
+
+```js
+['代理', p.proxy || '直连', true]
+```
+
+但 `assign_to_profile()` 绑定库条目时会**有意把 `profiles.proxy` 置空、只留 `proxy_id`**
+（让"代理库"成为唯一真相，`proxy` 字段只表示"手填地址"）。
+
+两边一撞：**环境明明在用 `socks5://66.80.12.66:20000`，界面显示「直连」**。
+实测确认（本地起 core，建库条目 → 绑到环境 → GET /profiles）：
+
+```
+proxy_id: 1 | proxy: ''     ← 界面据此渲染 → 「直连」
+```
+
+### 根因：写好的函数没人调用
+
+`proxylib.describe_profile_proxy()` **就是为这件事写的**，docstring 里写着
+「列表页的 `proxy` 字段会看起来是空的 —— 展示时走这个函数，不要直接读 `profiles.proxy`」。
+但全项目**没有任何地方调用它**（只有注释里提到）。
+
+典型的"函数写好了但没接线"。
+
+### 修法
+
+1. `row_to_dict()` 在环境绑了库条目时填 `proxy_info`（就是 `describe_profile_proxy()`
+   的返回值：来源、label、upstream、是否链式、上次检测结果…）。
+2. 控制台「代理」列改读 `proxy_info`：
+
+```js
+if (pi.source === 'library') return pi.upstream || '代理库';
+if (pi.source === 'missing') return '库条目已删除';
+return p.proxy || '直连';
+```
+
+顺带处理一个连带问题：编辑表单里的「代理地址」输入框原来填 `p.proxy`，
+现在如果回填库里的地址，就会变成"库 + 手填"两个来源，而手填优先级更高 ——
+用户一保存就把库绑定挤掉了。改成绑库时该框留空并说明"当前用库里的条目"。
+
+### 我中途走错的一步
+
+第一版我直接改 `row_to_dict` 把 `proxy` 字段填上展示值，结果**两条既有测试立刻红**：
+
+```
+test_assign_library_proxy_keeps_credentials_effective
+test_proxy_spec_for_quotes_credentials
+  → assert fresh["proxy"] == ""      # 脱敏字段不再承担"地址来源"
+```
+
+它们明确断言 `proxy` 必须为空 —— 那才是原始设计的意图。我改字段等于推翻设计。
+撤回，改成"不动 `proxy`、只加 `proxy_info`"，测试全绿。
+
+> 这正体现了那两条测试的价值：它们把"字段语义"钉住了，防止后来的人（包括我）
+> 图省事把两个概念混进一个字段。
+
+### 测试
+
+631 → **632 项**（库代理展示：断言 `proxy_info.source == library`、带出 upstream、
+且 `proxy` 保持为空）；`ui-check` 33 → **37 项**。
+
+九项门槛全绿（632 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 37）。
+
 ## 0.7.82 — 2026-11-19
 
 **「远程凭机器码进控制台」这条需求，之前只验了 API 层，没验登录框。**

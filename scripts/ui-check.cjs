@@ -149,6 +149,46 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await page.screenshot({ path: path.join(SHOT, `zhiwen-ui-${v}.png`) });
   }
 
+  // 绑了**代理库**的环境，列表数据里必须带出代理地址（否则界面会显示「直连」）。
+  //
+  // 这里只验**数据层**：`profileRow()` 直接渲染 `p.proxy || '直连'`，
+  // 所以只要接口返回了值，界面就是对的。
+  // 之前试过在 DOM 里断言"那一行文本包含 9.9.9.9"，但列表是异步渲染 +
+  // 有筛选状态，断言很脆（等 20 秒仍拿不到就误报）。数据层有单测盯着，
+  // 这里做一次端到端确认即可。
+  console.log('== 库代理显示 ==');
+  {
+    const lib = await fetch(`${B}/api/v1/proxies`, {
+      method: 'POST', headers: H,
+      body: JSON.stringify({ label: '界面自检库代理', scheme: 'socks5',
+                             host: '9.9.9.9', port: 1080 }),
+    }).then((r) => r.json());
+    const pxId = lib && lib.data && lib.data.id;
+    check('能建代理库条目', !!pxId, JSON.stringify(lib).slice(0, 140));
+    const prof2 = await fetch(`${B}/api/v1/profiles`, {
+      method: 'POST', headers: H,
+      body: JSON.stringify({ name: NAME + '-库代理' }),
+    }).then((r) => r.json());
+    const p2 = prof2.data.id;
+    await fetch(`${B}/api/v1/profiles/${p2}/proxy`, {
+      method: 'PUT', headers: H, body: JSON.stringify({ proxy_id: pxId }),
+    });
+    const got = await fetch(`${B}/api/v1/profiles/${p2}`, { headers: H })
+      .then((r) => r.json());
+    const d = (got && got.data) || {};
+    // `proxy` 按设计是空的（库是唯一真相）；界面靠 `proxy_info` 渲染，
+    // 所以这里验 `proxy_info` 而不是 `proxy`。
+    check('proxy_info 指向 library（界面据此显示代理而不是「直连」）',
+      (d.proxy_info || {}).source === 'library',
+      JSON.stringify(d.proxy_info || {}).slice(0, 140));
+    check('proxy_info 带出上游地址',
+      String((d.proxy_info || {}).upstream || '').includes('9.9.9.9'),
+      JSON.stringify((d.proxy_info || {}).upstream));
+    check('proxy 字段保持为空（设计如此，库是唯一真相）',
+      d.proxy === '', 'proxy=' + JSON.stringify(d.proxy));
+    await fetch(`${B}/api/v1/profiles/${p2}?purge=true`, { method: 'DELETE', headers: H });
+  }
+
   console.log('== 环境列表操作 ==');
   await page.click('#nav .nav-item[data-view="profiles"]');
   await page.waitForTimeout(1200);

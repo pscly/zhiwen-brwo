@@ -1249,3 +1249,53 @@ def test_public_row_exposes_chain_hop(lib):
     # 单跳时是空串，不是 None（前端/脚本少一层判空）
     single = [r for r in rows if not r.get("is_chain")][0]
     assert single["hop"] == "", single
+
+
+def test_profile_bound_to_library_proxy_shows_it_not_direct(tmp_path, monkeypatch):
+    """环境绑了**代理库**时，`GET /profiles` 必须体现出这个代理。
+
+    实测（2026-11-19）：绑定库里的 `socks5://66.80.12.66:20000` 之后，
+    接口返回的是 `proxy: ''` + `proxy_id: 1`，而控制台的「代理」列渲染
+    `p.proxy || '直连'` —— 于是**实际在用代理，界面显示「直连」**，
+    与事实相反。用户会以为代理没绑上，然后去反复重绑。
+
+    同时验证：补进来的展示值**必须打码**，不能带密码原文（硬约束第 7 条）。
+    """
+    from zw_core import config, db
+    from zw_core.services import manager as mgr
+    from zw_core.services import proxylib
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    db.reset_db()
+    try:
+        # 用真实接口建库条目并绑定（与用户操作同一条路径）
+        out = proxylib.import_batch("socks5://cf1b:secret123@66.80.12.66:20000",
+                                    label_prefix="库内代理")
+        rows = proxylib.list_all()
+        assert rows, out
+        entry = rows[0]
+        proxy_id = int(entry["id"])
+        p = mgr.create_profile({"name": "库代理显示"})
+        proxylib.assign_to_profile(p["id"], proxy_id=proxy_id)
+
+        got = mgr.get_profile(p["id"])
+        assert got["proxy_id"] == proxy_id
+        # `proxy` **应当**为空：`assign_to_profile` 有意把它置空，让库成为唯一真相
+        # （既有测试 `test_assign_library_proxy_keeps_credentials_effective`
+        #  与 `test_proxy_spec_for_quotes_credentials` 都断言这点）。
+        assert got["proxy"] == "", got["proxy"]
+        # 展示靠 `proxy_info` —— 之前这个结构写好了却没人填，界面只能读到空的
+        # `proxy`，于是把"在用代理"显示成「直连」。
+        info = got.get("proxy_info") or {}
+        assert info.get("source") == "library", info
+        assert info.get("label"), info
+        assert "66.80.12.66:20000" in str(info.get("upstream")), info
+        assert "secret123" not in str(got), "响应里出现了密码原文"
+
+        # 列表接口同样要带
+        listed = [x for x in mgr.list_profiles() if x["id"] == p["id"]][0]
+        assert (listed.get("proxy_info") or {}).get("source") == "library", listed.get("proxy_info")
+    finally:
+        config.reset_settings()
+        db.reset_db()

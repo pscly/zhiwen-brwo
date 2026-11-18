@@ -81,7 +81,22 @@ _JSON_FIELDS = ("tags", "start_urls", "extensions")
 _BOOL_FIELDS = ("cdp_enabled", "headless", "ephemeral", "trim_on_stop", "sync_enabled")
 
 
-def row_to_dict(row: Any) -> dict[str, Any]:
+def row_to_dict(row: Any, *, fill_proxy: bool = True) -> dict[str, Any]:
+    """数据库行 → 对外的 dict。
+
+    `fill_proxy=True` 时，如果环境绑的是**代理库**（`proxy_id`）而 `proxy` 字段为空，
+    会补一个 `proxy` 展示值。
+
+    ## 为什么必须补
+
+    实测（2026-11-19）：环境绑定库里的 `socks5://66.80.12.66:20000` 之后，
+    `GET /profiles` 返回 `proxy: ''`、`proxy_id: 1`。
+    而控制台的「代理」列渲染的是 `p.proxy || '直连'` —— 于是**实际在用代理，
+    界面显示「直连」**，与实际相反。用户会以为代理没绑上。
+
+    补进来的是**打码后**的上游（`***@host:port`），不是带密码的原始串 ——
+    响应里不能出现密码原文（硬约束第 7 条）。
+    """
     d = dict(row)
     for f in _JSON_FIELDS:
         raw = d.get(f) or "[]"
@@ -92,6 +107,31 @@ def row_to_dict(row: Any) -> dict[str, Any]:
     for f in _BOOL_FIELDS:
         if f in d and d[f] is not None:
             d[f] = bool(d[f])
+    if fill_proxy:
+        # 绑的是**代理库**（`proxy_id`）时，`profiles.proxy` 是空的（`assign_to_profile`
+        # 就是这么设计的：库是唯一真相，字段只留给"手填地址"那种）。展示必须走
+        # `proxylib.describe_profile_proxy()`。
+        #
+        # 之前这个函数**写好了却没有任何地方调用** —— 于是控制台的「代理」列
+        # 渲染 `p.proxy || '直连'`，把"在用代理"显示成"直连"，和事实相反。
+        # 这里统一接线，details 放 `proxy_info`，`proxy` 补一个人能读的展示串。
+        try:
+            from . import proxylib as _pl
+
+            info = _pl.describe_profile_proxy(d)
+            if info.get("source") in ("library", "missing"):
+                # **不动 `proxy` 字段**。它按设计只表示"手填地址"，
+                # `assign_to_profile()` 之所以把它置空、只留 `proxy_id`，
+                # 就是为了让"库"成为唯一真相（有两条既有测试盯着这点：
+                # `test_assign_library_proxy_keeps_credentials_effective` 与
+                # `test_proxy_spec_for_quotes_credentials` 都断言 `proxy == ""`）。
+                #
+                # 展示交给 `proxy_info`：界面读它来显示"这环境用哪个代理"。
+                # 之前 `describe_profile_proxy()` **写好了却没人调用**，
+                # 界面只能读空的 `proxy` → 显示成「直连」。
+                d["proxy_info"] = info
+        except Exception:  # noqa: BLE001 —— 展示值失败不能影响"读环境"
+            pass
     return d
 
 
