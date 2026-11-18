@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## 0.7.88 — 2026-11-19
+
+**「当然也可以选择关闭」这句 —— 之前没有关闭的办法。**
+
+### 缺的是什么
+
+你的原话：
+
+> 这样以后创建浏览器时，可以默认就把这些插件的数据都带上（**当然也可以选择关闭**）。
+
+"默认带上"做了（`is_default` 扩展包 → 新建环境自动应用），但**"关闭"没做**：
+
+```python
+if not profile_id:
+    packsvc.apply_default_packs(pid)      # 无条件，没有开关
+```
+
+想建一个干净环境，只能建完再手动一个个解绑。这个用途其实很实在：
+临时环境、要做指纹对照、排查"是不是某个插件导致的问题"。
+
+### 修法
+
+新增请求参数 `with_default_packs`（默认 `true`，保持老行为）：
+
+```bash
+curl -X POST "$CORE/api/v1/profiles" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"干净环境","with_default_packs":false}'
+```
+
+实测（真 core + 真默认包）：
+
+```
+A 默认建      → extensions: ['开关自检扩展']
+B with=false → extensions: []
+```
+
+`docs/04`（接口表）、`docs/16`（扩展包那篇）都补了说明。
+
+### 测试
+
+641 → **642 项**：造一个默认包 → 建两个环境 → 断言 A 带上、B 为空。
+
+### 过程中踩的两个坑（都是我自己的，不是产品问题）
+
+1. 我以为 API 的字段名是 `src_path`，实际对外叫 `path`（服务层才叫 `src_path`），
+   于是 `packs/import` 一直报 `PACK_INVALID_SOURCE` —— 查了一圈代码才发现是我调错。
+2. `set_default(pack_id)` 其实是 `set_default(pack_id, enabled)`。
+
+两个都记在测试注释里了，避免下次再绕。
+
+九项门槛全绿（642 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 37）。
+
 ## 0.7.87 — 2026-11-19
 
 **给 AI 的自描述清单漏了 13 条接口 —— 包括我刚加的「内核」和「扫描本机」。**

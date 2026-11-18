@@ -197,6 +197,11 @@ class ProfileCreate(BaseModel):
     trim_on_stop: bool = False
     sync_enabled: bool = True
     cdp_enabled: bool = True
+    with_default_packs: bool = Field(
+        default=True,
+        description="是否自动带上「默认扩展包」。false = 建一个干净的（插件/数据都不带），"
+                    "适合对照测试或排查'是不是插件导致的'",
+    )
 
 
 class StartBody(BaseModel):

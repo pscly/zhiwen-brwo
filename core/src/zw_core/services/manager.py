@@ -461,7 +461,17 @@ def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
     #   那个环境自带它原本的扩展集合与标签，被本地默认值污染会让两台机器的环境
     #   悄悄不一致（而用户以为导入的就是原来的样子）。
     # 为什么整体吞异常：带包/带检测页是增值项，失败不该让"建环境"这个主流程失败。
-    if not profile_id:
+    # `with_default_packs=false` 可以**明确不要**默认扩展包。
+    #
+    # 用户的要求是"以后创建浏览器时，可以默认就把这些插件的数据都带上
+    # （**当然也可以选择关闭**）" —— 只做"默认带上"不够，必须能关。
+    # 关闭的用途很具体：临时环境、要干净指纹对照的环境、出问题时排查
+    # "是不是插件导致的"。
+    #
+    # 默认值 true：不带这个字段时行为不变（老调用方/老客户端照旧带上）。
+    want_defaults = payload.get("with_default_packs")
+    want_defaults = True if want_defaults is None else bool(want_defaults)
+    if not profile_id and want_defaults:
         try:
             from . import packs as packsvc
 

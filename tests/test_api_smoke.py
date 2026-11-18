@@ -872,3 +872,53 @@ def test_import_with_as_default_actually_sets_default(client, tmp_path):
     packs = client.get("/api/v1/packs", headers=H).json()["data"]["packs"]
     me = [p for p in packs if p["id"] == r["id"]]
     assert me and me[0]["is_default"] is True, me
+
+
+def test_create_profile_can_skip_default_packs(client):
+    """建环境时可以**明确不要**默认扩展包（`with_default_packs=false`）。
+
+    用户的原话：「以后创建浏览器时，可以默认就把这些插件的数据都带上
+    （**当然也可以选择关闭**）」。
+
+    只做"默认带上"不够 —— 必须能关。用途很具体：临时环境、要做干净指纹对照、
+    以及排查"是不是某个插件导致的问题"。
+
+    实测过（0.7.88 前）：`create_profile` 无条件调 `apply_default_packs()`，
+    没有任何开关，用户想建一个干净环境只能建完再手动解绑。
+    """
+    from zw_core import config, db
+    from zw_core.services import manager as mgr
+    from zw_core.services import packs as packsvc
+
+    # 先造一个默认包（用一个最小的扩展目录）
+    ext = _tmp_ext_dir()
+    # 服务层参数名是 `src_path`（API 层对外叫 `path`，别记混）；
+    # 「设为默认」是单独一步 `set_default()`，不是 import 的参数。
+    made = packsvc.import_pack(src_path=str(ext), name="默认包")
+    packsvc.set_default(made["id"], True)
+
+    # 用唯一名字：这个文件是 module 级 fixture，数据库与本文件其他用例共享
+    import uuid as _uuid
+
+    tag = _uuid.uuid4().hex[:6]
+    with_defaults = mgr.create_profile({"name": f"带默认包-{tag}"})
+    clean = mgr.create_profile({"name": f"不要默认包-{tag}", "with_default_packs": False})
+
+    assert with_defaults["extensions"], "默认建环境应该带上默认扩展包"
+    assert clean["extensions"] == [], f"开关没生效，仍然带上了：{clean['extensions']}"
+
+
+def _tmp_ext_dir():
+    """造一个最小可识别扩展目录（manifest + 内容脚本）。"""
+    import json as _json
+    import tempfile
+    from pathlib import Path
+
+    d = Path(tempfile.mkdtemp()) / "开关测试扩展"
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(_json.dumps({
+        "manifest_version": 3, "name": "开关测试扩展", "version": "1.0",
+        "content_scripts": [{"matches": ["<all_urls>"], "js": ["cs.js"]}],
+    }, ensure_ascii=False), encoding="utf-8")
+    (d / "cs.js").write_text("void 0;", encoding="utf-8")
+    return d
