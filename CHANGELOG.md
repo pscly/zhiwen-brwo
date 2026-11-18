@@ -57,17 +57,33 @@ with httpx.Client(follow_redirects=True, timeout=timeout) as c:
 
 - `docs/03` 配置表补一行，注明**国内必须配**及具体报错样子
 
-### 顺带探测（给用户的线索）
+### 顺带探测：找到那台机器上现成可用的代理
 
-那台机器上 `127.0.0.1:21080` 在监听（就是链式代理常用的前置端口），但实测：
+`127.0.0.1:21080` 在监听。查它的进程：
 
-| 当什么用 | 结果 |
-|---|---|
-| HTTP 代理 | 超时（rc=28） |
-| SOCKS5 | 空回复（rc=52） |
+```
+netstat -ano | findstr :21080   →  PID 11092
+tasklist | findstr 11092        →  "verge-mihomo.exe"
+```
 
-也就是说 21080 目前**不是一个可用的 HTTP/SOCKS 代理**，不能直接填进
-`ZW_DOWNLOAD_PROXY`。你那台落地代理需要经前置访问，得先让前置真正能转发。
+**是 Clash Verge 的内核 mihomo**（混合端口，同时支持 HTTP 与 SOCKS5）。实测：
+
+| 用法 | 目标 | 结果 |
+|---|---|---|
+| `-x http://127.0.0.1:21080` | `https://api.ipify.org` | **200** |
+| `-x socks5h://127.0.0.1:21080` | `https://api.ipify.org` | **200** |
+| `-x http://127.0.0.1:21080` | `https://chromewebstore.google.com/` | **200** |
+
+（早先误判成"不可用"，是因为测试目标选了明文 `http://gstatic.com`，
+mihomo 的规则不一定代理它；换 HTTPS 目标就通了。）
+
+**所以那台机器的正确配置是：**
+
+```
+ZW_DOWNLOAD_PROXY=http://127.0.0.1:21080
+```
+
+配上并重启客户端后，"从商店链接装扩展"就能真的下载 CRX 了。
 
 ### 测试
 
