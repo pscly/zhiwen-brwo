@@ -92,7 +92,7 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 **提交前必须做**（一条命令跑完全部七项，会自己配好前提条件）：
 
 ```bash
-bash scripts/check-all.sh                 # 工作区代码：七项全绿才算可交付（末尾给总表）
+bash scripts/check-all.sh                 # 工作区代码：**八项**全绿才算可交付（末尾给总表）
 bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它的 --selftest → 用它起 core 跑完整 e2e
 ```
 
@@ -106,7 +106,7 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 .venv/bin/python -m pytest tests -q            # 592 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
-node scripts/gateway-check.cjs                 # 网关接管
+node scripts/gateway-check.cjs                 # 21 通过 / 0 失败（网关接管）
 node scripts/ui-check.cjs                      # 23 通过 / 0 失败（客户端控制台）
 node scripts/console-ui-check.cjs              # 81 通过 / 0 失败（hub 主控台，mock 后端）
 DISPLAY=:78 .venv/bin/python scripts/gui-check.py  # 32 通过 / 0 失败（客户端 tkinter GUI，含真改代理）
@@ -134,7 +134,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - 592 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、23 条客户端控制台断言、32 条客户端 GUI 断言、20 项网关接管 —— 全绿
-- hub **0.7.58** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- hub **0.7.59** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）

@@ -538,10 +538,17 @@ def check_upgrade_keeps_ascii_dir(iss: IssScript, rep: Report) -> None:
         problems.append(f"UsePreviousGroup={prev_group or '(未设置=默认 yes)'}，开始菜单组会沿用旧名字")
 
     # 旧目录清理：允许出现的非 ASCII 名字（升级清理用，不是新建）
+    # `{autopf}` 的含义随**本次**安装模式变化：
+    #   管理员安装 → C:\Program Files；按用户安装 → %LOCALAPPDATA%\Programs
+    # 旧版如果用另一种模式装过，`{autopf}\知纹客户端` 指的不是同一个目录，
+    # 旧中文目录会原地残留（卸载也删不掉）。所以三种实际路径都要在白名单里。
     legacy_allowed = {
         r"{autopf}\知纹客户端",
+        r"{commonpf}\知纹客户端",
+        r"{localappdata}\Programs\知纹客户端",
         r"{group}\知纹客户端",
         r"{autodesktop}\知纹客户端.lnk",
+        r"{commondesktop}\知纹客户端.lnk",
     }
     found = {e.get("name", "") for e in iss.entries.get("InstallDelete", [])}
     missing = legacy_allowed - found

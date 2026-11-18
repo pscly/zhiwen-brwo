@@ -1,5 +1,65 @@
 # CHANGELOG
 
+## 0.7.59 — 2026-11-18
+
+**同一份白名单写了两遍，改了一处、CI 就红；顺带把两类偶发失败钉死。**
+
+### ① 安装脚本的白名单有两份（CI 抓到）
+
+0.7.58 我改了 `[InstallDelete]`（旧中文目录要覆盖两种安装模式），
+更新了 `tests/test_ascii_paths.py` 里的白名单 —— **但忘了
+`packaging/windows/check-iss.py`（C37）里还有同一份白名单**。
+
+CI 的 Windows job 跑的是后者，于是：
+
+```
+FAIL (C37) InstallDelete 里出现了未知的中文路径：
+  {commondesktop}\知纹客户端.lnk; {commonpf}\知纹客户端;
+  {localappdata}\Programs\知纹客户端
+```
+
+两处都改好，并且**把 `check-iss.py` 加进 `check-all.sh`**
+（它以前只在 CI 里跑，本地从来没跑过 —— 这就是漏的原因）。
+门槛数从 7 变 8。
+
+### ② gateway-check 偶发红：启动后立刻读 cookie
+
+`check-all.sh` 里 gateway-check 红过一次，单独跑 20/21 全过。查下去：
+
+```
+❌ 异常： Cannot read properties of undefined (reading 'cookies')
+```
+
+`POST /start` 返回了 ok，但环境还没真正进入 `running`（负载高时进程还在起），
+紧接着 `GET /cookies` 拿到 `STATE_CONFLICT` → `r.data.data` 是 undefined。
+
+修：加 `waitRunning(pid)`，最多等 30 秒到 `state === 'running'` 再读 cookie，
+并新增一条断言「环境确实进入 running」。现在 21 项。
+
+**偶发的门槛比红门槛更糟** —— 它会让人习惯性重跑，门槛就形同虚设。
+
+### ③ 顺带：check-all 失败时保留日志
+
+以前无论成败都 `rm -rf $TMP`，而 core 日志就在里面 —— 红了就没法查
+（这次就是这样，只能靠复现）。现在失败时保留并打印路径。
+
+### 一个我特意验证过的疑点（结论是没问题）
+
+怀疑过"配了 hub 之后，hub 不可达会不会让本地启动失败"。实测（`ZW_HUB_URL`
+指向 `192.0.2.1` 这种必然不可达的地址）：
+
+```
+启动 → {"ok": true, ...}
+读 cookie → {"ok": true, "data": {"count": 0, "cookies": []}}
+```
+
+**本地能力不依赖服务器，降级是对的。**
+
+### 测试
+
+592 项不变；门槛 8 项全绿
+（592 / 34 / 73 / 13 / 21 / 81 / 23 / 32）。
+
 ## 0.7.58 — 2026-11-18
 
 **升级路径上的一个真实坑：旧版中文目录可能清不掉（另一种安装模式）。**

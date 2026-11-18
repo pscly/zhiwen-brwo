@@ -43,6 +43,20 @@ const check = (name, cond, detail) => {
 };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// 等到某个环境真的处于 running（负载高时 start 返回 ok、但进程可能还在起）。
+// 偶发失败排查起来最费时间：0.7.58 那轮 gateway-check 在 check-all 里红过一次、
+// 单独跑 20/20 全过 —— 就是这条"启动后立刻读 cookie"的时序问题。
+async function waitRunning(pid, timeoutMs = 30000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const st = await j('GET', `/api/v1/profiles/${pid}`);
+    const d = (st.data && st.data.data) || {};
+    if (d.state === 'running') return d;
+    await sleep(300);
+  }
+  return null;
+}
+
 async function j(method, path_, body) {
   const r = await fetch(B + path_, { method, headers: H, body: body ? JSON.stringify(body) : undefined });
   let data = null;
@@ -83,6 +97,11 @@ async function j(method, path_, body) {
   check('通过网关导航成功', page.url().includes('example.com'), page.url());
   const title = await page.title();
   check('能读到页面标题', title.includes('Example'), title);
+
+  // 等它真的 running 再读 cookie：否则会拿到 STATE_CONFLICT，
+  // 而 `r.data.data` 是 undefined → 报 "Cannot read properties of undefined (reading 'cookies')"
+  const running = await waitRunning(pid);
+  check('环境确实进入 running', !!running, running ? '' : '等了 30 秒仍未 running');
 
   // 写一个 cookie，再通过 REST 读回来 —— 证明两条路径看的是同一个浏览器
   await ctx.addCookies([{ name: 'gw_marker', value: 'from-playwright', domain: '.example.com', path: '/', secure: true }]);
