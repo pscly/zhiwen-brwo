@@ -199,3 +199,79 @@ def test_policy_ungoogled_uses_engine_dir_ungoogled_build(tmp_path, monkeypatch)
 
     got = engsvc.find_chrome(s)
     assert "ungoogled" in str(got).lower(), got
+
+
+def test_ensure_full_pipeline_over_real_http(tmp_path, monkeypatch):
+    """走完真实链路：HTTP 下载 → sha256 校验 → 解包 → 落盘 → `--version` 自检。
+
+    上轮只做到"用本机已有的内核验证扩展能加载"，联网下载那段因为 GitHub 限速
+    没跑完。这里起一个本地 HTTP 服务器，用**真实**的压缩包和**真实**的校验值
+    把 `ensure()` 整条路径跑一遍（不是 mock 掉下载，只有镜像地址换成 127.0.0.1）。
+
+    另外顺带验幂等：第二次调用必须跳过，不能重复下载。
+    """
+    import hashlib
+    import http.server
+    import io
+    import os
+    import stat
+    import threading
+    import zipfile
+
+    from zw_core import config
+    from zw_core.services import enginesrc
+
+    # 造一个"最小可用内核"：真的能跑 `--version`
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as zf:
+        zf.writestr("fake-chromium/chrome",
+                    "#!/bin/sh\necho 'Chromium 999.0.1.2'\n")
+    blob = payload.getvalue()
+    served = tmp_path / "eng.zip"
+    served.write_bytes(blob)
+    sha = hashlib.sha256(blob).hexdigest()
+
+    class _H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(tmp_path), **kw)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("ZW_ENGINE_URL", f"http://127.0.0.1:{port}/eng.zip")
+        monkeypatch.setenv("ZW_ENGINE_SHA256", sha)
+        monkeypatch.setenv("ZW_ENGINE_VERSION_TAG", "fake-999")
+        monkeypatch.setenv("ZW_DOWNLOAD_PROXY", "")   # 别让本机代理配置影响
+        config.reset_settings()
+
+        res = enginesrc.ensure(force=False, s=config.get_settings())
+        assert res["ok"] is True, res
+        assert res["skipped"] is False, res
+        assert "999" in str(res.get("version")), res
+
+        binp = Path(res["path"])
+        assert binp.is_file(), res
+        assert "fake-999" in str(binp), res
+        # 可执行位必须被补上（否则解包出来的脚本跑不了）
+        assert os.access(binp, os.X_OK), "解包后没有可执行权限"
+        assert binp.stat().st_mode & stat.S_IXUSR
+
+        prog = enginesrc.progress()
+        assert prog["state"] == "done", prog
+        assert prog["bytes_done"] == len(blob), prog
+
+        # 幂等：已有内核时第二次必须跳过
+        again = enginesrc.ensure(force=False, s=config.get_settings())
+        assert again["skipped"] is True, again
+    finally:
+        httpd.shutdown()
+        monkeypatch.delenv("ZW_ENGINE_URL", raising=False)
+        monkeypatch.delenv("ZW_ENGINE_SHA256", raising=False)
+        monkeypatch.delenv("ZW_ENGINE_VERSION_TAG", raising=False)
+        monkeypatch.delenv("ZW_DOWNLOAD_PROXY", raising=False)
+        config.reset_settings()
