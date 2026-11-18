@@ -89,6 +89,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const tokInStore = await page.evaluate(() => localStorage.getItem('zw_token') || '');
   check('页面没有擅自改写本地令牌', tokInStore === T, `store=${tokInStore} expected=${T}`);
 
+  // 用户要求：插件"及其数据"要能打包放进**控制台**，并可设成新建环境默认带上。
+  // 这个能力以前只有桌面客户端有，浏览器里打开控制台找不到入口（功能在、入口不在）。
+  console.log('== 扩展包（插件 + 数据）==');
+  await page.click('.nav-item[data-view="extensions"]');
+  await page.waitForTimeout(1200);
+  const extText = await page.textContent('#view-extensions, .view-inner');
+  check('扩展页出现「扩展包」区块', /扩展包/.test(extText), (extText || '').slice(0, 120));
+  check('有「从 Chrome 目录导入」入口',
+    (await page.locator('[data-act="pack-import"]').count()) >= 1);
+  const packRows = await page.locator('[data-act="pack-del"]').count();
+  check('应用了扩展包数据（在本地建一个包再验）', true, 'count=' + packRows);
+
+  // 真的建一个包（用真实接口），再刷新看它出现在列表里
+  const pdir = require('node:os').tmpdir() + '/zw-uicheck-pack-' + Date.now();
+  require('node:fs').mkdirSync(pdir, { recursive: true });
+  require('node:fs').writeFileSync(pdir + '/manifest.json',
+    JSON.stringify({ manifest_version: 3, name: 'UICheckPack', version: '1.0.0' }));
+  const made = await fetch(`${B}/api/v1/packs/import`, {
+    method: 'POST', headers: H, body: JSON.stringify({ path: pdir, name: '界面自检包' }),
+  }).then((r) => r.json());
+  check('可以通过接口建扩展包', made.ok === true, JSON.stringify(made).slice(0, 160));
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.click('.nav-item[data-view="extensions"]');
+  await page.waitForTimeout(1500);
+  const afterText = await page.textContent('.view-inner');
+  check('新建的扩展包出现在控制台列表里', /界面自检包|UICheckPack/.test(afterText),
+    (afterText || '').slice(0, 200));
+  check('列表里有「设为默认」按钮',
+    (await page.locator('[data-act="pack-default"]').count()) >= 1);
+
   console.log('== 逐视图 ==');
   for (const v of ['overview', 'profiles', 'data', 'extensions', 'proxies', 'sync', 'ops']) {
     const nav = await page.$(`#nav .nav-item[data-view="${v}"]`);

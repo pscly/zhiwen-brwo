@@ -34,8 +34,13 @@ D:\RXYCDP\User Data
 
 ## 第 2 步：导入成"扩展包"
 
-打开知纹控制台 → 左侧「扩展」→ 找到 **「从浏览器用户数据导入」**（或接口
-`POST /api/v1/packs/import`），把第 1 步那个 `User Data` 目录**整个路径**粘进去。
+**在桌面客户端里**（不是浏览器控制台）：打开「扩展包」面板，点
+**「从 Chrome 目录导入」**，把第 1 步那个 `User Data` 目录**整个路径**粘进去
+（它默认已经填了 Chrome 的标准位置，改掉即可）。
+
+> 也可以用接口：`POST /api/v1/packs/import`，body 是
+> `{"from_chrome": "C:\\Users\\你\\AppData\\Local\\RXYCDP\\User Data", "name": "RXYCDP", "as_default": true}`。
+> 路径给到 `User Data` 或 `User Data\\Default` 都认。
 
 返回结果里看三个字段：
 

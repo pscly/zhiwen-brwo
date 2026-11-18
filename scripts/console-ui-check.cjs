@@ -195,6 +195,14 @@ function setupRoutes(page, opts){
     }
     if (p === '/panel/api/logout'){ m.loggedIn = false; return json(route, { ok: true, data: { logged_out: true } }); }
 
+    if (p === '/api/v1/packs'){
+      return json(route, { ok: true, data: { packs: [
+        { id: 'abcd1234efgh', name: 'RXYCDP 常用插件', extension_count: 3, with_data: 2,
+          is_default: true, size_human: '4.2MB', source: 'chrome' },
+        { id: 'wxyz9876mnop', name: '临时测试包', extension_count: 1, with_data: 0,
+          is_default: false, size_human: '912KB', source: 'dir' },
+      ] } });
+    }
     if (p === '/panel/api/meta'){
       return json(route, { ok: true, data: {
         version: '0.4.2', data_dir: '/data', auto_approve: true, token_required: false,

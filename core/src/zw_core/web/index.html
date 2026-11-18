@@ -769,6 +769,7 @@ const S = {
   groups: [],
   proxies: null,          // null = 还没成功取过（区分"空列表"与"接口待就绪"）
   extensions: null,
+  packs: null,
   syncState: null,
   syncRemote: null,
   audit: { items: [], all: [], total: 0, page: 0, profile: '', action: '' },
@@ -2290,7 +2291,103 @@ function renderExtensions() {
         <th style="min-width:200px">路径</th><th style="min-width:180px">被绑定</th><th style="width:80px">加入</th><th style="width:140px;text-align:right">操作</th>
       </tr></thead><tbody>${rows}</tbody></table>
     </div>
+    ${renderPacks()}
   </div>`;
+}
+
+// 「扩展包」= 扩展 **及其数据** 的集合，可以设成"新建环境默认带上"。
+//
+// 为什么必须在 web 控制台里也能做：用户的原话是"把插件的及其数据打包放到我的
+// 控制台里面""以后创建浏览器时默认就把这些数据都带上（当然也可以选择关闭）"。
+// 而之前这个能力**只有桌面客户端**的「扩展包」面板有，浏览器里打开控制台
+// （本机 127.0.0.1:8730 或远程）根本找不到入口 —— 功能在、入口不在，等于没有。
+function renderPacks() {
+  const bag = S.packs;
+  if (bag === null) {
+    return `<div class="mt4">${pendingCard('扩展包', 'GET /api/v1/packs 尚未返回有效数据')}</div>`;
+  }
+  const list = bag.packs || [];
+  const rows = list.length ? list.map((p) => `<tr>
+      <td><div class="cell-main">${esc(p.name || p.id)}</div>
+        <div class="cell-sub mono">${esc(p.id)}</div></td>
+      <td class="mono">${p.extension_count ?? 0}</td>
+      <td class="mono">${p.with_data ?? 0}</td>
+      <td>${p.is_default
+        ? '<span class="badge ok"><i class="dot ok"></i>默认带上</span>'
+        : '<span class="muted">不自动</span>'}</td>
+      <td class="mono faint">${esc(p.size_human || '—')}</td>
+      <td><div class="acts">
+        <button class="btn xs" data-act="pack-default" data-id="${escAttr(p.id)}" data-on="${p.is_default ? '0' : '1'}">${p.is_default ? '取消默认' : '设为默认'}</button>
+        <button class="btn xs danger" data-act="pack-del" data-id="${escAttr(p.id)}">删除</button>
+      </div></td>
+    </tr>`).join('') : `<tr><td colspan="6"><div class="empty"><b>还没有扩展包</b>
+      点右上「从 Chrome 目录导入」，填那个浏览器的 <span class="mono">User Data</span> 目录即可
+      （RXYCDP / Roxy / Chrome 都认）。</div></td></tr>`;
+
+  return `<div class="mt4">
+    <div class="toolbar">
+      <span class="faint fs12">扩展包 ${list.length} 个 · 默认带上 ${list.filter((p) => p.is_default).length} 个</span>
+      <div class="grow"></div>
+      <button class="btn sm" data-act="reload-view">刷新</button>
+      <button class="btn sm primary" data-act="pack-import">＋ 从 Chrome 目录导入</button>
+    </div>
+    <div class="table-wrap">
+      <table class="tbl"><thead><tr>
+        <th style="min-width:200px">扩展包</th>
+        <th style="width:90px">扩展数</th>
+        <th style="width:90px">带数据</th>
+        <th style="width:120px">新环境</th>
+        <th style="width:90px">大小</th>
+        <th style="width:170px;text-align:right">操作</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+    </div>
+    <div class="note">扩展包把扩展的**代码与设置数据**一起存。设成默认后，新建环境会自动带上；
+      不想要的环境可在环境详情里取消。注意：官方 Chrome 137+ 忽略 --load-extension，
+      数据会带过去但浏览器不一定加载（环境详情里的 extensions_active 会如实说明）。</div>
+  </div>`;
+}
+
+function openPackImport() {
+  openDialog({
+    title: '从浏览器用户数据导入扩展包',
+    sub: '填那个浏览器的 User Data 目录（RXYCDP / Roxy / Chrome 都认）',
+    body: `<div class="field">
+        <label>User Data 目录</label>
+        <input class="input mono" id="pk-path" placeholder="C:\\Users\\你\\AppData\\Local\\RXYCDP\\User Data" style="width:100%">
+        <div class="fs11 faint mt1">给到 <span class="mono">User Data</span> 或 <span class="mono">User Data\\Default</span> 都行。</div>
+      </div>
+      <div class="field">
+        <label>包名（可留空）</label>
+        <input class="input" id="pk-name" placeholder="例如 RXYCDP 常用插件" style="width:100%">
+      </div>
+      <label class="check"><input type="checkbox" id="pk-default" checked> 设为新建环境的默认包（以后创建浏览器自动带上）</label>`,
+    footer: `<div class="grow"></div><button class="btn sm" data-act="dlg-close">取消</button>
+      <button class="btn sm primary" id="pk-go">导入</button>`,
+    onMount(root) {
+      const btn = $('#pk-go', root);
+      btn.addEventListener('click', async () => {
+        const path_ = ($('#pk-path', root).value || '').trim();
+        if (!path_) { toast('先填 User Data 目录', 'err'); return; }
+        btn.classList.add('loading');
+        try {
+          const r = await api('POST', '/api/v1/packs/import', {
+            from_chrome: path_,
+            name: ($('#pk-name', root).value || '').trim(),
+            as_default: $('#pk-default', root).checked,
+          });
+          const d = r || {};
+          toast(`已导入 ${d.extension_count ?? 0} 个扩展（带数据 ${d.with_data ?? 0} 个）`, 'ok');
+          closeDialog();
+          await loadPacks();
+          render();
+        } catch (e) {
+          toastErr(e, '导入失败');
+        } finally {
+          btn.classList.remove('loading');
+        }
+      });
+    },
+  });
 }
 
 function openExtInstall() {
@@ -2948,6 +3045,12 @@ async function loadExtensions(force) {
   catch (e) { S.extensions = null; if (!e.todo) pollFail(e, 'extensions'); return false; }
 }
 
+async function loadPacks(force) {
+  if (S.packs !== null && !force) return true;
+  try { S.packs = await api('GET', '/api/v1/packs'); return true; }
+  catch (e) { S.packs = null; if (!e.todo) pollFail(e, 'packs'); return false; }
+}
+
 async function loadSync(force) {
   const jobs = [];
   jobs.push((async () => {
@@ -2998,13 +3101,14 @@ async function refreshView(opt) {
   const v = S.view;
   const jobs = [];
   if (v === 'overview') {
-    jobs.push(loadStats(), loadProfiles(), loadEvents(), loadSync(), loadGroups(), loadProxies(), loadExtensions());
+    jobs.push(loadStats(), loadProfiles(), loadEvents(), loadSync(), loadGroups(), loadProxies(), loadExtensions(), loadPacks());
   } else if (v === 'profiles') {
     jobs.push(loadProfiles(), loadStats(), loadGroups(), loadProxies());
   } else if (v === 'data') {
     jobs.push(loadProfiles());
   } else if (v === 'extensions') {
-    jobs.push(loadExtensions(opt.force), loadProfiles());
+    // 扩展页现在有"扩展包"区块（插件 + 数据），进这个视图时两样一起拉。
+    jobs.push(loadExtensions(opt.force), loadPacks(opt.force), loadProfiles());
   } else if (v === 'proxies') {
     jobs.push(loadProxies(opt.force), loadProfiles());
   } else if (v === 'sync') {
@@ -3601,6 +3705,32 @@ function onAct(act, node, ev) {
     case 'toast-more': node.closest('.toast').classList.toggle('open'); break;
 
     case 'ext-install': openExtInstall(); break;
+    case 'pack-import': openPackImport(); break;
+    case 'pack-default': {
+      // `onAct` 是同步函数，这里不能 await —— 用 then 链，跟 file 里其它动作一致。
+      const on = node.dataset.on === '1';
+      api('POST', `/api/v1/packs/${encodeURIComponent(node.dataset.id)}/default`, { enabled: on })
+        .then(() => {
+          toast(on ? '已设为新建环境默认带上' : '已取消默认', 'ok');
+          return loadPacks(true);
+        })
+        .then(() => render())
+        .catch((e) => toastErr(e, '设置失败'));
+      break;
+    }
+    case 'pack-del': {
+      confirmDanger({
+        title: '删除扩展包', tone: 'bad',
+        body: '删除后不能恢复；已经绑定了它的环境会保留现有文件。',
+        confirmText: 'DELETE', okLabel: '删除',
+        async action() {
+          await api('DELETE', `/api/v1/packs/${encodeURIComponent(node.dataset.id)}`);
+          toast('已删除扩展包', 'ok');
+          await loadPacks(true); render();
+        },
+      });
+      break;
+    }
     case 'ext-bind': openExtBind(node.dataset.slug, node.dataset.ver); break;
     case 'ext-del': {
       const slug = node.dataset.slug, ver = node.dataset.ver;
