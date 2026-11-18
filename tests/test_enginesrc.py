@@ -467,3 +467,31 @@ def test_engine_dir_whose_parent_mentions_ungoogled_does_not_fool_official_kerne
         assert exc.code in ("ENGINE_NOT_FOUND", "ENGINE_PREPARING"), exc.code
     else:
         raise AssertionError(f"官方内核被目录名洗白了：{got}")
+
+
+def test_disk_space_precheck_gives_readable_error(tmp_path, monkeypatch):
+    """磁盘不够时要提前给可读错误，而不是解包到一半失败。
+
+    压缩包 140–200MB，解开通常 700MB–1GB。半路写满的表现是
+    `shutil.move` 抛 OSError 或文件被截断 —— 用户看到"装好了但跑不起来"，
+    很难归因到磁盘。
+    """
+    import shutil as _shutil
+
+    from zw_core.services import enginesrc
+
+    class _Usage:
+        free = 100 * 1048576      # 只剩 100MB
+
+    monkeypatch.setattr(_shutil, "disk_usage", lambda p: _Usage())
+    with pytest.raises(enginesrc.EngineSourceError) as ei:
+        enginesrc._check_disk_space(tmp_path, 400 * 1048576)
+    assert ei.value.code == "ENGINE_NO_SPACE", ei.value.code
+    assert "磁盘空间不足" in ei.value.message
+
+    # 拿到磁盘信息失败时不能因此拦住安装
+    def _boom(p):
+        raise OSError("no stat")
+
+    monkeypatch.setattr(_shutil, "disk_usage", _boom)
+    enginesrc._check_disk_space(tmp_path, 10 ** 12)   # 不应抛

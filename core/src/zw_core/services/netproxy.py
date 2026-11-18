@@ -41,8 +41,16 @@ import httpx
 # 1080 = socks 通用；10808 = v2rayN 默认；7897 = Clash Verge Rev 新版默认。
 DEFAULT_PORTS = (7890, 7891, 7892, 21080, 7897, 1080, 10808)
 
-# 探测用的极小端点：只要连通+TLS 通就算可用（401/404 都说明链路是通的）
-_PROBE_URL = "https://api.github.com/zen"
+# 探测用的极小端点。**给多个，任一通就算这个代理可用**。
+#
+# 为什么不能只用一个：我们下载走的是 GitHub（release 资产实际在
+# objects.githubusercontent.com）和 Google（clients2）。某些代理/网络组合下
+# `api.github.com` 不通但 `www.google.com` 通（或反过来）。只探一个，
+# 会在"其实能用"的情况下判定代理不可用，然后退回直连慢速下载。
+_PROBE_URLS = (
+    "https://api.github.com/zen",
+    "https://www.google.com/generate_204",
+)
 _PROBE_TIMEOUT = 3.0
 
 _cache: dict[str, Any] = {"key": None, "proxy": "", "source": "none"}
@@ -58,15 +66,21 @@ def _port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.35) -> boo
 
 
 def _proxy_works(proxy: str, timeout: float = _PROBE_TIMEOUT) -> bool:
-    """通过这个代理请求一个极小端点，确认链路真的能用。"""
-    try:
-        with httpx.Client(proxy=proxy, timeout=timeout,
-                          headers={"User-Agent": "zhiwen-core"}) as c:
-            r = c.get(_PROBE_URL)
-        # 能拿到 HTTP 响应就说明代理在正常工作（内容不重要）
-        return 200 <= r.status_code < 500
-    except Exception:  # noqa: BLE001
-        return False
+    """通过这个代理请求极小端点，**任一目标能拿到响应**就算可用。
+
+    只探一个域名会把"能用但那个域名被挡"的代理误判成不可用，
+    然后悄悄退回直连 —— 表现就是"下载很慢"，而不是"代理没生效"，很难查。
+    """
+    for url in _PROBE_URLS:
+        try:
+            with httpx.Client(proxy=proxy, timeout=timeout,
+                              headers={"User-Agent": "zhiwen-core"}) as c:
+                r = c.get(url)
+            if 200 <= r.status_code < 500:
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
 
 
 def candidates(explicit_ports: str = "") -> list[int]:

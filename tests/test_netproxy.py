@@ -91,3 +91,37 @@ def test_ports_parsing_ignores_junk():
 
     assert netproxy.candidates("7890, 21080 ,abc,,1080") == [7890, 21080, 1080]
     assert netproxy.candidates("") == list(netproxy.DEFAULT_PORTS)
+
+
+def test_probe_accepts_proxy_when_any_target_works(monkeypatch):
+    """多个探测目标，**任一通**就算代理可用。
+
+    只探一个域名会把"能用但那个域名被挡"的代理误判成不可用，
+    然后悄悄退回直连 —— 表现是"下载很慢"，不是"代理没生效"，非常难查。
+    """
+    from zw_core.services import netproxy
+
+    seen: list[str] = []
+
+    class _Client:
+        def __init__(self, proxy=None, timeout=None, headers=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            seen.append(url)
+
+            class _R:
+                status_code = 200 if "generate_204" in url else 500
+            if "generate_204" not in url:
+                raise RuntimeError("第一个目标不通")
+            return _R()
+
+    monkeypatch.setattr(netproxy.httpx, "Client", _Client)
+    assert netproxy._proxy_works("http://127.0.0.1:1") is True
+    assert len(seen) >= 2, f"应当试到第二个目标，实际只试了 {seen}"

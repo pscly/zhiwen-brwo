@@ -136,7 +136,10 @@ class Progress:
 
 
 _progress = Progress()
-_lock = threading.Lock()
+# **必须是 RLock**：`start_background()` 持锁时会调 `_reset()` / `_progress.as_dict()`，
+# 而这两个内部也拿同一把锁。用普通 Lock 会自己等自己 —— 死锁（界面表现为
+# 点「下载内核」毫无反应，且不报错，最难查的那种）。
+_lock = threading.RLock()
 _thread: threading.Thread | None = None
 
 
@@ -272,6 +275,32 @@ def _sha256_file(p: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 256), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _check_disk_space(dest_dir: Path, need_bytes: int) -> None:
+    """装内核前确认磁盘够用，不够就给出人话错误。
+
+    为什么要预检：压缩包 140–200MB，解开之后通常 **700MB–1GB**（Chromium 带
+    locales、resources、swiftshader…）。半路磁盘写满的表现是 `shutil.move` 抛
+    OSError 或者文件被截断，用户看到的是"装好了但跑不起来"，很难归因到磁盘。
+
+    `need_bytes` 是"压缩包 + 解包后"的估算总量；留 10% 余量。
+    """
+    import shutil as _shutil
+
+    try:
+        free = _shutil.disk_usage(str(dest_dir)).free
+    except OSError:
+        return                      # 拿不到就当没检查（不能因此拦住安装）
+    need = int(need_bytes * 1.1)
+    if free < need:
+        raise EngineSourceError(
+            "ENGINE_NO_SPACE",
+            f"磁盘空间不足：需要约 {need / 1048576:.0f}MB（压缩包 + 解包），"
+            f"当前只剩 {free / 1048576:.0f}MB。",
+            hint=f"清理 {dest_dir.parent} 所在磁盘后重试",
+            status=507,
+        )
 
 
 def download(url: str, dest: Path, *, sha256: str, size: int = 0,
@@ -469,6 +498,8 @@ def ensure(force: bool = False, s: Settings | None = None) -> dict[str, Any]:
         archive = engine_dir.parent / f"engine-download-{int(time.time())}"
         archive = archive.with_suffix(".zip" if meta["kind"] == "zip" else ".tar.xz")
         _say("开始下载 …")
+        # 压缩包 + 解包后（Chromium 解包一般是压缩包的 4–5 倍）
+        _check_disk_space(engine_dir, int(meta.get("size") or 0) * 5 + (200 << 20))
         download(meta["url"], archive, sha256=meta["sha256"],
                  size=int(meta.get("size") or 0), s=s)
         _say("下载完成，校验通过")
@@ -516,16 +547,23 @@ def _existing(engine_dir: Path) -> Path | None:
 
 
 def start_background(force: bool = False) -> dict[str, Any]:
-    """后台线程跑 `ensure()`，立刻返回；进度看 `progress()`。"""
+    """后台线程跑 `ensure()`，立刻返回；进度看 `progress()`。
+
+    并发保护：`is_running()` 判断和 `_thread = ...` 赋值必须在**同一把锁**里，
+    否则两个同时到达的请求（比如控制台上连点两下「下载内核」）都会看到
+    "没在跑"，然后各自下载 150–200MB 去抢同一个 engine_dir —— 结果是互相覆盖，
+    甚至一个把另一个刚解开的目录删掉。第一版就是没锁，这里是补上的。
+    """
     global _thread
-    if is_running():
-        return {"started": False, "reason": "已经在下载/安装中", **progress()}
-    _reset()
-    def _run() -> None:
-        try:
-            ensure(force=force)
-        except Exception:  # noqa: BLE001 —— 失败原因已经写进 progress
-            pass
-    _thread = threading.Thread(target=_run, name="zw-engine-fetch", daemon=True)
-    _thread.start()
-    return {"started": True, **progress()}
+    with _lock:
+        if _thread is not None and _thread.is_alive():
+            return {"started": False, "reason": "已经在下载/安装中", **_progress.as_dict()}
+        _reset()
+        def _run() -> None:
+            try:
+                ensure(force=force)
+            except Exception:  # noqa: BLE001 —— 失败原因已经写进 progress
+                pass
+        _thread = threading.Thread(target=_run, name="zw-engine-fetch", daemon=True)
+        _thread.start()
+        return {"started": True, **_progress.as_dict()}
