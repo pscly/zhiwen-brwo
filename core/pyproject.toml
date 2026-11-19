@@ -1,6 +1,6 @@
 [project]
 name = "zw-core"
-version = "0.8.12"
+version = "0.8.13"
 description = "知纹核心（zhiwen core）—— 指纹浏览器机群的编排层、CDP 网关与同步客户端"
 requires-python = ">=3.11"
 dependencies = [
