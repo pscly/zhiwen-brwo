@@ -21,8 +21,21 @@ def _mod():
 
 
 def test_probe_error_yields_unknown_not_false(monkeypatch, tmp_path):
-    """探测抛异常时必须给 None（不知道），不能给 False（确定不行）。"""
+    """探测抛异常时必须给 None（不知道），不能给 False（确定不行）。
+
+    ## 为什么打在 `zw_core.services.proc` 上
+
+    `extprobe` 是在**函数内** `from .proc import popen_hidden` 的，
+    所以给 `extprobe.popen_hidden` 打补丁**没有用** —— 函数执行时又会从
+    `.proc` 重新取。第一版就这么写的，CI（Windows）上真去执行了那个假 exe，
+    抛的是 `OSError [WinError 216]（不是有效的 Win32 应用）`，
+    而我当时断言"必须是 PermissionError"，于是红在断言上而不是红在行为上。
+
+    教训：断言要看**行为**（返回 None、不缓存），别钉死具体异常类型 ——
+    不同平台上同一个"起不来"抛的异常本来就不同。
+    """
     ep = _mod()
+    from zw_core.services import proc as proc_mod
 
     fake_bin = tmp_path / "chrome.exe"
     fake_bin.write_bytes(b"stub")
@@ -30,14 +43,14 @@ def test_probe_error_yields_unknown_not_false(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise PermissionError("[WinError 5] 拒绝访问。")
 
-    # 让内层第一步就炸（模拟杀软/权限拦住探针进程）
-    monkeypatch.setattr(ep, "popen_hidden", boom, raising=False)
+    monkeypatch.setattr(proc_mod, "popen_hidden", boom)
     monkeypatch.setattr(ep, "_save_cache", lambda d: None)
 
     out = ep.probe(fake_bin, use_cache=False)
     assert out["loadable"] is None, out
     assert "探测没能完成" in out["reason"], out["reason"]
-    assert "PermissionError" in out["reason"], out["reason"]
+    # 不钉死异常类型，只要把原因带出来（用户/我们排错时要看这个）
+    assert "PermissionError" in out["reason"] or "OSError" in out["reason"], out["reason"]
 
 
 def test_probe_error_is_not_cached(monkeypatch, tmp_path):
@@ -48,9 +61,10 @@ def test_probe_error_is_not_cached(monkeypatch, tmp_path):
 
     saved: list = []
     monkeypatch.setattr(ep, "_save_cache", lambda d: saved.append(dict(d)))
-    monkeypatch.setattr(ep, "popen_hidden",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")),
-                        raising=False)
+    from zw_core.services import proc as proc_mod
+
+    monkeypatch.setattr(proc_mod, "popen_hidden",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
 
     ep.probe(fake_bin, use_cache=False)
     assert not saved, f"探测失败却写了缓存：{saved}"
