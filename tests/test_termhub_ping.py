@@ -59,3 +59,40 @@ def test_ping_interval_is_below_hub_idle_timeout():
     assert value * 2 < idle, (
         f"ping 间隔 {value}s 相对空闲窗口 {idle}s 太稀疏：中间断一次就会被判掉线"
     )
+
+
+def test_hub_also_sends_keepalive_ping():
+    """hub 侧也要主动 ping —— 这是**不需要设备升级**就能修好的那一半。
+
+    设备侧 ping（`core/services/termhub._ping_loop`）只有新客户端才有；
+    手里还是 0.7.95 及更早的机器不会发，于是安静 90 秒照样被判掉线。
+    而设备本来就会 `ping → pong`（`_handle` 里实现过），所以 hub 主动发
+    ping 能立刻覆盖老客户端。
+
+    这个修复不用等用户升级安装包，改完 hub 就能验证。
+    """
+    import re
+
+    relay = (ROOT / "hub/src/zw_hub/termrelay.py").read_text(encoding="utf-8")
+    assert "async def keepalive" in relay, "DeviceLink 上没有 keepalive"
+    assert '"t": "ping"' in relay, "keepalive 没真的发 ping"
+
+    m = re.search(r"_SERVER_PING_EVERY\s*=\s*([0-9.]+)", relay)
+    assert m, "找不到服务端 ping 间隔常量"
+    every = float(m.group(1))
+
+    hub_src = (ROOT / "hub/src/zw_hub/main.py").read_text(encoding="utf-8")
+    assert "create_task(link.keepalive())" in hub_src, "keepalive 定义了却没被调度"
+    assert "keepalive.cancel()" in hub_src, "断开时没取消，任务会泄漏"
+
+    idle = float(re.search(r"DEVICE_IDLE_TIMEOUT\s*=\s*([0-9.]+)", relay).group(1))
+    assert every * 2 < idle, f"服务端 ping {every}s 相对 {idle}s 窗口太稀疏"
+
+
+def test_hub_main_imports_asyncio():
+    """`hub/main.py` 原来没导入 asyncio，`create_task` 会 NameError。"""
+    import ast
+
+    tree = ast.parse((ROOT / "hub/src/zw_hub/main.py").read_text(encoding="utf-8"))
+    imported = {a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+    assert "asyncio" in imported, "hub/main.py 没导入 asyncio"

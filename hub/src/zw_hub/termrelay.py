@@ -48,6 +48,10 @@ _ADMIN_QUEUE_MAX = 512
 # 设备超过这么久没有任何消息（含 pong）就认为掉线
 DEVICE_IDLE_TIMEOUT = 90.0
 
+# hub → 设备的应用层 ping 间隔。必须明显小于 DEVICE_IDLE_TIMEOUT，
+# 否则一次丢包就会被判掉线。
+_SERVER_PING_EVERY = 30.0
+
 
 class DeviceLink:
     """一台设备的一条 WS 连接。"""
@@ -64,6 +68,31 @@ class DeviceLink:
     async def send(self, payload: dict[str, Any]) -> None:
         async with self._send_lock:
             await self.ws.send_text(json.dumps(payload, ensure_ascii=False))
+
+    async def keepalive(self) -> None:
+        """hub 主动给设备发 ping，保持 `last_seen` 新鲜。
+
+        ## 为什么 hub 也要发（2026-11-19）
+
+        `online()` 的判据是"90 秒内收到过这条设备的任何消息"。设备侧已经改成
+        每 20 秒主动 ping（见 core/services/termhub.py），但**那是新客户端才有的**。
+        手里还是老版本（0.7.95 及更早）的机器不会发，于是安静 90 秒就被判掉线 ——
+        控制台 `realtime=False`、`/v1/console/term/{id}` 直接拒绝，常驻终端用不了。
+
+        hub 主动发 ping 能立刻覆盖这些老客户端：设备侧**本来就**实现了
+        `{"t":"ping"}` → 回 `{"t":"pong"}`（`termhub._handle`），收到 pong 时
+        `last_seen` 自然刷新。所以这个修复**不需要用户升级**。
+
+        30 秒一次，远小于 90 秒窗口；失败就退出循环，交给外层的断开处理。
+        """
+        try:
+            while True:
+                await asyncio.sleep(_SERVER_PING_EVERY)
+                await self.send({"t": "ping"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 —— 发不出去说明连接断了，外层会处理
+            return
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=_ADMIN_QUEUE_MAX)

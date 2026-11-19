@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import contextlib
 import hmac
 import ipaddress
@@ -1334,6 +1335,9 @@ async def device_ws(websocket: WebSocket) -> None:
 
     link = await term_relay().attach(dev, websocket)
     logger.info("设备 %s 已建立实时终端通道", dev)
+    # hub 主动 ping：让老客户端（不会自己发 ping 的 0.7.95 及更早）
+    # 也能保持 last_seen 新鲜，否则它们安静 90 秒就被判掉线。
+    keepalive = asyncio.create_task(link.keepalive())
     try:
         while True:
             raw = await websocket.receive_text()
@@ -1356,6 +1360,9 @@ async def device_ws(websocket: WebSocket) -> None:
     except Exception as exc:  # noqa: BLE001  设备侧异常不该影响 hub 其它功能
         logger.debug("设备 %s 的终端通道异常：%s", dev, exc)
     finally:
+        keepalive.cancel()
+        with contextlib.suppress(Exception):
+            await keepalive
         await term_relay().detach(link)
         logger.info("设备 %s 的实时终端通道已断开", dev)
 
