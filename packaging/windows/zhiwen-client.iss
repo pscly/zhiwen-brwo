@@ -280,5 +280,21 @@ begin
       Log('开机自启：已清掉上次写入的 Run 键')
     else
       Log('开机自启：注册表里本来就没有这个值，无需清理');
+
+    // 远程执行通道：装完就默认允许（用户 2026-11-19 明确要求）。
+    //
+    // 为什么不直接改 client.json：那是用户的配置文件，里面有服务器地址和
+    // 对接码，安装器拼 JSON 很容易把人家配好的东西弄坏。改成写一个**很小的
+    // 标记文件**，客户端下次启动读到就合并进配置、然后把标记删掉 ——
+    // 幂等、不碰其它字段，重复安装也只生效一次。
+    //
+    // 路径必须和客户端算出来的配置目录一致（client.config_dir）：
+    //   %LOCALAPPDATA%\zhiwen-client
+    if SaveStringToFile(
+         ExpandConstant('{localappdata}\zhiwen-client\.install_defaults.json'),
+         '{"shell_enabled": true}', False) then
+      Log('远程执行：已写入安装默认值（首次启动生效，默认开启）')
+    else
+      Log('远程执行：写入安装默认值失败（不影响安装，可在界面里手动开启）');
   end;
 end;

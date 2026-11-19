@@ -113,6 +113,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await page.reload({ waitUntil: 'networkidle' });
   await page.click('.nav-item[data-view="extensions"]');
   await page.waitForTimeout(1500);
+  // 「远程执行」按钮开关：用户要求"弄成按钮开关，默认打开"
+  console.log('== 远程执行开关 ==');
+  {
+    const st = await fetch(`${B}/api/v1/shell/status`, { headers: H }).then((r) => r.json());
+    check('shell/status 可读', !!(st && st.data), JSON.stringify(st).slice(0, 120));
+    // **不能断言"一定是开的"**：check-all 为了跑安全相关用例会显式设
+    // `ZW_SHELL_ENABLED=false`，那时关掉才是正确行为。默认值由
+    // `tests/test_remote_exec_default.py` 单独验（配置层默认 True）。
+    // 这里只验"界面与接口状态一致"以及"按钮能真的切换"。
+    const before = (st.data || {}).enabled;
+    check('shell/status 的 enabled 是布尔', typeof before === 'boolean', String(before));
+    await page.click('.nav-item[data-view="ops"]');
+    await page.waitForTimeout(1200);
+    const ops = await page.textContent('#view');
+    check('运维页有「远程执行」卡片', /远程执行/.test(ops), (ops || '').slice(0, 80));
+    check('按钮文案与接口状态一致（已开启/已关闭）',
+      new RegExp(before ? '远程执行：已开启' : '远程执行：已关闭').test(ops),
+      (ops || '').slice(0, 160));
+    // 点一下 → 关
+    await page.click('[data-act="shell-toggle"]');
+    await page.waitForTimeout(1500);
+    const after = await fetch(`${B}/api/v1/shell/status`, { headers: H }).then((r) => r.json());
+    check('点一下状态翻转了', (after.data || {}).enabled === !before, String((after.data || {}).enabled));
+    // 再点回来，别把后面的用例影响掉
+    await page.click('[data-act="shell-toggle"]');
+    await page.waitForTimeout(1200);
+    const back = await fetch(`${B}/api/v1/shell/status`, { headers: H }).then((r) => r.json());
+    check('再点一下恢复原状态', (back.data || {}).enabled === before, String((back.data || {}).enabled));
+    await page.click('.nav-item[data-view="extensions"]');
+    await page.waitForTimeout(800);
+  }
+
   // 「内核」卡片：默认内核已换成 ungoogled-chromium，装没装、能不能加载扩展
   // 必须在界面上看得见，否则启动失败时用户不知道该干什么。
   console.log('== 内核卡片 ==');

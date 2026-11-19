@@ -277,6 +277,14 @@ def main() -> int:
         check("导入弹窗里的按钮齐全（扫描本机 / 开始导入 / 取消）",
               all(k in dlg_btns for k in ("扫描本机", "开始导入", "取消")), str(dlg_btns))
 
+        print("\n— 远程执行按钮开关 —")
+        # 用户要求"弄成按钮开关，默认打开"。这里验：GUI 里是个按钮（不是勾选框），
+        # 文案直接反映状态，关掉时用危险色。
+        gui_src = (ROOT / "core" / "src" / "zw_core" / "gui.py").read_text(encoding="utf-8")
+        check("GUI 用按钮而不是勾选框", 'text="远程执行：已开启"' in gui_src)
+        check("按钮文案反映状态（已开启/已关闭）", "已关闭" in gui_src and "已开启" in gui_src)
+        check("关掉时用危险色", "Danger.TButton" in gui_src)
+
         print("\n— 新建环境浮层 —")
         # `_Overlay` 不是 Frame（它内部自己管理浮层容器），所以**不能 pack** ——
         # 构造出来就已经在 master 上建好结构了。

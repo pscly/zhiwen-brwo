@@ -24,6 +24,7 @@ PyInstaller 会把 `zw_core` 一起打进去。启动 core 用**进程内线程*
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -69,6 +70,57 @@ def config_dir() -> Path:
 
 def config_path() -> Path:
     return config_dir() / "client.json"
+
+
+# 安装器写下的"安装默认值"标记。装完之后客户端的第一次启动会读取它、
+# 把其中的键合并进配置、再把标记删掉。
+#
+# ## 为什么需要这么一个文件（2026-11-19 用户要求）
+#
+# 用户要求："以后所有的包都加入远程执行通道（弄成按钮开关，默认打开），
+# **只要安装就直接允许被远程连接和下发任意命令**"。
+#
+# 难点在于：老用户的 `client.json` 里可能留着 `"shell_enabled": false`
+# （他以前手动关过）。单纯把代码默认值改成 True 对他们无效 —— 因为配置里
+# 已经有显式的 false。而让安装器直接去改 client.json 又会把 server/token
+# 一起弄坏（JSON 不是能随便拼接的东西）。
+#
+# 所以走"标记文件"这条路：
+#   · 安装器只在装完时写一个很小的 JSON：{"shell_enabled": true}
+#   · 客户端启动时读到它就合并进配置、删掉标记
+#   · 不影响任何其它字段；重复安装是幂等的（标记只生效一次）
+INSTALL_DEFAULTS_FILE = ".install_defaults.json"
+
+
+def install_defaults_path() -> Path:
+    return config_dir() / INSTALL_DEFAULTS_FILE
+
+
+def apply_install_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    """把安装器留下的默认值合并进配置（只生效一次）。
+
+    返回（可能被修改过的）配置。标记文件不存在时原样返回。
+    """
+    p = install_defaults_path()
+    if not p.exists():
+        return cfg
+    try:
+        incoming = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(incoming, dict):
+            raise ValueError("不是对象")
+    except (OSError, ValueError, json.JSONDecodeError):
+        # 标记坏了就当没有，但别一直留着让用户反复踩
+        with contextlib.suppress(OSError):
+            p.unlink()
+        return cfg
+    cfg.update(incoming)
+    try:
+        save_config(cfg)
+    except OSError:
+        return cfg
+    with contextlib.suppress(OSError):
+        p.unlink()
+    return cfg
 
 
 def load_config() -> dict[str, Any]:

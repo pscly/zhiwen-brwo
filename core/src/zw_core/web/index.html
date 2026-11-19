@@ -771,6 +771,7 @@ const S = {
   extensions: null,
   packs: null,
   engine: null,
+  shell: null,
   syncState: null,
   syncRemote: null,
   audit: { items: [], all: [], total: 0, page: 0, profile: '', action: '' },
@@ -2916,6 +2917,40 @@ function cleanupHtml() {
     <div class="kv">${CLEANUP_FIELDS.map(([k, label]) => `<span class="kv-k mono">${k}</span><span class="kv-v mono">${esc(r[k] ?? 0)} <span class="faint">${esc(label)}</span></span>`).join('')}</div>`;
 }
 
+// 「远程执行」卡片：按钮开关，默认开。
+//
+// 用户要求：「以后所有的包都加入远程执行通道（弄成按钮开关，默认打开），
+// 只要安装就直接允许被远程连接和下发任意命令」。
+//
+// 这是一个**能力开关**而不是普通设置项：关掉之后服务器再也拉不到命令，
+// 所以按钮文字必须直接显示状态，且关掉时用危险色，别让人以为只是关了通知。
+function renderShellCard() {
+  const sh = S.shell || {};
+  const on = sh.enabled !== false;      // 未知（还没读）按"开着"显示，避免误报
+  return `<div class="glass card mb4">
+    <div class="card-h"><h3 class="card-title">远程执行</h3><div class="grow"></div>
+      <button class="btn xs ${on ? '' : 'danger'}" data-act="shell-toggle">
+        远程执行：${on ? '已开启' : '已关闭'}
+      </button></div>
+    <div class="kv">
+      <span class="kv-k">状态</span><span class="kv-v">${
+        on ? '<span class="badge ok">允许远程连接并执行命令</span>'
+           : '<span class="badge bad">已关闭：服务器拉不到命令</span>'}</span>
+      <span class="kv-k">工作目录</span><span class="kv-v mono">${esc(sh.cwd || '—')}</span>
+      <span class="kv-k">默认超时</span><span class="kv-v mono">${esc(sh.timeout ?? '—')} 秒</span>
+      <span class="kv-k">平台 shell</span><span class="kv-v mono ellip" title="${escAttr(sh.platform_shell || '')}">${esc(sh.platform_shell || '—')}</span>
+    </div>
+    <div class="faint fs12 mt2">默认**开启**：装好就能被服务器远程连上、下发任意命令。
+      关掉后本机浏览器与控制台不受影响，只是服务器侧无法再执行命令。</div>
+  </div>`;
+}
+
+async function loadShell(force) {
+  if (S.shell !== null && !force) return true;
+  try { S.shell = await api('GET', '/api/v1/shell/status'); return true; }
+  catch (e) { S.shell = null; if (!e.todo) pollFail(e, 'shell'); return false; }
+}
+
 // 「内核」卡片：policy / 路径 / 版本 / 能不能加载扩展 / 下载进度 + 一键下载。
 //
 // 为什么必须有：默认内核已经换成 ungoogled-chromium，而这台机器上如果还没有，
@@ -2986,6 +3021,7 @@ function renderOps() {
   const pages = Math.max(1, Math.ceil((a.total || 0) / 30));
 
   return `<div class="view-inner view-enter">
+    ${renderShellCard()}
     ${renderEngineCard()}
     <div class="grid-2 mb4">
       <div class="glass card">
@@ -3216,13 +3252,13 @@ async function refreshView(opt) {
   const v = S.view;
   const jobs = [];
   if (v === 'overview') {
-    jobs.push(loadStats(), loadProfiles(), loadEvents(), loadSync(), loadGroups(), loadProxies(), loadExtensions(), loadPacks(), loadEngine());
+    jobs.push(loadStats(), loadProfiles(), loadEvents(), loadSync(), loadGroups(), loadProxies(), loadExtensions(), loadPacks(), loadEngine(), loadShell());
   } else if (v === 'profiles') {
     jobs.push(loadProfiles(), loadStats(), loadGroups(), loadProxies());
   } else if (v === 'data') {
     jobs.push(loadProfiles());
   } else if (v === 'ops') {
-    jobs.push(loadEngine(opt.force));
+    jobs.push(loadEngine(opt.force), loadShell(opt.force));
   } else if (v === 'extensions') {
     // 扩展页现在有"扩展包"区块（插件 + 数据），进这个视图时两样一起拉。
     jobs.push(loadExtensions(opt.force), loadPacks(opt.force), loadProfiles());
@@ -3822,6 +3858,14 @@ function onAct(act, node, ev) {
     case 'toast-more': node.closest('.toast').classList.toggle('open'); break;
 
     case 'ext-install': openExtInstall(); break;
+    case 'shell-toggle': {
+      const on = (S.shell || {}).enabled !== false;
+      api('POST', '/api/v1/shell/enable', { enabled: !on })
+        .then(() => { toast(!on ? '远程执行已开启' : '远程执行已关闭（服务器拉不到命令）', 'ok'); return loadShell(true); })
+        .then(() => render())
+        .catch((e) => toastErr(e, '切换失败'));
+      break;
+    }
     case 'engine-install':
       api('POST', '/api/v1/engine/install')
         .then((r) => {

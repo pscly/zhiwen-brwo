@@ -57,6 +57,7 @@ from zw_core.client import (
     Heartbeat,
     LocalCore,
     _resolve_core_port,
+    apply_install_defaults,
     autostart_enabled,
     enroll,
     ensure_device_id,
@@ -208,7 +209,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     # 连命令行兜底模式都进不去（导入期就炸了）。
     from zw_core.gui_profiles import CoreApi, LogPanel, ProfilePanel, Theme
 
-    cfg = load_config()
+    # 安装器留下的默认值（目前是"允许远程执行"）在这里合并一次。
+    # 必须在 GUI 装配之前做：下面的 shell 开关初值直接读 cfg。
+    cfg = apply_install_defaults(load_config())
     core = LocalCore(port=_resolve_core_port(cfg))
 
     root = tk.Tk()
@@ -535,12 +538,28 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         cfg["shell_enabled"] = want
         save_config(cfg)
 
-    # 远程命令行开关：用户要求"默认开启，也能手动关闭"。
-    # 默认 True；关掉后服务器侧拿不到命令，本机浏览器/控制台不受影响。
+    # 远程执行通道：**按钮开关**（用户明确要求"弄成按钮开关，默认打开"）。
+    #
+    # 原来是个勾选框，容易被当成"高级选项"忽略掉。改成按钮后：
+    #   · 按钮文字直接显示当前状态（已开启 / 已关闭），一眼看得出
+    #   · 点一下就切换，立即推给本机 core（/api/v1/shell/enable）
+    #   · 默认开：装完就能被远程连、能下任意命令
     state["shell_var"] = tk.BooleanVar(value=bool(cfg.get("shell_enabled", True)))
-    shell_chk = ttk.Checkbutton(toggle_row, text="允许远程命令行", variable=state["shell_var"],
-                                command=toggle_shell)
-    shell_chk.pack(side="left", padx=(14, 0))
+
+    def render_shell_btn() -> None:
+        on = bool(state["shell_var"].get())
+        shell_btn.configure(text=f"远程执行：{'已开启' if on else '已关闭'}")
+        # 关掉是"能力被收回"，用危险色提醒；开着用普通样式，不喧宾夺主
+        shell_btn.configure(style="Danger.TButton" if not on else "TButton")
+
+    def on_shell_btn() -> None:
+        state["shell_var"].set(not bool(state["shell_var"].get()))
+        toggle_shell()
+        render_shell_btn()
+
+    shell_btn = ttk.Button(toggle_row, text="远程执行：已开启", command=on_shell_btn)
+    shell_btn.pack(side="left", padx=(14, 0))
+    render_shell_btn()
 
     # pack 是**按顺序**分配空间的：body 带 expand=True，先 pack 就会把剩余空间
     # 全吃光，底部栏被排到窗口下沿之外 —— 640×720 下整行按钮（含「退出」）
@@ -1193,7 +1212,7 @@ def run_cli() -> int:
     """没有图形界面时的兜底：交互式问答。"""
     from zw_core import __version__
 
-    cfg = load_config()
+    cfg = apply_install_defaults(load_config())
     print(f"{APP_NAME} 客户端 v{__version__}")
     print(f"机器码：{ensure_device_id()}")
     raw = input("服务器地址（例如 192.168.3.5:8700）：").strip() or cfg.get("server", "")
