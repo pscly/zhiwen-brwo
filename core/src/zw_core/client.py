@@ -80,6 +80,22 @@ def config_dir() -> Path:
     else:
         d = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "zhiwen-client"
     d.mkdir(parents=True, exist_ok=True)
+    # **必须归一化 8.3 短名**（2026-11-19 云电脑真机）。
+    #
+    # `%LOCALAPPDATA%` 在不同进程环境里可能长得不一样：
+    #   · 正常双击启动 → C:\Users\Administrator\AppData\Local
+    #   · 经某些服务/短名环境启动 → C:\Users\ADMINI~1\AppData\Local
+    # 这两个在 Windows 上是**同一个目录的两个名字**，但对我们拼出来的
+    # `client.json` 路径是两个**不同字符串** —— 于是同一台机器会读出两套配置，
+    # 机器码、服务器地址、对接码全对不上（用户看到的就是"覆盖安装后机器码变了"）。
+    #
+    # `Path.resolve()` 在 Windows 上会走 GetFinalPathNameByHandle 把短名展开；
+    # 拿不到（权限/网络盘）就退回原路径，绝不因此让客户端起不来。
+    if not override:
+        try:
+            d = d.resolve()
+        except OSError:
+            pass
     return d
 
 
@@ -139,12 +155,29 @@ def apply_install_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_config() -> dict[str, Any]:
+    """读客户端配置。文件不存在 → `{}`；文件**存在但读不出来** → 也返回 `{}`，
+    但会把坏文件改名留档。
+
+    ## 为什么坏文件要留档（2026-11-19）
+
+    `ensure_device_id()` 的规则是"配置里没有 device_id 就生成一个新的"。
+    如果 `client.json` 因为编码/写入中断变成坏 JSON，而这里静默返回 `{}`，
+    后果就是：**同一台机器换了机器码**，服务器上多出一台"新设备"，
+    需要重新授权，用户看到的就是"覆盖安装后机器码变了"。
+
+    留一份 `.broken-<时间戳>` 备份，至少能人工救回来，也让这件事**看得见**。
+    """
     p = config_path()
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
+        with contextlib.suppress(OSError):
+            p.replace(p.with_name(f"{p.name}.broken-{int(time.time())}"))
+        logging.getLogger("zw.client").warning(
+            "配置文件读不出来，已备份为 %s.broken-*（机器码可能会变，需要在服务器重新授权）", p.name)
         return {}
 
 
