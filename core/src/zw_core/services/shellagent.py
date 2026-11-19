@@ -321,6 +321,16 @@ class HeartbeatThread:
         # `core_alive` 一定给：没有客户端外壳时，core 自己就是"本体"，
         # 只要这个线程还在跑，core 必然是活的（同一进程）。
         out: dict[str, Any] = {"shell_enabled": self.enabled, "core_alive": True}
+        # 报自启动状态：主控台看到"设备突然消失"时，能区分两种完全不同的原因 ——
+        #   autostart=False → 机器可能重启过，客户端没自己起来，需要人去点一下图标
+        #   autostart=True  → 那就是机器真的关了/断网，只能等它回来
+        # 处置方式完全不同，不给这个信息时用户只能猜。
+        try:
+            from zw_core.client import autostart_enabled
+
+            out["autostart"] = bool(autostart_enabled())
+        except Exception:  # noqa: BLE001 —— 拿不到就不报，不能影响心跳
+            pass
         try:
             from zw_core.services import manager as mgr
 

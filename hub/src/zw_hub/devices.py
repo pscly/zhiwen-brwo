@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS devices (
   disk_human   TEXT NOT NULL DEFAULT '',
   engine       TEXT NOT NULL DEFAULT '',
   shell_enabled INTEGER NOT NULL DEFAULT 0,
+  autostart    INTEGER,
   core_base    TEXT NOT NULL DEFAULT '',
   inventory    TEXT NOT NULL DEFAULT ''
 );
@@ -234,6 +235,10 @@ class DeviceStore:
             # 不能默认成 1，否则"没上报"会被显示成"正常"。
             ("core_alive", "INTEGER"),
             ("inventory", "TEXT NOT NULL DEFAULT ''"),
+            # 客户端是否设了开机自启。用来区分"设备突然不见了"的两种原因：
+            # 没开自启 → 可能只是重启后客户端没起；开了 → 那是真关机/断网。
+            # 允许 NULL = 旧客户端没上报，别当成"没开"。
+            ("autostart", "INTEGER"),
         ):
             try:
                 c.execute(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
@@ -315,6 +320,7 @@ class DeviceStore:
                     " disk_human=COALESCE(NULLIF(?,''),disk_human),"
                     " engine=COALESCE(NULLIF(?,''),engine),"
                     " shell_enabled=COALESCE(?,shell_enabled),"
+                    " autostart=COALESCE(?,autostart),"
                     " core_base=COALESCE(NULLIF(?,''),core_base),"
                     " core_alive=COALESCE(?,core_alive),"
                     " inventory=COALESCE(NULLIF(?,''),inventory) WHERE device_id=?",
@@ -322,6 +328,7 @@ class DeviceStore:
                      _as_int(st.get("profiles")), _as_int(st.get("running")),
                      str(st.get("disk_human") or ""), str(st.get("engine") or ""),
                      _as_bool(st.get("shell_enabled")),
+                     _as_bool(st.get("autostart")),
                      str(st.get("core_base") or ""),
                      _as_bool(st.get("core_alive")),
                      _dump_inventory(st.get("inventory")),
@@ -565,4 +572,8 @@ class DeviceStore:
         ca = d.get("core_alive")
         d["core_alive"] = None if ca is None else bool(ca)
         d["inventory"] = _load_inventory(d.get("inventory"))
+        # 三态：1=开了自启 / 0=没开 / None=旧客户端没上报（界面显示"未知"）。
+        # 用途：设备突然离线时，面板能区分"重启后客户端没起"和"机器真关了"。
+        at = d.get("autostart")
+        d["autostart"] = None if at is None else bool(at)
         return d

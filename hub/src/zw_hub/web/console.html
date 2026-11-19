@@ -1314,6 +1314,13 @@ function fillCard(card, dev){
   else if (pending) bg.push('<span class="badge warn">等待授权</span>');
   else if (online) bg.push('<span class="badge ok">在线</span>');
   else bg.push('<span class="badge">离线</span>');
+  // 离线时给一句"为什么"：没开自启的设备，很可能只是重启后客户端没起，
+  // 人去点一下图标就回来了；开了自启还离线，才说明机器真关/断网。
+  // 这两种情况处置完全不同，不给提示用户只能猜。
+  if (!online && !blocked && dev.autostart === false)
+    bg.push('<span class="badge warn" title="这台机器没有开启开机自启。' +
+      '如果它刚重启过，多半只是客户端没自己起来 —— 到机器上双击一次客户端图标即可。' +
+      '想以后自动恢复：客户端「设置」里勾上开机自启，或重跑安装包时勾选该选项。">未开自启</span>');
   // 本机服务（core）是否活着。进程活着 ≠ 服务活着：
   // core 死了，远程命令和远程控制台都不可用，光看"在线"会误判。
   // 三态：true=活 / false=死（红色，最要紧）/ null=旧客户端没上报（不显示）
