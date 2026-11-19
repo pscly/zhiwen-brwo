@@ -62,3 +62,52 @@ def test_shell_submit_warns_when_core_unreachable():
     code = "\n".join(ln for ln in src.splitlines()
                      if not ln.lstrip().startswith("#"))
     assert 'dev.get("core_reachable")' not in code, "又在读不存在的键"
+
+
+def test_heartbeat_stores_and_exposes_core_error(tmp_path):
+    """客户端报上来的 `core_error` 必须**存下来并暴露**。
+
+    ## 为什么（2026-11-20 卡了我好几轮）
+
+    云电脑上 core 起不来，我从服务器侧只能看到"core 不可达"，**不知道为什么**。
+    而客户端本来就在算这个原因（`local_summary()` 里有 `core_error`）——
+    只是 hub 以前根本不收这个字段，等于白报。
+
+    补上之后：主控台首屏能看到原因，投递命令的 warning 里也会附上，
+    不用跑到机器前才知道是"端口被占"还是"杀软拦截"。
+    """
+    from zw_hub.devices import DeviceStore
+
+    store = DeviceStore(tmp_path / "d.sqlite3")
+    dev = store.enroll("zwd_cerr", ip="10.0.0.5")
+
+    reason = "本地服务 45 秒内没起来（端口 8730）：端口被别的程序占了"
+    store.touch(dev["device_id"], ip="10.0.0.5",
+                stats={"core_alive": False, "core_error": reason})
+    got = store.get(dev["device_id"])
+    assert got["core_error"] == reason, got.get("core_error")
+
+    # 恢复正常时应当被清空（否则会一直挂着一个过期的旧原因）
+    store.touch(dev["device_id"], ip="10.0.0.5", stats={"core_alive": True, "core_error": ""})
+    assert store.get(dev["device_id"])["core_error"] == ""
+
+
+def test_overview_row_carries_core_error():
+    """控制台首屏的设备行要带 `core_error`。"""
+    import inspect
+
+    from zw_hub import main as hub_main
+
+    src = inspect.getsource(hub_main.console_overview)
+    assert '"core_error"' in src, "首屏没带 core_error"
+
+
+def test_shell_warning_appends_reported_reason():
+    """投递命令的 warning 要把客户端报的原因附上。"""
+    import inspect
+
+    from zw_hub import main as hub_main
+
+    code = "\n".join(ln for ln in inspect.getsource(hub_main.shell_submit).splitlines()
+                     if not ln.lstrip().startswith("#"))
+    assert "客户端报告的失败原因" in code

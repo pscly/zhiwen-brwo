@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS devices (
   shell_enabled INTEGER NOT NULL DEFAULT 0,
   autostart    INTEGER,
   core_base    TEXT NOT NULL DEFAULT '',
+  core_error   TEXT NOT NULL DEFAULT '',
   inventory    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
@@ -239,6 +240,9 @@ class DeviceStore:
             # 没开自启 → 可能只是重启后客户端没起；开了 → 那是真关机/断网。
             # 允许 NULL = 旧客户端没上报，别当成"没开"。
             ("autostart", "INTEGER"),
+            # 客户端报上来的"core 为什么没起来"。没有它，服务器只知道 core 死了，
+            # 不知道为什么 —— 只能跑到机器前看（2026-11-20 就卡在这上面整整几轮）。
+            ("core_error", "TEXT NOT NULL DEFAULT ''"),
         ):
             try:
                 c.execute(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
@@ -322,6 +326,7 @@ class DeviceStore:
                     " shell_enabled=COALESCE(?,shell_enabled),"
                     " autostart=COALESCE(?,autostart),"
                     " core_base=COALESCE(NULLIF(?,''),core_base),"
+                    " core_error=?,"
                     " core_alive=COALESCE(?,core_alive),"
                     " inventory=COALESCE(NULLIF(?,''),inventory) WHERE device_id=?",
                     (now, ip,
@@ -330,6 +335,7 @@ class DeviceStore:
                      _as_bool(st.get("shell_enabled")),
                      _as_bool(st.get("autostart")),
                      str(st.get("core_base") or ""),
+                     str(st.get("core_error") or "")[:500],
                      _as_bool(st.get("core_alive")),
                      _dump_inventory(st.get("inventory")),
                      device_id),
@@ -568,6 +574,7 @@ class DeviceStore:
         # 库里存 0/1，出参给布尔 —— 面板直接显示"开/关"，不用再猜 0 和 1 的含义
         d["shell_enabled"] = bool(d.get("shell_enabled") or 0)
         d["core_base"] = str(d.get("core_base") or "")
+        d["core_error"] = str(d.get("core_error") or "")
         # 三态：1=活 / 0=死 / None=旧客户端没上报（界面显示"未知"）
         ca = d.get("core_alive")
         d["core_alive"] = None if ca is None else bool(ca)

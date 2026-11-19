@@ -911,6 +911,8 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
             "engine": d.get("engine", ""),
             "core_base": base,
             "core_reachable": reachable,
+            # 客户端报上来的"core 为什么没起来"（空 = 没报或没出错）
+            "core_error": str(d.get("core_error") or ""),
             # 终端是否就绪：设备最近有没有来拉过命令
             "shell_last_poll_ago": shell_poll_age(d.get("device_id", "")),
             "shell_polling": _shell_polling(d.get("device_id", "")),
@@ -1264,6 +1266,10 @@ def shell_submit(
             "常见原因：core 崩了、端口被占、或杀软拦截。需要到那台机器上打开一次客户端"
             "（0.8.1 起客户端会自己把 core 拉起来）。"
         )
+        # 把这台机器**自己报上来**的失败原因附上 —— 比任何猜测都准。
+        _err = str(dev.get("core_error") or "").strip()
+        if _err:
+            out["warning"] += f"客户端报告的失败原因：{_err}"
         out["core_reachable"] = False
     elif _reachable is not None:
         out["core_reachable"] = _reachable
