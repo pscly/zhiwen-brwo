@@ -113,6 +113,15 @@ const SECRETS = {
 // 普通单跳 / 链式（前置 → 落地）/ 已隐藏
 const PROXY_XSS_LABEL = '<img src=x onerror="window.__xss=1">代理';
 
+// 扩展包（跨机复用的那份）。用一条带数据、一条仅代码，覆盖两种展示形态；
+// name 里塞 XSS 载荷，验证渲染用的是 textContent 而不是 innerHTML。
+const PACKS = [
+  { id: 'pk0000000001', name: 'RXYCDP 全套', extension_count: 5, has_data: true,
+    size: 3_400_000, size_human: '3.2 MB', origin: 'cloudpc', sha256: 'a'*64, created_at: 1 },
+  { id: 'pk0000000002', name: '<img src=x onerror="window.__pkxss=1">仅代码', extension_count: 1,
+    has_data: false, size: 1024, size_human: '1.0 KB', origin: 'panel', sha256: 'b'*64, created_at: 2 },
+];
+
 const PROXIES = [
   { id: 1, scheme: 'socks5', host: '66.80.12.66', port: 20000, username: 'cf1b081103',
     has_password: true, hop: '', label: '落地A', note: '', hidden: false,
@@ -221,6 +230,19 @@ function setupRoutes(page, opts){
       const showHidden = url.searchParams.get('include_hidden') === 'true';
       const items = PROXIES.filter(x => showHidden || !x.hidden);
       return json(route, { ok: true, data: { proxies: items, total: items.length } });
+    }
+    // ── 扩展包（跨机复用的包）──
+    if (p === '/v1/packs' && method === 'GET'){
+      if (!m.loggedIn) return bad(route, 401, 'UNAUTHENTICATED', '需要管理面板会话');
+      return json(route, { ok: true, data: { packs: PACKS } });
+    }
+    if (p === '/v1/packs' && method === 'POST'){
+      if (!m.loggedIn) return bad(route, 401, 'UNAUTHENTICATED', '需要管理面板会话');
+      m.uploads = m.uploads || [];
+      m.uploads.push({ len: (req.postData() || '').length, url: p + url.search });
+      return json(route, { ok: true, data: {
+        id: 'pk0000000003', name: 'uploaded', extension_count: 1, has_data: true,
+        size: 10, size_human: '10 B', origin: 'console', sha256: 'c'*64, created_at: 3 } });
     }
     if (p === '/v1/proxies' && method === 'POST'){
       let body = {};
@@ -575,6 +597,30 @@ function setupRoutes(page, opts){
   check('网段白名单与自动放行都渲染出来',
     (await page.textContent('.sec-row[data-k="allowed_cidrs"] .sec-v')).includes('192.168.3.0/24') &&
     (await page.textContent('.sec-row[data-k="auto_approve"] .sec-v')).includes('开'));
+
+  console.log('\n— D2. 扩展包视图（跨机器复用的那层）—');
+  // 用户要求「把插件打包放到控制台，以后建环境默认带上」。
+  // 之前只有接口、**主控台没有界面** —— 等于没法用。
+  await page.click('#tabs .tab[data-view="packs"]');
+  await page.waitForTimeout(500);
+  check('切到扩展包视图：hash=#packs 且只显示这一屏',
+    new URL(page.url()).hash === '#packs' &&
+    (await page.isVisible('#view-packs')) && !(await page.isVisible('#view-proxies')));
+  const pkRows = page.locator('#pk-rows tr');
+  check('扩展包行数 = 2', (await pkRows.count()) === 2, 'count=' + (await pkRows.count()));
+  const pkText = await page.locator('#pk-rows').textContent();
+  check('显示包名', pkText.includes('RXYCDP 全套'), pkText.slice(0, 120));
+  check('显示扩展数', pkText.includes('5'), pkText.slice(0, 120));
+  check('带数据的包标「带数据」', pkText.includes('带数据'));
+  check('仅代码的包标「仅代码」', pkText.includes('仅代码'));
+  check('显示体积', pkText.includes('3.2 MB'), pkText.slice(0, 160));
+  check('有下载按钮', (await page.locator('#pk-rows [data-pk-dl]').count()) === 2);
+  check('有删除按钮', (await page.locator('#pk-rows [data-pk-del]').count()) === 2);
+  check('扩展包名里的 <img onerror> 被转义（没有注入节点）',
+    (await page.evaluate(() => document.querySelectorAll('#pk-rows img').length === 0)));
+  check('扩展包的 XSS 载荷没有执行（window.__pkxss 未设置）',
+    (await page.evaluate(() => window.__pkxss === undefined)));
+  check('有「上传扩展包」按钮', await page.isVisible('#pk-upload'));
 
   console.log('\n— E. 事件视图 —');
   await page.click('#tabs .tab[data-view="events"]');

@@ -461,6 +461,7 @@ dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
       <button class="tab active" type="button" data-view="machines" role="tab" aria-selected="true">机器</button>
       <button class="tab" type="button" data-view="browsers" role="tab" aria-selected="false">浏览器</button>
       <button class="tab" type="button" data-view="proxies" role="tab" aria-selected="false">代理</button>
+      <button class="tab" type="button" data-view="packs" role="tab" aria-selected="false">扩展包</button>
       <button class="tab" type="button" data-view="secrets" role="tab" aria-selected="false">令牌</button>
       <button class="tab" type="button" data-view="events" role="tab" aria-selected="false">事件</button>
     </nav>
@@ -515,6 +516,24 @@ dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
       <div class="table-wrap"><table class="tbl"><thead><tr>
         <th>上游</th><th>前置</th><th>标签</th><th>密码</th><th>来源</th><th>操作</th>
       </tr></thead><tbody id="px-rows"></tbody></table></div>
+    </section>
+    <!-- 扩展包 -->
+    <section class="view-sec" id="view-packs" role="tabpanel" aria-label="扩展包" hidden>
+      <div class="banner info">
+        这里存的是<b>可以跨机器复用</b>的扩展包（代码 + 该扩展的本地数据）。
+        客户机「从控制台拉取」就能取回本机，新建环境时默认带上。
+      </div>
+      <div class="row-wrap" style="gap:8px; margin:12px 0">
+        <button class="btn sm primary" type="button" id="pk-upload">上传扩展包</button>
+        <button class="btn sm" type="button" id="pk-refresh">刷新</button>
+        <input type="file" id="pk-file" accept=".zip" hidden>
+        <div class="grow"></div>
+        <span class="muted" id="pk-count" style="font-size:12px"></span>
+      </div>
+      <div class="table-wrap"><table class="tbl"><thead><tr>
+        <th>名称</th><th>扩展数</th><th>带数据</th><th>大小</th><th>来源</th><th>操作</th>
+      </tr></thead><tbody id="pk-rows"></tbody></table></div>
+      <div class="glass empty" id="pk-empty" hidden>还没有扩展包。在客户机上「从 Chrome 目录导入」后导出，或直接点上面的「上传扩展包」。</div>
     </section>
     <section class="view-sec" id="view-secrets" role="tabpanel" aria-label="令牌" hidden>
       <div class="banner info sec-warn">
@@ -576,7 +595,7 @@ dialog.dlg::backdrop{background:rgba(3,5,8,.6); backdrop-filter:blur(4px)}
       「主控台接口未就绪」提示 —— 主控台不能因为后端还没实现就白屏。
    ========================================================================== */
 
-const VIEWS = ['machines', 'browsers', 'proxies', 'secrets', 'events'];
+const VIEWS = ['machines', 'browsers', 'proxies', 'packs', 'secrets', 'events'];
 const REFRESH_MS = 10000;
 
 function $(sel, root){ return (root || document).querySelector(sel); }
@@ -1135,6 +1154,7 @@ function switchView(v, fromHash){
   const y = state.scroll[v] || 0;
   window.scrollTo(0, y);
   if (v === 'proxies') loadProxies();
+  if (v === 'packs') loadPacks();
   if (v === 'secrets') loadSecrets(false);
   if (v === 'machines') terminals.forEach(t => { try { termScrollToEnd(t); } catch (_) {} });
 }
@@ -1611,6 +1631,84 @@ function proxyDialog(px){
    和客户机共享同一份库：两边都能加，服务器能隐藏/删除。
    密码永远不显示原文（后端也不给），这里只显示"已设置/无"。
 */
+/* ── 扩展包 ───────────────────────────────────────────────
+   把「浏览器里的插件 + 它的本地数据」存到服务器，任意客户机都能拉回去。
+   存的是 zip：code/<key>/manifest.json 是代码，data/<key>/… 是本地数据。
+   上传用原始字节流（PUT body），不是 multipart —— 服务器不依赖 python-multipart。
+*/
+async function loadPacks(){
+  try {
+    const r = await fetch('/v1/packs', {credentials:'same-origin'});
+    const body = await r.json();
+    if (!r.ok){ throw new Error((body.error && body.error.message) || ('HTTP ' + r.status)); }
+    renderPacks((body.data || {}).packs || []);
+  } catch (e) {
+    $('#pk-rows').innerHTML = '<tr><td colspan="6" class="muted">读取失败：' + esc(String(e.message || e)) + '</td></tr>';
+  }
+}
+function renderPacks(items){
+  const rows = $('#pk-rows');
+  const empty = $('#pk-empty');
+  if (!items.length){
+    rows.innerHTML = '';
+    if (empty) empty.hidden = false;
+    $('#pk-count').textContent = '共 0 个';
+    return;
+  }
+  if (empty) empty.hidden = true;
+  $('#pk-count').textContent = '共 ' + items.length + ' 个';
+  rows.innerHTML = items.map(p => {
+    return '<tr>' +
+      '<td><b>' + esc(p.name || p.id) + '</b>' +
+        '<div class="muted" style="font-size:11px">' + esc(p.id) + '</div></td>' +
+      '<td>' + (p.extension_count || 0) + '</td>' +
+      '<td>' + (p.has_data ? '<span class="pill ok">带数据</span>' : '<span class="pill">仅代码</span>') + '</td>' +
+      '<td class="muted">' + esc(p.size_human || '') + '</td>' +
+      '<td class="muted">' + esc(p.origin || '—') + '</td>' +
+      '<td><button class="btn sm ghost" type="button" data-pk-dl="' + esc(p.id) + '">下载</button> ' +
+          '<button class="btn sm ghost" type="button" data-pk-del="' + esc(p.id) + '">删除</button></td>' +
+    '</tr>';
+  }).join('');
+
+  rows.querySelectorAll('[data-pk-dl]').forEach(b => {
+    b.addEventListener('click', () => {
+      // 下载走浏览器原生导航，让 cookie 自动带上
+      window.open('/v1/packs/' + encodeURIComponent(b.dataset.pkDl) + '/download', '_blank');
+    });
+  });
+  rows.querySelectorAll('[data-pk-del]').forEach(b => {
+    b.addEventListener('click', async () => {
+      if (!confirm('删除这个扩展包？已拉回本机的副本不受影响。')) return;
+      try {
+        const r = await fetch('/v1/packs/' + encodeURIComponent(b.dataset.pkDel),
+                              {method:'DELETE', credentials:'same-origin'});
+        const body = await r.json();
+        if (!r.ok) throw new Error((body.error && body.error.message) || ('HTTP ' + r.status));
+        toast('已删除');
+        loadPacks();
+      } catch (e) { toast('删除失败：' + String(e.message || e), true); }
+    });
+  });
+}
+async function uploadPack(file){
+  const name = (file.name || 'pack.zip').replace(/\.zip$/i, '');
+  try {
+    const buf = await file.arrayBuffer();
+    const r = await fetch('/v1/packs?name=' + encodeURIComponent(name) + '&origin=console', {
+      method: 'POST', credentials: 'same-origin',
+      headers: {'Content-Type': 'application/zip'},
+      body: buf,
+    });
+    const body = await r.json();
+    if (!r.ok) throw new Error((body.error && body.error.message) || ('HTTP ' + r.status));
+    const d = body.data || {};
+    toast('已上传：' + (d.name || '') + '（' + (d.extension_count || 0) + ' 个扩展' +
+          (d.has_data ? '，带数据' : '') + '）');
+    loadPacks();
+  } catch (e) {
+    toast('上传失败：' + String(e.message || e), true);
+  }
+}
 async function loadProxies(){
   const showHidden = $('#px-show-hidden') && $('#px-show-hidden').checked;
   try {
@@ -2596,6 +2694,14 @@ $('#view-proxies').addEventListener('click', (ev) => {
   if (delBtn){ deleteProxy(Number(delBtn.dataset.pxDel)); return; }
   if (ev.target.closest('#px-add')){ askAddProxy(); return; }
   if (ev.target.closest('#px-refresh')){ loadProxies(); return; }
+  if (ev.target.closest('#pk-refresh')){ loadPacks(); return; }
+  if (ev.target.closest('#pk-upload')){ const f = $('#pk-file'); if (f) f.click(); return; }
+  if (ev.target.id === 'pk-file'){
+    const file = ev.target.files && ev.target.files[0];
+    if (file) uploadPack(file);
+    ev.target.value = '';
+    return;
+  }
 });
 /* 复选框在容器外（按钮行），单独挂 */
 $('#px-show-hidden').addEventListener('change', () => loadProxies());
