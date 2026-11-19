@@ -913,6 +913,9 @@ def console_overview(request: Request, probe: bool = True) -> dict[str, Any]:
             "core_reachable": reachable,
             # 客户端报上来的"core 为什么没起来"（空 = 没报或没出错）
             "core_error": str(d.get("core_error") or ""),
+            # core 自动降级的原因（例如"没有 device_id → 只听 127.0.0.1"）。
+            # 这是"在线但够不着"最常见、也最容易漏看的原因。
+            "host_notice": str(d.get("host_notice") or ""),
             # 终端是否就绪：设备最近有没有来拉过命令
             "shell_last_poll_ago": shell_poll_age(d.get("device_id", "")),
             "shell_polling": _shell_polling(d.get("device_id", "")),
@@ -1267,6 +1270,9 @@ def shell_submit(
             "（0.8.1 起客户端会自己把 core 拉起来）。"
         )
         # 把这台机器**自己报上来**的失败原因附上 —— 比任何猜测都准。
+        _notice = str(dev.get("host_notice") or "").strip()
+        if _notice:
+            out["warning"] += f"另外这台机器的 core 报了降级原因：{_notice}"
         _err = str(dev.get("core_error") or "").strip()
         if _err:
             out["warning"] += f"客户端报告的失败原因：{_err}"

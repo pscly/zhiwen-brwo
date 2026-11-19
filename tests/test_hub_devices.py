@@ -111,3 +111,46 @@ def test_shell_warning_appends_reported_reason():
     code = "\n".join(ln for ln in inspect.getsource(hub_main.shell_submit).splitlines()
                      if not ln.lstrip().startswith("#"))
     assert "客户端报告的失败原因" in code
+
+
+def test_heartbeat_stores_host_notice(tmp_path):
+    """core 自动降级的原因（`host_notice`）必须存下来。
+
+    ## 为什么（2026-11-20 排查了十几轮）
+
+    云电脑上 core 的 `gateway_public_base` 报的是 `http://127.0.0.1:8730`
+    而不是 LAN IP —— 这只在「没有 device_id 也没有 admin_token」触发降级时发生。
+    降级之后外部再也连不上 8730，但心跳照发，于是服务器看到"在线却够不着"。
+
+    这个原因本来就在 `Settings.host_notice` 里，但**只在日志打一行**，
+    从来没进过心跳。我因此只能靠猜。
+
+    现在存下来并暴露，主控台能直接说清。
+    """
+    from zw_hub.devices import DeviceStore
+
+    store = DeviceStore(tmp_path / "d.sqlite3")
+    dev = store.enroll("zwd_notice", ip="10.0.0.6")
+
+    notice = "ZW_HOST=0.0.0.0 但没有 ZW_ADMIN_TOKEN 或 ZW_DEVICE_ID，已自动降级为只监听 127.0.0.1"
+    store.touch(dev["device_id"], ip="10.0.0.6", stats={"host_notice": notice})
+    got = store.get(dev["device_id"])
+    assert got["host_notice"] == notice, got.get("host_notice")
+
+    # 恢复正常时清空
+    store.touch(dev["device_id"], ip="10.0.0.6", stats={"host_notice": ""})
+    assert store.get(dev["device_id"])["host_notice"] == ""
+
+
+def test_overview_and_warning_carry_host_notice():
+    import inspect
+
+    from zw_hub import main as hub_main
+
+    ov = "\n".join(ln for ln in inspect.getsource(hub_main.console_overview).splitlines()
+                   if not ln.lstrip().startswith("#"))
+    assert '"host_notice"' in ov, "首屏没带 host_notice"
+
+    sh = "\n".join(ln for ln in inspect.getsource(hub_main.shell_submit).splitlines()
+                   if not ln.lstrip().startswith("#"))
+    assert "host_notice" in sh, "投递命令的 warning 没带降级原因"

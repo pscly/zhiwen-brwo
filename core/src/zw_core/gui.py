@@ -798,6 +798,17 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         # core 在首选端口被占时会自动回退（client.LocalCore），
         # 所以这里必须用**实际端口**拼，否则服务器会一直按 8730 去连、永远连不上。
         base = str(st.get("gateway_public_base") or "")
+        # **降级原因必须报到服务器**（2026-11-20）。
+        #
+        # 云电脑上 core 的 `gateway_public_base` 是 `http://127.0.0.1:8730`
+        # 而不是 LAN IP —— 这只在"没有 ZW_DEVICE_ID 也没有 ZW_ADMIN_TOKEN"
+        # 触发降级时才会发生。降级之后：
+        #   · 外部再也连不上 8730（端口探测不通、core_reachable=False）
+        #   · 心跳却照发（走 hub_url，与 core 监听无关）
+        # 于是服务器看到"在线但够不着"，而**没有任何地方说明原因** ——
+        # 我在这台机器上猜了好几轮。
+        #
+        # 把 `host_notice` 带上去，主控台就能直接说清"这台机器的 device_id 丢了"。
         if not base:
             port = core.live_port
             host = state.get("lan_ip") or "127.0.0.1"
@@ -844,6 +855,7 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             "max_running": int(st.get("max_running") or 0),
             "disk_human": str(st.get("disk_human") or ""),
             "engine": str((st.get("engine") or {}).get("version") or ""),
+            "host_notice": str(st.get("host_notice") or ""),
             # 面板据此在设备行显示"命令行：开/关"，并决定终端输入框是否可写
             "shell_enabled": bool(state.get("shell_var").get()),
         }

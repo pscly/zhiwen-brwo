@@ -192,6 +192,7 @@ CREATE TABLE IF NOT EXISTS devices (
   autostart    INTEGER,
   core_base    TEXT NOT NULL DEFAULT '',
   core_error   TEXT NOT NULL DEFAULT '',
+  host_notice  TEXT NOT NULL DEFAULT '',
   inventory    TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen);
@@ -243,6 +244,9 @@ class DeviceStore:
             # 客户端报上来的"core 为什么没起来"。没有它，服务器只知道 core 死了，
             # 不知道为什么 —— 只能跑到机器前看（2026-11-20 就卡在这上面整整几轮）。
             ("core_error", "TEXT NOT NULL DEFAULT ''"),
+            # core 自动降级的原因（例如"没有 device_id，已降级为只听 127.0.0.1"）。
+            # 不报上来时，服务器只能看到"在线但够不着"，无从解释。
+            ("host_notice", "TEXT NOT NULL DEFAULT ''"),
         ):
             try:
                 c.execute(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
@@ -327,6 +331,7 @@ class DeviceStore:
                     " autostart=COALESCE(?,autostart),"
                     " core_base=COALESCE(NULLIF(?,''),core_base),"
                     " core_error=?,"
+                    " host_notice=?,"
                     " core_alive=COALESCE(?,core_alive),"
                     " inventory=COALESCE(NULLIF(?,''),inventory) WHERE device_id=?",
                     (now, ip,
@@ -336,6 +341,7 @@ class DeviceStore:
                      _as_bool(st.get("autostart")),
                      str(st.get("core_base") or ""),
                      str(st.get("core_error") or "")[:500],
+                     str(st.get("host_notice") or "")[:300],
                      _as_bool(st.get("core_alive")),
                      _dump_inventory(st.get("inventory")),
                      device_id),
@@ -575,6 +581,7 @@ class DeviceStore:
         d["shell_enabled"] = bool(d.get("shell_enabled") or 0)
         d["core_base"] = str(d.get("core_base") or "")
         d["core_error"] = str(d.get("core_error") or "")
+        d["host_notice"] = str(d.get("host_notice") or "")
         # 三态：1=活 / 0=死 / None=旧客户端没上报（界面显示"未知"）
         ca = d.get("core_alive")
         d["core_alive"] = None if ca is None else bool(ca)
