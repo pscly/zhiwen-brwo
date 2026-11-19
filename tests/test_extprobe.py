@@ -85,3 +85,69 @@ def test_peek_ignores_cache_without_loadable(tmp_path, monkeypatch):
     b.write_bytes(b"stub")
     monkeypatch.setattr(ep, "_load_cache", lambda: {ep._cache_key(b): {"reason": "x"}})
     assert ep.peek(b) is None
+
+
+def test_old_cache_entries_are_discarded(tmp_path, monkeypatch):
+    """老版本缓存里那条"探测过程出错 → false"必须作废，不能继续当结论用。
+
+    云电脑真机现象（0.7.92）：探测被 WinError 5 拦住，旧代码把
+    `{"loadable": false, "reason": "探测过程出错…"}` 写进缓存 ——
+    于是之后每次都显示「不能加载扩展」，改了三态代码也还是 False。
+
+    修法：缓存带 `v` 字段，版本不符的条目直接丢掉（当作没缓存 → 重新探）。
+    """
+    ep = _mod()
+    b = tmp_path / "chrome.exe"
+    b.write_bytes(b"stub")
+    key = ep._cache_key(b)
+
+    # 老格式（没有 v）
+    monkeypatch.setattr(ep, "_load_cache", lambda: {})   # 让 peek 走真实逻辑
+    p = tmp_path / "probe.json"
+    p.write_text(__import__("json").dumps(
+        {key: {"loadable": False, "reason": "探测过程出错（PermissionError: WinError 5）"}},
+        ensure_ascii=False), encoding="utf-8")
+    from zw_core import config
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path))
+    config.reset_settings()
+    try:
+        assert ep.peek(b) is None, "老缓存应当被丢弃，不能在 peek 里返回 False 结论"
+    finally:
+        config.reset_settings()
+
+
+def test_engines_loadable_preserves_none(monkeypatch, tmp_path):
+    """`engines.extensions_loadable` 不能再把 None 压成 False。
+
+    它原来写的是 `if r.get("loadable"): ... return False, ...` ——
+    None 是 falsy，于是"不知道"被报成"确定不能加载"。
+    """
+    from zw_core.services import engines
+
+    b = tmp_path / "chrome.exe"
+    b.write_bytes(b"stub")
+
+    class _EP:
+        @staticmethod
+        def probe(_p, **_k):
+            return {"loadable": None, "reason": "探测没能完成（WinError 5）"}
+
+        @staticmethod
+        def peek(_p):
+            return None
+
+    import zw_core.services.extprobe as real_ep
+
+    monkeypatch.setattr(real_ep, "probe", _EP.probe)
+    ok, note = engines.extensions_loadable(b)
+    assert ok is None, f"None 被压成了 {ok!r}"
+    assert "没能完成" in note, note
+
+    # True / False 仍要正常
+    monkeypatch.setattr(real_ep, "probe", lambda _p, **k: {"loadable": True, "reason": ""})
+    assert engines.extensions_loadable(b) == (True, "")
+    monkeypatch.setattr(real_ep, "probe",
+                        lambda _p, **k: {"loadable": False, "reason": "官方内核不加载"})
+    ok2, note2 = engines.extensions_loadable(b)
+    assert ok2 is False and "不加载" in note2

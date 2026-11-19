@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## 0.7.94 — 2026-11-19
+
+**用户让删一个扩展，顺手把"探测三态"补彻底了 —— 之前只改了一半。**
+
+### 删除扩展（云电脑实操）
+
+用户在云电脑上要求删掉 `CookieManager - Cookie Editor`。它同时挂在三处，逐一清掉：
+
+| 位置 | 动作 | 结果 |
+|---|---|---|
+| 环境 TEST3（唯一绑它的） | `DELETE /profiles/TEST3/extensions/cookiemanager---cookie-editor` | ✅ 剩下 5 个扩展 |
+| 扩展包 `20a58e339cec`（它自己的包，默认） | `DELETE /packs/20a58e339cec` | ✅ 包 6→5 |
+| 扩展库 `cookiemanager---cookie-editor@0.2.7` | `DELETE /extensions/{slug}/{version}` | ✅ 库 9→8 |
+
+验证：三处都查不到 `CookieManager`；TEST3 重启后 5 个扩展齐、浏览器里没有它的页面。
+
+> 删除接口本身是安全的：还被环境绑着时返回 `409 EXTENSION_IN_USE` 并列出是哪些环境，
+> 不会留下悬空引用。包应用时若引用了已删扩展，会跳过并给一条 warning（不崩）。
+
+### 三态语义之前只改了一半
+
+0.7.92 我把 `extprobe` 出错改成了返回 `None`（不知道），但有两处会把它再压回 `False`：
+
+1. `engines.extensions_loadable()` —— `if r.get("loadable"): ... return False`
+   （`None` 是 falsy，走 else 分支）→ 调用方拿到的仍是"确定不能加载"
+2. `extprobe` 缓存 —— 老缓存里那条 `{"loadable": false, "reason": "探测过程出错…"}`
+   是**按旧语义写的结论**，改代码也不会让它消失，于是界面继续显示 False
+
+修法：
+- `extensions_loadable()` 返回 `tuple[bool | None, str]`，None 原样传出
+- 缓存加 `_CACHE_VERSION = 2`，**版本不符的条目一律丢弃**（当作没缓存 → 重新探）
+
+> 云电脑上的实际现象就是这样：升级到 0.7.93 后 note 已经是新文案
+> 「探测没能完成…无法判断」，但 `extensions_active` 还显示 `false` ——
+> 两个原因各占一半。
+
+### 测试
+
+651 → **653 项**：加"老缓存被丢弃"、"`extensions_loadable` 保住 None"；
+并把既有 `test_profile_detail_reports_extensions_active` 从"不能是 None"
+改成"三态合法，且 None 时必须给出原因"——那条断言本身是按旧语义写的。
+
+九项门槛全绿（653 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 39）。
+
 ## 0.7.93 — 2026-11-19
 
 **「每次打开都无响应几秒钟」—— 连接流程全跑在 Tk 主线程上。**

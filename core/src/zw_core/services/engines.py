@@ -333,7 +333,7 @@ def _major_of(ver: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def extensions_loadable(bin_path: Path) -> tuple[bool, str]:
+def extensions_loadable(bin_path: Path) -> tuple[bool | None, str]:
     """这个内核能不能通过命令行加载外部扩展。返回 (能?, 原因)。
 
     ## 为什么改成**实测**而不是看版本号
@@ -350,8 +350,8 @@ def extensions_loadable(bin_path: Path) -> tuple[bool, str]:
     造一个只改 document.title 的临时扩展，无头启动内核，
     用本地 http 页面 + CDP 读标题，看到标记就算能加载。
 
-    探针本身跑不起来（内核文件不存在、起不来）时才退回"按不能加载告警"，
-    因为漏告警的代价是用户以为插件装好了、实际没加载。
+    探针本身跑不起来时返回 **None（不知道）** —— 不能报成"不能加载"：
+    那会让用户以为插件坏了，而实际只是没能测。
     """
     from . import extprobe
 
@@ -360,9 +360,18 @@ def extensions_loadable(bin_path: Path) -> tuple[bool, str]:
     except Exception as exc:  # noqa: BLE001
         return False, (f"判断扩展能否被加载时出错（{type(exc).__name__}: {exc}），"
                        "已按不加载处理")
-    if r.get("loadable"):
+    # **三态**：True=能 / False=不能 / None=探测没跑成（不知道）。
+    #
+    # 这里原来写的是 `if r.get("loadable"): ... return False, ...`，
+    # 而 `None` 是 falsy → 探测失败被报成"确定不能加载"。
+    # 云电脑真机就是：杀软拦了探针（WinError 5），界面显示「不能加载扩展」，
+    # 用户以为插件坏了。正确语义是"不知道"。
+    loadable = r.get("loadable")
+    if loadable is None:
+        return None, str(r.get("reason") or "探测没能完成，无法判断这个内核能否加载扩展")
+    if loadable:
         return True, ""
-    return False, str(r.get("reason") or "无法确认这个内核会不会加载扩展，已按不加载处理")
+    return False, str(r.get("reason") or "无法确认这个内核会不会加载扩展")
 
 
 def engine_version(bin_path: Path) -> str:

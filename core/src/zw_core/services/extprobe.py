@@ -75,12 +75,27 @@ def _cache_path() -> Path:
     return get_settings().root / _CACHE_FILE
 
 
+# 缓存格式版本。改了三态语义之后必须提升它 ——
+# 否则老缓存里那条 `{"loadable": false, "reason": "探测过程出错（PermissionError…）"}`
+# 会被当成"确定不能加载"继续用，用户看到的还是 False（云电脑真机就是这个现象）。
+_CACHE_VERSION = 2
+
+
 def _load_cache() -> dict[str, Any]:
+    """读缓存。**版本不符的条目直接丢弃**（当作没缓存 → 下次重新探）。"""
     p = _cache_path()
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if isinstance(v, dict) and v.get("v") == _CACHE_VERSION:
+            out[k] = v
+        # 老格式 / 脏数据：丢掉，让它重新探测
+    return out
 
 
 def _save_cache(data: dict[str, Any]) -> None:
@@ -246,7 +261,7 @@ def probe(engine_path: Path | str, *, timeout: float = 25.0, use_cache: bool = T
         # 正反都缓存：结论对同一个二进制（路径+大小+mtime）是确定性的，
         # 而"不支持"这条路要等满 10 秒超时，不缓存的话每次 apply 都卡 10 秒。
         data = _load_cache()
-        data[key] = {"loadable": loadable, "reason": reason}
+        data[key] = {"loadable": loadable, "reason": reason, "v": _CACHE_VERSION}
         _save_cache(data)
         return out
     except Exception as exc:  # noqa: BLE001

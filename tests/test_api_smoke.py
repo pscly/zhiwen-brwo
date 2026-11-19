@@ -844,9 +844,19 @@ def test_profile_detail_reports_extensions_active(client):
 
     d2 = client.get(f"/api/v1/profiles/{pid}", headers=H).json()["data"]
     assert d2.get("extensions"), d2
-    # 必须是"有值"（True/False 都行），不能是 None
-    assert d2.get("extensions_active") is not None, d2.get("extensions_active")
-    assert isinstance(d2.get("extensions_note"), str), d2.get("extensions_note")
+    # **三态**：True=实测能 / False=实测不能 / None=探测没跑成（不知道）。
+    #
+    # 原来这里断言"不能是 None"，那是把它当二值看。改了语义之后 None 是合法的
+    # 第三种结果 —— 而它恰恰是重要信息：报成 False 会让用户以为插件坏了
+    # （云电脑真机就是这么被误导的）。所以现在断言"键存在且取值合法"，
+    # 并要求 None 时 note 必须解释清楚，不能糊弄。
+    assert "extensions_active" in d2, d2
+    active = d2["extensions_active"]
+    assert active in (True, False, None), f"取值非法：{active!r}"
+    note = d2.get("extensions_note")
+    assert isinstance(note, str), note
+    if active is None:
+        assert note.strip(), "值为 None（探测没跑成）时必须给出原因"
 
 
 def test_import_with_as_default_actually_sets_default(client, tmp_path):
