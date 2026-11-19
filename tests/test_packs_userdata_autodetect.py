@@ -85,3 +85,80 @@ def test_plain_extension_dir_still_works(tmp_path, monkeypatch):
         assert out["extensions"][0]["name"] == "单独扩展", out["extensions"][0]
     finally:
         config.reset_settings()
+
+
+def test_zip_import_carries_data_directory(tmp_path, monkeypatch):
+    """从 zip 导入时，包内 `data/<key>/` 必须跟着带上。
+
+    ## 为什么（2026-11-20，自己踩的）
+
+    本项目的包格式本来就是：
+
+    ```
+    code/<key>/manifest.json   ← 扩展代码
+    data/<key>/…               ← 它在 Local Extension Settings 里的数据
+    ```
+
+    但 zip 导入分支以前**只找 `code/` 下的扩展**，压根没看 `data/`，
+    注释里还写着"从目录/zip 导入……没有历史数据可带"—— 这个假设是错的。
+
+    后果很具体：从控制台拉下来的包，扩展在、登录态没了，而 hub 那边明明
+    记录着 `has_data=True`。用户要的是"插件**及其数据**"。
+
+    这条测试盯住：`data/` 必须被搬进新包，并反映在 `has_data` 上。
+    """
+    import io
+    import zipfile
+
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("code/extkey/manifest.json",
+                       json.dumps({"name": "带数据的扩展", "version": "1.0"}))
+            z.writestr("code/extkey/sw.js", "void 0;")
+            z.writestr("data/extkey/000003.log", b"DATA-LOG")
+        zp = tmp_path / "pack.zip"
+        zp.write_bytes(buf.getvalue())
+
+        info = packs.import_pack(str(zp), name="带数据")
+        assert info["extension_count"] == 1
+        ext = info["extensions"][0]
+        assert ext["has_data"] is True, f"数据没带上：{ext}"
+        assert ext.get("data_dir"), "data_dir 为空"
+
+        # 数据文件真的落盘了
+        pdir = packs.packs_root() / info["id"]
+        got = pdir / str(ext["data_dir"]) / "000003.log"
+        assert got.is_file(), f"数据文件不存在：{got}"
+        assert got.read_bytes() == b"DATA-LOG"
+    finally:
+        config.reset_settings()
+
+
+def test_zip_without_data_still_works(tmp_path, monkeypatch):
+    """纯代码包（没有 data/）照样能导入，不能因为找不到数据就失败。"""
+    import io
+    import zipfile
+
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("code/onlycode/manifest.json",
+                       json.dumps({"name": "纯代码", "version": "1.0"}))
+        zp = tmp_path / "pack.zip"
+        zp.write_bytes(buf.getvalue())
+        info = packs.import_pack(str(zp), name="纯代码")
+        assert info["extension_count"] == 1
+        assert info["extensions"][0]["has_data"] is False
+    finally:
+        config.reset_settings()

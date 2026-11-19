@@ -367,6 +367,13 @@ def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
         pdir = packs_root() / pack_id
         (pdir / CODE_DIR).mkdir(parents=True, exist_ok=True)
         exts: list[dict[str, Any]] = []
+        # 包里的数据目录：`data/<key>/…`（core 导出的 zip 就是这个形状）。
+        #
+        # **不能当成"没有数据可带"**（2026-11-20 实测踩到）：本项目的包格式
+        # 本来就带数据目录，以前 zip 分支只找 `code/` 下的扩展、完全没看 `data/`，
+        # 于是"从控制台拉下来的包"扩展在、登录态没了 —— 而 hub 那边明明
+        # 记录着 `has_data=True`。用户要的是"插件**及其数据**"，这条必须带。
+        data_root = root / DATA_DIR if (root / DATA_DIR).is_dir() else None
         for i, code_src in enumerate(code_dirs):
             manifest = _read_manifest(code_src) or {}
             key = _slugify(str(manifest.get("name") or code_src.name), fallback=f"ext{i}") or f"ext{i}"
@@ -374,7 +381,22 @@ def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
             if any(e["key"] == key for e in exts):
                 key = f"{key}-{i}"
             _copy_tree(code_src, pdir / CODE_DIR / key)
-            exts.append(_ext_meta(code_src, key))
+
+            data_dst = None
+            if data_root is not None:
+                # 包里的数据目录名是**源环境的扩展 ID / key**，可能与本机算出的 key
+                # 不同。按"原始目录名"逐个尝试匹配：先试 code_src 的目录名，
+                # 再试 manifest 里的 name。命中就整棵拷过来。
+                for cand in (code_src.name, str(manifest.get("name") or "")):
+                    if not cand:
+                        continue
+                    src_data = data_root / cand
+                    if src_data.is_dir() and any(src_data.iterdir()):
+                        data_dst = pdir / DATA_DIR / key
+                        _copy_tree(src_data, data_dst)
+                        break
+
+            exts.append(_ext_meta(code_src, key, data_dir=data_dst))
 
         meta = {
             "id": pack_id,
@@ -382,8 +404,6 @@ def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
             "created_at": time.time(),
             "is_default": 0,
             "source": {"kind": source_kind, "path": str(src)},
-            # 从目录/zip 导入时拿不到"源环境实测 ID"，也没有历史数据可带；
-            # 数据要等这个扩展在某个环境里跑过之后，再从那个环境导出才有。
             "extensions": exts,
         }
         _write_meta(pdir, meta)

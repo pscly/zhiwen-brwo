@@ -672,6 +672,8 @@ def build_app() -> FastAPI:
                         {"method": "POST", "path": f"{API_PREFIX}/extensions/install", "说明": "装扩展（商店链接 / .crx / 目录 / zip，可自动建包并设为默认）"},
                         {"method": "GET", "path": f"{API_PREFIX}/extensions/updates", "说明": "查已装扩展有无新版（只查带商店 ID 标记的）"},
                         {"method": "GET", "path": f"{API_PREFIX}/packs/scan-browsers", "说明": "扫描本机已装浏览器（Chrome/Edge 等）的用户数据目录，用来导入插件+数据"},
+                        {"method": "POST", "path": f"{API_PREFIX}/packs/pull-hub", "说明": "从控制台（hub）拉取扩展包并导入本机，as_default=1 同时设为默认"},
+                        {"method": "GET", "path": f"{API_PREFIX}/packs/pull-hub/status", "说明": "上一次从控制台拉取扩展包的结果"},
                         {"method": "GET", "path": f"{API_PREFIX}/engine", "说明": "内核状态：策略/路径/版本/能否加载扩展/下载进度（能加载扩展＝插件才会生效）"},
                         {"method": "POST", "path": f"{API_PREFIX}/engine/install", "说明": "后台下载安装 ungoogled-chromium（官方 Chrome 137 起不加载命令行扩展）"},
                         {"method": "POST", "path": f"{API_PREFIX}/maintenance/doctor", "说明": "环境自检（内核/数据库/令牌/磁盘/端口）"},
@@ -1164,6 +1166,26 @@ def build_app() -> FastAPI:
                 res["is_default"] = False
                 res["default_warning"] = f"包已导入，但设为默认失败：{type(exc).__name__}: {exc}"
         return ok(res)
+
+    @app.post(f"{API_PREFIX}/packs/pull-hub", tags=["扩展"], dependencies=[Auth],
+              summary="从控制台（hub）拉取扩展包并导入本机")
+    def packs_pull_hub(as_default: bool = False) -> dict[str, Any]:
+        """把控制台里的扩展包拉到本机。
+
+        用户要求「打包放到控制台，以后建环境默认带上」—— hub 存包那侧已经有了，
+        这里补最后一米：本机主动去拉。拉不到的包不会影响建环境，
+        返回里会说明每个包的结果。
+        """
+        from zw_core.services import packsync
+
+        return ok(packsync.pull(as_default=as_default))
+
+    @app.get(f"{API_PREFIX}/packs/pull-hub/status", tags=["扩展"], dependencies=[Auth],
+             summary="上一次从控制台拉取扩展包的结果")
+    def packs_pull_hub_status() -> dict[str, Any]:
+        from zw_core.services import packsync
+
+        return ok(packsync.last_result())
 
     @app.get(f"{API_PREFIX}/packs/scan-browsers", tags=["扩展"], dependencies=[Auth],
              summary="扫本机可导入的浏览器用户数据目录")
