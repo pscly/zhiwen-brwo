@@ -456,3 +456,54 @@ def test_ai_manifest_lists_all_public_routes(monkeypatch):
     assert not missing, (
         "这些路由没写进 ai/manifest 的端点清单：\n  " + "\n  ".join(missing)
     )
+
+
+def test_delivery_checklist_is_not_stale():
+    """《交付验收清单》必须跟上当前版本与门槛数字。
+
+    这份文档是用户**照着自己点一遍**的验收单。它停在旧版本会直接骗人：
+    曾经停在 v0.7.70（601 项测试、八项门槛），而当时已经是 0.7.88（642 项、九项）。
+    用户按旧清单验，看到"ui-check 29 项"却发现实际跑出 37 项，会怀疑哪边不对。
+
+    这里只校验**可机械比对**的三件事：
+      1. 标题里的版本号 == 代码版本
+      2. 正文声明的单元测试数 == AGENTS.md 里的数（AGENTS 有测试盯着）
+      3. 正文列出的门槛条目数 == check-all.sh 里实际跑的门槛数
+    """
+    import re
+
+    import zw_core
+
+    doc = (ROOT / "docs/交付验收清单.md").read_text(encoding="utf-8")
+
+    # ① 声明性版本号：只看**标题行**与 `版本：**x.y.z**` 这种声明处。
+    #
+    # 不能全文匹配：文档正文里提到历史修复版本是**合理**的
+    # （"0.7.83 修过把'直连'显示错的问题"），而 `0.8078.79` 是 Chromium 版本。
+    # 全文匹配会把这两类都报成"过期"，噪音盖住真问题。
+    # 第一版我甚至只取第一处匹配，结果故意改错标题都抓不到 —— 两个极端都试过了。
+    declared = set(re.findall(r"^#.*?v(\d+\.\d+\.\d+)", doc, re.M))
+    declared |= set(re.findall(r"^版本：\*\*(\d+\.\d+\.\d+)\*\*", doc, re.M))
+    assert declared, "交付清单里找不到声明性的版本号"
+    stale = sorted(v for v in declared if v != zw_core.__version__)
+    assert not stale, (
+        f"交付清单声明的版本是 {stale}，当前是 {zw_core.__version__}"
+    )
+
+    # ② 单元测试数：与 AGENTS.md 声明一致
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    am = re.search(r"tests/\s+(\d+) 项单元测试", agents)
+    assert am, "AGENTS.md 里没找到测试数声明"
+    n_agents = am.group(1)
+    assert f"**{n_agents} 项**" in doc or f"{n_agents} passed" in doc, (
+        f"交付清单没写当前测试数 {n_agents}"
+    )
+
+    # ③ 门槛条目数：check-all.sh 里有几个 `pass "xxx"` 就是几项
+    sh = (ROOT / "scripts/check-all.sh").read_text(encoding="utf-8")
+    gates = set(re.findall(r'^\s*pass "([a-z0-9\-]+)"', sh, re.M))
+    listed = set(re.findall(r"^([a-z0-9\-]+)\s+✅", doc, re.M))
+    missing = sorted(gates - listed)
+    assert not missing, (
+        "交付清单里缺这些门槛的结果行：" + ", ".join(missing)
+    )
