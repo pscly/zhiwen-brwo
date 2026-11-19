@@ -983,6 +983,37 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
 
         state["core_on"] = True
         state["base"] = base
+
+        # **接管到的是旧版本？** 这是"装了新版但版本号没变"的唯一解释：
+        # 之前手动跑的便携版/旧安装版一直占着 8730，新客户端只探 /healthz
+        # 就接管了它。必须当场说清楚，并给一键接管，否则用户永远升不上去。
+        old_ver = str(getattr(core, "attached_version", "") or "")
+        if old_ver:
+            log(f"注意：复用的是**旧版本**本机服务 {old_ver}（当前客户端 {__version__}），"
+                f"端口 {core.live_port}。升级还没生效。", "warn")
+            try:
+                from tkinter import messagebox as _mb
+
+                if _mb.askyesno(
+                    APP_NAME + " · 版本不一致",
+                    f"这台机器上已经有一个**旧版本**的知纹服务在运行（{old_ver}，端口 {core.live_port}）"
+                    f"\n当前客户端是 {__version__}，现在接的是旧的那个，所以升级不生效。"
+                    "\n\n要关掉旧实例、改用当前版本吗？\n（只关本程序的进程，不碰其它程序）",
+                ):
+                    def _after_takeover(res: tuple[bool, str]) -> None:
+                        okk, msg = res
+                        log(msg, "ok" if okk else "bad")
+                        if okk:
+                            state["core_on"] = True
+                            set_phase("connected", "已连接")
+                            refresh_stats()
+                            profiles_panel.refresh(force=True)
+                        else:
+                            set_phase("error", "接管失败")
+
+                    run_bg(core.take_over, _after_takeover)
+            except Exception:  # noqa: BLE001 —— 提示失败不能影响已建立的连接
+                pass
         # 配置里关掉的话，连上后立刻把 core 侧也关掉（默认值是开）
         if not bool(cfg.get("shell_enabled", True)):
             run_bg(

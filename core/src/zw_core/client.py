@@ -45,6 +45,8 @@ from typing import Any
 # "attempted relative import with no known parent package"。
 # 源码运行时 `zw-client` 入口和 `python -m zw_core.client` 两种方式也都兼容绝对导入。
 
+from . import __version__
+
 APP_NAME = "知纹"
 CONFIG_DIR_ENV = "ZW_CLIENT_HOME"
 
@@ -527,6 +529,34 @@ class Heartbeat:
                     return
 
 
+def _proc_name(pid: int) -> str:
+    """取进程名（用于"这到底是不是我们自己的程序"的判断）。"""
+    try:
+        from .services.proc import run_hidden
+
+        if sys.platform == "win32":
+            out = run_hidden(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=8)
+            line = (out.stdout or "").strip()
+            return line.split(",")[0].strip(' "') if line else ""
+        out = run_hidden(["ps", "-p", str(pid), "-o", "comm="],
+                         capture_output=True, text=True, timeout=8)
+        return (out.stdout or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _kill_pid(pid: int) -> bool:
+    """结束一个进程。失败返回 False。"""
+    try:
+        from .services import engines as _engines
+
+        return _engines.terminate(pid, grace=3) != "" or not _engines.pid_alive(pid)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _resolve_core_port(cfg: dict[str, Any]) -> int:
     """客户端该监听哪个端口。
 
@@ -569,6 +599,9 @@ class LocalCore:
         self.error = ""
         # 附到"已经在跑的实例"上（没有自己起服务）。停止时不该把别人的关掉。
         self.attached = False
+        # 接管到的那个实例的版本（空 = 同版本或没读出来）。与 `__version__` 不同就说明
+        # 复用了一个旧 core —— 界面要据此提示，否则"升级了但版本没变"无从解释。
+        self.attached_version = ""
 
     @property
     def live_port(self) -> int:
@@ -582,6 +615,54 @@ class LocalCore:
             return httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=timeout).status_code == 200
         except Exception:
             return False
+
+    def _remote_version(self, port: int) -> str:
+        """读某个已在运行的本机服务的版本（读不到返回空串）。"""
+        try:
+            import httpx
+
+            r = httpx.get(f"http://127.0.0.1:{port}/api/v1/meta", timeout=3)
+            if r.status_code == 200:
+                return str(((r.json() or {}).get("data") or {}).get("version") or "")
+        except Exception:  # noqa: BLE001 —— 读不到就当没版本，不影响复用
+            pass
+        return ""
+
+    def take_over(self) -> tuple[bool, str]:
+        """关掉占着端口、但**版本不是当前客户端**的旧本机服务，然后用自己的版本重启。
+
+        返回 (是否成功, 说明)。只在"接管的那个 core 版本不一致"时才有意义 ——
+        这是"装了新版本但版本号没变"的正解：旧便携版/旧安装版一直占着 8730，
+        新客户端只探 `/healthz` 就接管了它，于是永远跑旧代码。
+
+        ## 安全边界
+        只杀**监听这个端口的那个进程**，并且它的可执行文件名必须含 `zhiwen`
+        （我们的程序名），否则拒绝 —— 绝不去杀用户的浏览器或别的服务。
+        """
+        if not self.attached:
+            return False, "当前没有接管别的实例，不需要接管"
+        port = self.live_port
+        from .services import engines as _engines
+
+        pid = _engines.port_owner_pid(port)
+        if pid <= 0:
+            return False, f"查不到监听 {port} 的进程"
+        name = _proc_name(pid)
+        if "zhiwen" not in name.lower():
+            return False, f"端口 {port} 被非本程序占用（{name or '未知'}），不会去动它"
+        if not _kill_pid(pid):
+            return False, f"关不掉旧实例（pid {pid}）"
+        # 等端口真的释放（Windows 上端口回收有延迟）
+        for _ in range(40):
+            if self._port_bindable(port):
+                break
+            time.sleep(0.25)
+        self.attached = False
+        self.attached_version = ""
+        self.actual_port = 0
+        if not self.start():
+            return False, self.error or "用当前版本重启失败"
+        return True, f"已接管端口 {port}，现在跑的是 {__version__}"
 
     @staticmethod
     def _port_bindable(port: int) -> bool:
@@ -616,13 +697,31 @@ class LocalCore:
         return self._health_on(self.live_port)
 
     def start(self, device_id: str = "", hub_url: str = "") -> bool:
-        # 已在跑（自己之前起的，或用户另开了一个）：直接复用，不要起第二个
+        # 已在跑（自己之前起的，或用户另开了一个）：复用，不要起第二个。
+        #
+        # ## 但必须校验版本（2026-11-19 云电脑真机）
+        #
+        # 用户反复反馈"装了新版本，版本号还是旧的"。查下来是这样：
+        # 他之前手动跑过一个**便携版**（在 Downloads 里双击的），它一直占着 8730；
+        # 之后每次覆盖安装新版本，新客户端启动时**只探了 /healthz 就接管了**这个
+        # 旧 core —— 版本号当然永远是旧的，升级等于没生效。
+        #
+        # 而且这种"静默接管"比报错更糟：界面一切正常，只是跑的是旧代码。
+        # 所以这里记下对方的版本，不一致就**大声说出来**（GUI 会显示警告 +
+        # 「使用当前版本」按钮，见 `take_over`）。
         for cand in [self.port] + [self.port + i for i in range(1, self.PORT_SCAN)]:
             if self._health_on(cand):
                 self.actual_port = cand
                 self.attached = True
                 if cand != self.port:
                     self.error = ""      # 复用一个非首选端口是正常状态，不算错
+                other = self._remote_version(cand)
+                if other and other != __version__:
+                    self.attached_version = other
+                    logging.getLogger("zw.client").warning(
+                        "复用了一个**旧版本**的本机服务：%s（当前客户端是 %s，端口 %s）。"
+                        "升级不会生效 —— 点界面上的「使用当前版本」或先关掉那个旧实例。",
+                        other, __version__, cand)
                 return True
 
         # 首选端口被占（常见：另一个客户端实例 / 上次没退干净 / 别的程序）→ 往后找
