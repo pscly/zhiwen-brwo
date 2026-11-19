@@ -1,5 +1,65 @@
 # CHANGELOG
 
+## 0.7.99 — 2026-11-19
+
+**常驻终端打通了（不需要设备升级）；顺带补上 hub 侧心跳。**
+
+### 一、hub 主动 ping —— 老客户端也能保持在线
+
+0.7.97 修的是**设备侧**发 ping，但那只对新客户端有效。手里还是 0.7.95 及更早的
+机器照样安静 90 秒被判掉线。而设备**本来就**实现了 `ping → pong`
+（`termhub._handle`），所以让 hub 主动发 ping 就能立刻覆盖它们：
+
+```python
+keepalive = asyncio.create_task(link.keepalive())   # 每 30 秒发一次 {"t":"ping"}
+```
+
+这个修复**不用等用户升级**，改完 hub 就能验证 —— 实测部署后
+`realtime` 从 `False` 变成 **`True`**。
+
+> 顺手抓到一个潜在崩溃：`hub/main.py` **从来没有导入过 asyncio**，
+> 我加了 `asyncio.create_task` 之后会 NameError。已补 import，并加了断言。
+
+### 二、`scripts/term.py` —— 真正的常驻终端
+
+`/api/v1/shell/exec` 是一问一答、每条独立（cwd 不保持）。常驻终端走
+设备到 hub 的持久 WebSocket，cwd 保持、输出流式。
+
+```bash
+python scripts/term.py --login --user <用户> --password <密码>   # cookie 存 ~/.dsh
+python scripts/term.py -c "cd C:/Users/Administrator/AppData/Local/zhiwen && dir /b engines"
+```
+
+实测（云电脑 0.7.98）：
+
+```
+[会话已开] cwd=C:\Users\Administrator\AppData\Local\zhiwen
+C:\Users\Administrator\AppData\Local\zhiwen
+ungoogled-157.0.8103.78-1.1
+```
+
+`cd` 之后再 `cd` 仍停在同一目录 —— 说明是同一个长驻会话，不是每条新开。
+
+**鉴权只能用面板 cookie**：本部署里 hub 容器的 `ZW_HUB_TOKEN` 是空的
+（`.env` 里那行被注释了），`?token=` 这条路直接 1008 unauthenticated。
+这条已经写进脚本注释，免得下次再撞。
+
+### 三、`scripts/winrun.py` —— 可靠的远程执行
+
+排查时反复踩引号转义（远端 shell 把 `"` 转成 `\"`、`&` 被 cmd 当分隔符）。
+改成 PowerShell `-EncodedCommand`（base64 UTF-16LE），命令行里只剩字母数字，
+一次就成；并前置 `$ProgressPreference='SilentlyContinue'` 压掉进度流
+（一次成功调用会在 stderr 塞 1.5KB 的 CLIXML，把真错误淹没）。
+
+### 测试
+
+662 → **663 项**（新增 hub keepalive 调度 + `hub/main.py` 必须导入 asyncio）。
+
+> 我上一轮加的"交付清单防过期"测试这轮**自己先报了一功**：版本升到 0.7.99
+> 但清单还写着 0.7.98，CI 直接红并点名。已同步。
+
+九项门槛全绿（663 / 34 / 73 / 13 / 23 / 81 / 43 / 12 / 42）。
+
 ## 0.7.98 — 2026-11-19
 
 **远程执行通道：按钮开关、默认开启、装完即生效。**

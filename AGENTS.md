@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   662 项单元测试（含真起 hub 的同步集成测试）
+tests/   663 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由内核提供：`fingerprint-chromium`（`--fingerprint=<种子>`）。
@@ -81,6 +81,27 @@ ZW_CORE=http://127.0.0.1:8730 ZW_ADMIN_TOKEN=xxx ZW_SYNC_PASSWORD=xxx \
 
 环境变量见 `docs/03-部署指南.md` §4。开发用的样例在 `.env.test`（不入 git）。
 
+### 远程操作云电脑的两个工具
+
+```bash
+# 常驻终端（长驻 shell 会话，cwd 保持、输出流式）—— 经 hub 中继，不需要对方开端口
+python scripts/term.py --login --user <面板用户> --password <面板密码>   # 存 cookie 到 ~/.dsh
+python scripts/term.py                                   # 交互式
+python scripts/term.py -c "cd C:/Users/Administrator && dir"
+
+# 一次性执行（走 core 的 /api/v1/shell/exec）
+python scripts/winrun.py -c "Get-ChildItem \$env:LOCALAPPDATA"
+python scripts/winrun.py -f task.ps1
+```
+
+**为什么 `winrun.py` 必须用 `-EncodedCommand`**：远端 shell 会把 `"` 转成 `\"`，
+`&` 失去保护被 cmd 当分隔符（rc=3）；`%LOCALAPPDATA%` 也不展开。
+改成 base64(UTF-16LE) 后命令行里只剩字母数字，一次就成。
+
+**为什么 `term.py` 只用 cookie**：本部署里 hub 容器的 `ZW_HUB_TOKEN` 是**空的**
+（`.env` 里那行被注释掉了，准入靠设备注册表），所以 `?token=` 这条路走不通，
+只能用面板会话 cookie。
+
 ---
 
 ## 五、改代码的规矩
@@ -115,7 +136,7 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 想逐项跑（排错时用）：
 
 ```bash
-.venv/bin/python -m pytest tests -q            # 662 passed, 2 skipped
+.venv/bin/python -m pytest tests -q            # 663 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 23 通过 / 0 失败（网关接管）
@@ -148,7 +169,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - **九项门槛**：631 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、43 条客户端控制台断言、42 条客户端 GUI 断言、23 项网关接管 —— 全绿
-- hub **0.7.98** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- hub **0.7.99** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
