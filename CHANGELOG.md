@@ -1,5 +1,63 @@
 # CHANGELOG
 
+## 0.7.95 — 2026-11-19
+
+**清掉扩展库里的垃圾条目；顺手修好"包名显示成 `__MSG_xxx__`"。**
+
+### 一、扩展库清理（云电脑实操）
+
+删 CookieManager 时发现库里还有两条看着可疑的，先读 manifest 确认身份再删（不靠名字猜）：
+
+| slug | 读到的 manifest | 结论 |
+|---|---|---|
+| `__msg_extname__` | `"author": {"email": "docs-hosted-app-own@google.com"}` | **Google Docs Offline** 组件扩展，浏览器自带 |
+| `edge-relevant-text-changes` | `"description": "Edge relevant text changes on select websites…"` | **Edge 自带** |
+| `probewin` | `{"name":"ProbeWin"}` | 我自己做探针留下的测试件 |
+
+三条都**没有被任何环境或默认包引用**（查过才删）。删完库从 9 条降到 **5 条**，正好是你要的：
+YesCaptcha / 脚本猫 / 沉浸式翻译 / Cookie-Editor / Bitwarden。
+
+### 二、包名显示成 `__MSG_xxx__`
+
+清完看包列表，5 个默认包的显示名有 4 个是占位符：
+
+```
+__MSG_extName__   __MSG_brandName__   __MSG_scriptcat__   __MSG_name__
+```
+
+原因：这些包是**早期版本**建的，那时扩展名还没做 `_locales` 解析，占位符被直接存进了包元数据。
+
+修名字有两条路：写数据库迁移，或**读取时解析**。选后者 —— 存量包自动变好，
+不用迁移，也不怕旧版本再写坏一次：
+
+```python
+def _resolve_pack_name(meta):        # 只对"整体就是一个 __MSG_xxx__"的名字生效
+    ...  # 从扩展目录的 _locales 现场解析；解析不出来就原样返回，不编造
+```
+
+出参同时给 `name`（解析后，界面用）和 `name_raw`（原始值，便于排查）。
+
+### 三、`check-all` 失败时不再只报"1 failed"
+
+连跑门槛时遇到过一次单点失败，但脚本的 `fail` 分支只 `grep` 最后一行数字，
+**没留下用例名** —— 结果只能手工复现一遍才知道是哪个（而且脱开脚本又复现不出来，
+因为脚本会先 export `ZW_ROOT` / `ZW_CHROME_BIN`，pytest 继承它们）。
+
+现在会带出前 3 个失败用例名：
+
+```
+pytest  ❌ 失败 1 failed, 653 passed  →  tests/test_extstore.py::xxx
+```
+
+> 修完后连跑两次门槛都是 **654 项全过**，那次失败没再出现；单独复现、
+> 带相同环境变量复现、重复跑单文件三次也都是绿的。按偶发问题处理，
+> 但至少下次再犯能立刻定位到用例。
+
+### 测试
+
+653 → **654 项**（包名读取时解析）。九项门槛连跑两次全绿
+（654 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 39）。
+
 ## 0.7.94 — 2026-11-19
 
 **用户让删一个扩展，顺手把"探测三态"补彻底了 —— 之前只改了一半。**

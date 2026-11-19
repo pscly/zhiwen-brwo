@@ -764,3 +764,42 @@ def test_manifest_msg_placeholder_resolved_from_locales(tmp_path):
 
     # 普通名字原样返回
     assert packsvc._resolve_manifest_name(root, {"name": "普通名字"}, "k") == "普通名字"
+
+
+def test_pack_display_name_resolves_stale_msg_placeholder(tmp_path, monkeypatch):
+    """包名存成 `__MSG_xxx__` 时，**读取时**要还原成真名。
+
+    云电脑实测（2026-11-19）：早期版本建包时扩展名没做 `_locales` 解析，于是
+    5 个默认包的显示名里有 4 个是占位符 —— 界面上直接显示：
+
+        __MSG_extName__      __MSG_brandName__
+        __MSG_scriptcat__    __MSG_name__
+
+    用户看不懂。修法选"读取时解析"而不是写数据库迁移：存量包自动变好，
+    也不用担心旧版本又写坏一次。
+    """
+    import json as _json
+
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        ext = tmp_path / "src" / "MyExt"
+        (ext / "_locales" / "zh_CN").mkdir(parents=True)
+        (ext / "manifest.json").write_text(_json.dumps(
+            {"manifest_version": 3, "name": "__MSG_extName__", "version": "1.0"},
+            ensure_ascii=False), encoding="utf-8")
+        (ext / "_locales" / "zh_CN" / "messages.json").write_text(_json.dumps(
+            {"extName": {"message": "我的真名字"}}, ensure_ascii=False), encoding="utf-8")
+
+        made = packs.import_pack(src_path=str(ext), name="__MSG_extName__")
+        # 存储层保留原样（不改历史数据）
+        assert packs._load_meta(made["id"])["name"] == "__MSG_extName__"
+
+        listed = [p for p in packs.list_packs() if p["id"] == made["id"]][0]
+        assert listed["name"] == "我的真名字", listed["name"]
+        assert listed["name_raw"] == "__MSG_extName__", listed.get("name_raw")
+    finally:
+        config.reset_settings()

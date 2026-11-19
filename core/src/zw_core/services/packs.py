@@ -700,13 +700,47 @@ def _import_from_profile(profile_ref: str, name: str = "") -> dict[str, Any]:
 
 
 # ── 查询 ──────────────────────────────────────────────────
+def _resolve_pack_name(meta: dict[str, Any]) -> str:
+    """包的显示名。存的是 `__MSG_xxx__` 占位符时，**现场再解析一次**。
+
+    ## 为什么需要（2026-11-19 云电脑实测）
+
+    早期版本建包时扩展名还没做 `_locales` 解析，于是包名被存成
+    `__MSG_extName__` / `__MSG_brandName__` / `__MSG_scriptcat__` / `__MSG_name__` ——
+    界面上就直接显示这些占位符，用户莫名其妙。
+
+    修名字有两条路：迁移数据库，或**读取时解析**。选后者：
+    存量包自动变好，不用写迁移，也不怕旧版本又写坏一次。
+
+    只对"整体就是一个 `__MSG_xxx__`"的包名生效，正常名字一律原样返回。
+    """
+    name = str(meta.get("name") or "").strip()
+    if not name.startswith("__MSG_"):
+        return name
+    exts = meta.get("extensions") or []
+    for e in exts:
+        code = packs_root() / str(meta.get("id") or "") / str(e.get("code_dir") or "")
+        manifest = _read_manifest(code) or {}
+        # 走模块内的包装函数（`resolve_manifest_name` 是函数内导入的，
+        # 这里直接调会 NameError —— 写完先跑一遍就知道）
+        resolved = _resolve_manifest_name(code, manifest, "")
+        if resolved:
+            return resolved
+        alt = str(e.get("name") or "").strip()
+        if alt and not alt.startswith("__MSG_"):
+            return alt
+    return name          # 实在解析不出来就原样返回，不编造
+
+
 def _summary(meta: dict[str, Any]) -> dict[str, Any]:
     pdir = packs_root() / str(meta.get("id") or "")
     size = _dir_size(pdir) if pdir.is_dir() else 0
     src = meta.get("source") or {}
     return {
         "id": meta.get("id", ""),
-        "name": meta.get("name", ""),
+        # 显示名走解析（存量包的 `__MSG_xxx__` 会在这里被还原成真名）
+        "name": _resolve_pack_name(meta),
+        "name_raw": meta.get("name", ""),
         "path": str(pdir),
         "created_at": meta.get("created_at", 0),
         "is_default": bool(meta.get("is_default")),

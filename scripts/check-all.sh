@@ -56,7 +56,11 @@ echo "════════ 1/8 单元测试 ════════"
 if out=$("$VENV" -m pytest tests -q --timeout=200 2>&1); then
   pass "pytest" "$(echo "$out"|grep -E '^[0-9]+ passed'|tail -1)"
 else
-  fail "pytest" "$(echo "$out"|grep -E 'failed|error'|tail -1)"
+  # **必须带出失败用例名**：只报"1 failed"时无从下手，得再手工复现一次。
+  # 而且这个脚本会先 export ZW_ROOT / ZW_CHROME_BIN 等变量，pytest 会继承 ——
+  # 有些偶发失败只在"带着这些变量"时出现，脱开脚本又复现不了。
+  _names=$(echo "$out" | grep -E '^FAILED ' | sed 's/^FAILED //' | head -3 | tr '\n' ' ')
+  fail "pytest" "$(echo "$out"|grep -E 'failed|error'|tail -1)${_names:+  →  $_names}"
 fi
 
 echo "════════ 起一个自检用 core ════════"
