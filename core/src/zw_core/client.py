@@ -45,7 +45,11 @@ from typing import Any
 # "attempted relative import with no known parent package"。
 # 源码运行时 `zw-client` 入口和 `python -m zw_core.client` 两种方式也都兼容绝对导入。
 
-from . import __version__
+# **必须是绝对导入**：PyInstaller 的入口是 `client.py`，以顶层脚本身份执行，
+# 没有父包 —— `from . import __version__` 会报
+# "attempted relative import with no known parent package"，
+# 产物一跑就崩（CI 的冒烟测试会拦住，本地打包也能复现）。
+from zw_core import __version__
 
 APP_NAME = "知纹"
 CONFIG_DIR_ENV = "ZW_CLIENT_HOME"

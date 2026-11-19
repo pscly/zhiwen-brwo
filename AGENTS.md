@@ -14,7 +14,7 @@ core/    zw-core：每台电脑一个。管环境、开浏览器、给局域网�
 hub/     zw-hub：一台就够（已部署在 192.168.3.5:8700）。存加密快照 + 跨机租约
 docs/    全中文文档
 scripts/ 部署与自检脚本
-tests/   669 项单元测试（含真起 hub 的同步集成测试）
+tests/   670 项单元测试（含真起 hub 的同步集成测试）
 ```
 
 **它不实现指纹**。指纹由内核提供：`fingerprint-chromium`（`--fingerprint=<种子>`）。
@@ -136,7 +136,7 @@ bash scripts/verify-release.sh v0.8.0     # 发布后：下载产物 → 跑它�
 想逐项跑（排错时用）：
 
 ```bash
-.venv/bin/python -m pytest tests -q            # 669 passed, 2 skipped
+.venv/bin/python -m pytest tests -q            # 670 passed, 2 skipped
 .venv/bin/python scripts/e2e-check.py          # 73 通过 / 0 失败 / 3 跳过（配主密码+hub+令牌+批准设备）
 .venv/bin/python scripts/e2e-cross-machine.py  # 30 通过 / 0 失败（两台真机器 + hub）
 node scripts/gateway-check.cjs                 # 23 通过 / 0 失败（网关接管）

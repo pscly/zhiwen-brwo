@@ -52,12 +52,31 @@ marker={"shell_enabled": true}          ← 安装器确实写了标记
 
 **结论：安装本身是成功的，锅在"接管旧 core"。**
 
+### 打包事故：相对导入让产物一启动就崩
+
+首次发 0.8.0 三个平台全 fail，失败在 CI 的「冒烟测试」那一步（不是编译）。
+本地复现：
+
+```
+ImportError: attempted relative import with no known parent package
+[PYI-2409492:ERROR] Failed to execute script 'client'
+```
+
+原因是我给 `client.py` 加了 `from . import __version__`。PyInstaller 的入口就是
+`core/src/zw_core/client.py`，它以**顶层脚本**身份执行、没有父包 —— 相对导入必崩。
+
+**源码模式完全正常**（`import zw_core.client` 没事），所以 pytest 670 项全绿也发现不了。
+已改成 `from zw_core import __version__`，并加一条测试**禁止 client.py 顶层出现相对导入**。
+
+> 这正是 `AGENTS.md` 里说的"源码绿 ≠ 二进制能用"：靠打包产物跑一次 `--selftest` 才抓到。
+
 ### 测试
 
-663 → **669 项**：接管记版本、不一致要 WARNING、`take_over` 的进程名白名单、
-复用 `engines.port_owner_pid`、GUI 必须提示并可接管。
+663 → **670 项**：接管记版本、不一致要 WARNING、`take_over` 的进程名白名单、
+复用 `engines.port_owner_pid`、GUI 必须提示并可接管、client.py 不许相对导入。
 
-九项门槛全绿（669 / 34 / 73 / 13 / 23 / 81 / 43 / 12 / 42）。
+九项门槛全绿（670 / 34 / 73 / 13 / 23 / 81 / 43 / 12 / 42）。
+本地打包产物 `--selftest` **14 项全过**。
 
 ## 0.7.99 — 2026-11-19
 

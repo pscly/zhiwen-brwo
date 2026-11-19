@@ -78,3 +78,31 @@ def test_gui_surfaces_the_mismatch_and_offers_takeover():
     assert "attached_version" in gui
     assert "take_over" in gui
     assert "升级还没生效" in gui or "升级不会生效" in gui
+
+
+def test_client_module_uses_absolute_import_for_version():
+    """`client.py` 里**不能**用相对导入取 `__version__`。
+
+    PyInstaller 的入口就是 `core/src/zw_core/client.py`，它以**顶层脚本**身份执行，
+    没有父包。`from . import __version__` 会让产物一启动就崩：
+
+        ImportError: attempted relative import with no known parent package
+
+    而源码模式（`import zw_core.client`）完全正常 —— 所以 `pytest` 全绿也发现不了，
+    只有打包产物跑一次才暴露。CI 的「冒烟测试」那一步就是干这个的（0.8.0 首次
+    发布三平台全红就是栽在这里）。
+
+    这条测试把 import 形式钉死，别再退回相对导入。
+    """
+    import ast
+
+    tree = ast.parse(_src())
+    bad = []
+    for node in tree.body:                 # 只看模块顶层
+        if isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:      # level>0 == 相对导入
+                bad.append(f"line {node.lineno}: from {'.'*node.level}{node.module or ''} import ...")
+    assert not bad, "client.py 顶层有相对导入（PyInstaller 入口会崩）：\n  " + "\n  ".join(bad)
+
+    # 且必须真的能取到 __version__
+    assert "from zw_core import __version__" in _src()
