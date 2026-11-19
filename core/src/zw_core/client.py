@@ -224,15 +224,54 @@ def _restrict_file(p: Path) -> None:
         pass
 
 
+# 只在**写盘失败**时才记的兜底值。正常路径**不用**它 ——
+# 删掉配置文件就该换一个新机器码，这是既有语义，不能被缓存挡住。
+_DEVICE_ID_FALLBACK = {"value": "", "cfg": ""}
+
+
 def ensure_device_id() -> str:
-    """机器码：首次生成，之后一直用。删掉这个文件就等于换了一台"新机器"。"""
+    """机器码：首次生成，之后一直用。删掉这个文件就等于换了一台"新机器"。
+
+    ## 写盘失败不能静默（2026-11-20）
+
+    原来最后一句是裸的 `save_config(cfg)`。写盘失败（目录只读、磁盘满、
+    被安全软件锁住）时，新机器码已经生成却**没进文件**；下次调用再生成一个
+    不同的 → 服务器上不断冒"新设备"，每个都要重新授权。
+    用户看到的现象就是"机器码一直在变"。
+
+    现在：
+      1. 写盘失败**不吞**（抛给调用方，界面能看到），并打一条说明后果的 ERROR；
+      2. 同时记进 `_DEVICE_ID_FALLBACK`，**本次运行内**再调用会返回同一个值，
+         不会一次运行里变来变去。
+
+    正常路径完全不变：成功写盘后不缓存任何东西，
+    删掉配置再调用照样得到新的机器码。
+    """
     cfg = load_config()
     did = (cfg.get("device_id") or "").strip()
     if did and len(did) >= 8:
         return did
+    # 上一次写盘失败留下的值：本次运行内继续用它，保证身份稳定。
+    # **但只在配置文件确实没被更新过时才用** —— 一旦配置里出现了新的
+    # device_id（比如用户手工修好、或换了配置目录），必须让新值生效，
+    # 不能拿旧兜底值把身份钉死。
+    if _DEVICE_ID_FALLBACK["value"] and _DEVICE_ID_FALLBACK["cfg"] == str(config_path()):
+        if not did:                       # 配置里仍然没有 device_id → 说明还是那份坏配置
+            return _DEVICE_ID_FALLBACK["value"]
     did = "zwd_" + secrets.token_urlsafe(24).replace("-", "").replace("_", "")[:32]
     cfg["device_id"] = did
-    save_config(cfg)
+    try:
+        save_config(cfg)
+    except OSError as exc:
+        _DEVICE_ID_FALLBACK["value"] = did
+        _DEVICE_ID_FALLBACK["cfg"] = str(config_path())
+        logging.getLogger("zw.client").error(
+            "机器码写不进配置文件（%s: %s）—— 本次运行仍用 %s…，"
+            "但**重启后会变成另一个机器码**，服务器会把它当成新设备，需要重新授权。"
+            "请检查配置目录是否可写：%s",
+            type(exc).__name__, exc, did[:16], config_dir(),
+        )
+        raise
     return did
 
 

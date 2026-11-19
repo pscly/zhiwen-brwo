@@ -67,3 +67,53 @@ def test_non_dict_json_is_not_used(tmp_path, monkeypatch):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
     assert cl.load_config() == {}
+
+
+def test_device_id_is_stable_within_one_run_even_if_save_fails(tmp_path, monkeypatch):
+    """写盘失败时，同一次运行内的机器码必须**稳定**。
+
+    ## 为什么（2026-11-20）
+
+    `ensure_device_id()` 原来是：
+
+    ```python
+    did = "zwd_" + secrets.token_urlsafe(24)[:32]
+    cfg["device_id"] = did
+    save_config(cfg)      # ← 抛 OSError 时，did 没落盘
+    return did
+    ```
+
+    写盘失败（目录只读、磁盘满、被安全软件锁）时，新机器码没进文件，
+    下次调用又生成一个**不同的** —— 服务器上就会不断冒"新设备"，
+    每个都要重新授权。用户看到的是"机器码一直在变"。
+
+    现在：先把值记进内存（本次运行内稳定），再写盘；写盘失败**不吞**
+    （冒给调用方，界面能看到原因），并打一条说明后果的 ERROR 日志。
+    """
+    cl = _cl(tmp_path, monkeypatch)
+    cl._DEVICE_ID_FALLBACK["value"] = ""      # 清掉上个用例的兜底值
+
+    real_save = cl.save_config
+    calls = {"n": 0}
+
+    def boom(cfg):
+        calls["n"] += 1
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cl, "save_config", boom)
+
+    first = None
+    try:
+        first = cl.ensure_device_id()
+    except OSError:
+        first = cl._DEVICE_ID_FALLBACK["value"]   # 写盘失败：值在兜底里
+        assert calls["n"] == 1
+    else:
+        raise AssertionError("写盘失败应该抛出来，不能静默")
+
+    # 再调一次：必须还是同一个（内存里记住了），不再尝试写盘
+    again = cl.ensure_device_id()
+    assert again == first, f"同一次运行内机器码变了：{first} → {again}"
+    assert calls["n"] == 1, "第二次不该再写盘"
+
+    monkeypatch.setattr(cl, "save_config", real_save)
