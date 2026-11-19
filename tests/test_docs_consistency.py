@@ -507,3 +507,31 @@ def test_delivery_checklist_is_not_stale():
     assert not missing, (
         "交付清单里缺这些门槛的结果行：" + ", ".join(missing)
     )
+
+
+def test_delivery_checklist_covers_every_requirement():
+    """交付清单必须覆盖用户的**每一条原始需求**。
+
+    这份清单是用户照着点一遍的验收单。如果某条需求在清单里找不到落点，
+    用户就会以为"这条没做"——哪怕代码里其实做了。
+
+    这里把用户原话里的 12 个要点逐条钉住（关键词取"最能代表这条"的那个）。
+    """
+    doc = (ROOT / "docs/交付验收清单.md").read_text(encoding="utf-8").lower()
+
+    need = {
+        "代理导入（带认证 socks5/http，密码打码）": ["socks5://user:pass", "导入代理", "***"],
+        "本机控制台免令牌": ["免令牌", "auth_required"],
+        "远程凭机器码进入": ["机器码"],
+        "监听 0.0.0.0": ["0.0.0.0"],
+        "端口可通过配置改": ["zw_port"],
+        "创建后仍可改代理": ["改代理"],
+        "启动先恢复上次网页再加检测页": ["恢复上次", "remembered"],
+        "检测页含 IP／指纹／干净度": ["browserleaks", "ip123", "creepjs"],
+        "插件及其数据一起打包（Chrome 目录导入/扫描本机）": ["chrome 目录导入", "扫描本机"],
+        "新建默认带上、也可关闭": ["with_default_packs"],
+        "接口与开关齐备": ["api/v1"],
+        "默认内核 ungoogled": ["ungoogled"],
+    }
+    missing = [k for k, kws in need.items() if not any(w in doc for w in kws)]
+    assert not missing, "交付清单里找不到这些需求的落点：\n  " + "\n  ".join(missing)
