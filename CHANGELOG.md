@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## 0.8.14 — 2026-11-20
+
+**补上「把插件打包放到控制台」这一层 —— 之前它根本不存在。**
+
+### 缺的是什么
+
+用户原话：
+
+> 把现在 RXYCDP 浏览器的插件及其数据，最好能一起**打包放到我的控制台里面**。
+> 这样以后创建浏览器时，可以默认就把这些插件的数据都带上。
+
+查下来的事实：
+
+```
+core 的 packs 接口数       38
+hub 的接口总数             61
+hub 里跟 packs 有关的       0
+hub 的文件上传/下载能力     无
+```
+
+也就是说，扩展包**只存在每台机器的 core 本地**（`<数据目录>/packs/`）。
+换一台机器就要重新导入一次 —— 那叫本机缓存，不叫"放到控制台"。
+
+### 补了什么：`hub/src/zw_hub/packstore.py` + 5 个接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/v1/packs?name=&origin=&note=&id=` | 上传 zip（**原始字节流**） |
+| GET | `/v1/packs` | 列表 |
+| GET | `/v1/packs/{id}` | 详情 |
+| GET | `/v1/packs/{id}/download` | 下载，响应头带 `X-ZW-Sha256` |
+| DELETE | `/v1/packs/{id}` | 删除 |
+
+设计取舍：
+
+- **二进制落盘、索引进 SQLite**：包几十 MB，塞进 SQLite 会让库臃肿、备份变慢。
+- **不用 `UploadFile`**：那要额外装 `python-multipart`。包本来就是二进制 zip，
+  直接读 `request.body()` 就够，不给 hub 加新依赖。
+- **CAS 不覆盖**（409 `PACK_EXISTS`）、**下载前校验 sha256**（不一致报
+  `PACK_CORRUPTED`，宁拒不送）、**id 只允许字母数字与 `-_`**（会拼进文件路径，
+  必须挡穿越）。
+
+### 实测（真起 hub，走 HTTP）
+
+```
+上传: a1cc65bd2c89 | 扩展数: 1 | 带数据: True
+列表: [('RXYCDP模拟', 1)]
+下载字节数: 312 | sha 一致: True
+删除: a1cc65bd2c89 | 剩余: 0
+```
+
+### 被门禁抓住的一件事
+
+新增了 5 个错误码（`PACK_EXISTS` / `PACK_EMPTY` / `PACK_BAD_ID` /
+`PACK_CORRUPTED` / `PACK_FILE_MISSING`），但忘了登记到接口文档的错误码全表 ——
+`test_every_raised_error_code_is_documented` 直接红。补表后 712 项全绿。
+
+### 测试
+
+704 → **712 项**（`tests/test_hub_packstore.py` 8 条）：识别扩展数与是否带数据、
+下载 sha 一致、同 id 不覆盖、被篡改要报错、非法 id 挡穿越、删除干净、空包拒绝。
+
+九项门槛全绿（712 / 34 / 73 / 13 / 23 / 81 / 43 / 12 / 42）。
+
 ## 0.8.12 — 2026-11-20
 
 **带认证的 HTTP 代理也做了端到端验证（上一版验的是 socks5）。**

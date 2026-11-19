@@ -46,6 +46,7 @@ from .config import get_settings
 from .devices import DeviceError, DeviceStore
 from .shell import ShellError, ShellQueue
 from .termrelay import relay as term_relay
+from . import packstore
 from .store import HubError, Store
 
 logger = logging.getLogger("zw.hub")
@@ -1280,6 +1281,85 @@ def shell_submit(
     elif _reachable is not None:
         out["core_reachable"] = _reachable
     return ok(out)
+
+
+# ── 扩展包库 ──────────────────────────────────────────────
+#
+# 用户要求：把浏览器里的插件及其数据「一起打包放到控制台」，以后任意机器建环境
+# 时都能默认带上。之前包只存在各机器 core 本地（`<数据目录>/packs/`），换台机器
+# 就得重新导入 —— 那是本机缓存，不是"放到控制台"。
+#
+# 这组接口把那一层补上：core 导出 → 上传到这里 → 别的机器下载 → 导入本地。
+
+
+@app.post("/v1/packs", tags=["扩展包"], dependencies=[Auth],
+          summary="管理员：上传一个扩展包（原始 zip 字节流）")
+async def pack_upload(
+    request: Request,
+    actor: str = AdminAuth,
+) -> dict[str, Any]:
+    """收一个 zip 包。**同 id 不覆盖**（CAS），要更新请先删再传。
+
+    刻意不用 `UploadFile`：那需要额外装 `python-multipart`。
+    这里直接读原始 body —— 包本来就是二进制 zip，没有任何表单字段的必要。
+    查询参数：`name`、`origin`、`note`、`id`（不给就自动生成）。
+    """
+    data = await request.body()
+    q = request.query_params
+    try:
+        info = packstore.put(
+            get_settings(), data,
+            name=q.get("name", ""), origin=q.get("origin", ""),
+            note=q.get("note", ""), pack_id=q.get("id", ""),
+        )
+    except packstore.PackStoreError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    logger.info("管理员上传扩展包 id=%s name=%s size=%s actor=%s",
+                info["id"], info["name"], info["size"], actor)
+    return ok(info)
+
+
+@app.get("/v1/packs", tags=["扩展包"], dependencies=[Auth],
+         summary="管理员：列出控制台里的扩展包")
+def pack_list() -> dict[str, Any]:
+    return ok({"packs": packstore.listing(get_settings())})
+
+
+@app.get("/v1/packs/{pack_id}", tags=["扩展包"], dependencies=[Auth],
+         summary="管理员：单个扩展包的详情")
+def pack_detail(pack_id: str) -> dict[str, Any]:
+    try:
+        return ok(packstore.get(get_settings(), pack_id))
+    except packstore.PackStoreError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+
+
+@app.get("/v1/packs/{pack_id}/download", tags=["扩展包"], dependencies=[Auth],
+         summary="管理员：下载扩展包（带 sha256 头，供下载方校验）")
+def pack_download(pack_id: str) -> Response:
+    try:
+        data, sha = packstore.read_bytes(get_settings(), pack_id)
+    except packstore.PackStoreError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "X-ZW-Sha256": sha,
+            "Content-Disposition": f'attachment; filename="{pack_id}.zip"',
+        },
+    )
+
+
+@app.delete("/v1/packs/{pack_id}", tags=["扩展包"], dependencies=[Auth],
+            summary="管理员：删除扩展包")
+def pack_delete(pack_id: str, request: Request, actor: str = AdminAuth) -> dict[str, Any]:
+    try:
+        info = packstore.delete(get_settings(), pack_id)
+    except packstore.PackStoreError as exc:
+        raise HubError(exc.status, exc.code, exc.message) from exc
+    logger.info("管理员删除扩展包 id=%s actor=%s", info["id"], actor)
+    return ok(info)
 
 
 # ⚠ 这条必须在下面的 `/{job_id}` 之前：段数一样，先声明才不会把 history 当 job_id
