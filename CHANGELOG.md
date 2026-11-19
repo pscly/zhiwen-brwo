@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## 0.8.5 — 2026-11-20
+
+**「插件及其数据一起打包」有个静默漏洞：把浏览器的 User Data 目录当路径传，数据全丢。**
+
+### 我是怎么发现的
+
+拿模拟的浏览器 User Data 目录跑整条导入链，结果：
+
+```
+包 id: 24d31ad83d29 | 扩展数: 2 | 默认: True
+  - 脚本猫UI    data=False  has_data=False   ← 数据没带上
+  - CookieTool  data=False  has_data=False
+```
+
+但扩展本身导入成功了，新建环境也真带上了插件 —— **只是登录态/配置全没跟着走**。
+
+### 根因
+
+界面上写的是「填那个浏览器的用户数据目录」，所以用户（我）自然传
+`.../User Data` 或 `.../User Data/Default`。
+
+而 `src_path` 分支把它当**扩展目录**处理：在 `User Data/Default/Extensions`
+里确实能翻到扩展并导入成功，但 `Local Extension Settings` 里的数据没人去读。
+
+> 我一开始还以为是 API 层丢了 `from_chrome` 参数 —— 查完发现是我自己传错了字段。
+> 但"传错字段还能导入成功、只悄悄丢数据"本身就是个该修的缺陷。
+
+### 修法
+
+`src_path` 进来先嗅一下浏览器目录结构（自己或 `Default`/`Profile N` 子目录里有
+`Extensions/` 或 `Local Extension Settings/`），命中就**自动改走 chrome 导入**：
+
+```python
+if src.is_dir() and _looks_like_browser_userdata(src):
+    return _import_from_chrome(str(src), name)
+```
+
+修完两种传法都带上数据：
+
+```
+User Data 根: 扩展数=2  data=[('脚本猫UI', True), ('CookieTool', True)]
+Default 层  : 扩展数=2  data=[('脚本猫UI', True), ('CookieTool', True)]
+```
+
+### 测试
+
+686 → **689 项**：传 `User Data` 带数据、传 `Default` 带数据、
+**普通扩展目录不能被误判**成浏览器目录（反向验证，避免矫枉过正）。
+
+九项门槛全绿（689 / 34 / 73 / 13 / 23 / 81 / 43 / 12 / 42）。
+
 ## 0.8.4 — 2026-11-20
 
 **客户端报上来的"core 为什么没起来"，hub 以前根本不收 —— 等于白报。**

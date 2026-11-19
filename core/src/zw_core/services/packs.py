@@ -330,6 +330,19 @@ def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
     if not src.exists():
         raise PackError("PACK_INVALID_SOURCE", f"路径不存在：{src}", 400)
 
+    # **用户很可能把"浏览器的 User Data 目录"当路径传进来**（非常自然：
+    # 界面上写的就是"填那个浏览器的用户数据目录"）。
+    #
+    # 以前这条会走进下面的"扩展目录"分支：它确实能在 `User Data/Default/Extensions`
+    # 里翻到扩展并**导入成功**，但 `Local Extension Settings` 里的**数据全丢了**
+    # —— 返回 `has_data=False`，而用户以为"插件和数据都带上了"。
+    # （2026-11-20 我自己就这么误判过一轮，还以为 API 丢参数。）
+    #
+    # 所以这里嗅一下浏览器目录结构，命中就自动改走 chrome 导入（带数据）。
+    if src.is_dir() and _looks_like_browser_userdata(src):
+        logger.info("路径像浏览器用户数据目录，自动按 chrome 导入（含 Local Extension Settings）：%s", src)
+        return _import_from_chrome(str(src), name)
+
     staging = s.staging_dir / f"pack.{uuid.uuid4().hex[:8]}"
     staging.mkdir(parents=True, exist_ok=True)
     try:
@@ -517,6 +530,28 @@ def _count_importable(ext_root: Path) -> int:
         except OSError:
             continue
     return n
+
+
+def _looks_like_browser_userdata(p: Path) -> bool:
+    """这个目录是不是浏览器的 User Data（或其中的 Default / Profile N）？
+
+    判据：自己或某个直接子目录里同时有 `Extensions/`，或者有
+    `Local Extension Settings/`。后者单独出现也算 —— 有的浏览器会把扩展
+    以未打包方式加载、`Extensions/` 是空的，但数据目录仍然有。
+    """
+    def _has_markers(d: Path) -> bool:
+        try:
+            return (d / "Extensions").is_dir() or (d / "Local Extension Settings").is_dir()
+        except OSError:
+            return False
+
+    if _has_markers(p):
+        return True
+    try:
+        children = [c for c in p.iterdir() if c.is_dir()]
+    except OSError:
+        return False
+    return any(_has_markers(c) for c in children if c.name == "Default" or c.name.startswith("Profile"))
 
 
 def _resolve_chrome_default(raw: str) -> Path:
