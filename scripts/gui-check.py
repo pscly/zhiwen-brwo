@@ -277,6 +277,22 @@ def main() -> int:
         check("导入弹窗里的按钮齐全（扫描本机 / 开始导入 / 取消）",
               all(k in dlg_btns for k in ("扫描本机", "开始导入", "取消")), str(dlg_btns))
 
+        print("\n— 新建环境浮层 —")
+        # `_Overlay` 不是 Frame（它内部自己管理浮层容器），所以**不能 pack** ——
+        # 构造出来就已经在 master 上建好结构了。
+        ov = gp.CreateProfileOverlay(t, theme, fonts, api=api,
+                                     on_submit=lambda v: True)
+        _pump(t, 0.4)
+        # 「当然也可以选择关闭」：必须有"带上默认扩展包"的勾选，且默认勾上
+        # 浮层控件挂在 master（根窗口）上，不是 ov 自己的子树 —— 从 t 遍历
+        ov_texts = _all_text(t)
+        check("新建浮层有「带上默认扩展包」勾选项",
+              "带上默认扩展包" in ov_texts, ov_texts[:160])
+        ov_vals = ov._values()
+        check("该勾选默认是开启的（默认行为不变）",
+              ov_vals.get("with_default_packs") == "1", repr(ov_vals.get("with_default_packs")))
+        ov.close()
+
         print("\n— 代理库面板 —")
         lib = gp.ProxyLibraryOverlay(t, theme, fonts, api=api,
                                      on_log=lambda m, k="": logs.append(m),
@@ -328,6 +344,36 @@ def _rows_of(panel) -> list:
     import tkinter as tk
 
     return [w for w in inner.winfo_children() if isinstance(w, tk.Frame)]
+
+
+def _all_text(widget) -> str:
+    """整棵控件树的可见文字（拼成一串，便于 `in` 断言）。"""
+    parts: list[str] = []
+    stack = [widget]
+    while stack:
+        w = stack.pop()
+        try:
+            txt = w.cget("text")
+            if txt:
+                parts.append(str(txt))
+        except Exception:
+            pass
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+    return " | ".join(parts)
+
+
+def _pump(root, seconds: float) -> None:
+    """驱动 Tk 事件循环若干秒（不用 mainloop，适合断言前的短暂等待）。"""
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            root.update()
+        except Exception:
+            break
+        time.sleep(0.03)
 
 
 def _row_text(row) -> str:

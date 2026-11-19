@@ -493,14 +493,16 @@ class CoreApi:
         return self.call("GET", "/api/v1/profiles")
 
     def create_profile(
-        self, name: str, group: str = "", note: str = ""
+        self, name: str, group: str = "", note: str = "",
+        with_default_packs: bool = True,
     ) -> tuple[bool, Any, dict[str, Any] | None]:
         # 注意字段名是 `group_name`（见 api.py 的 ProfileCreate）：
         # 传 `group` 会被 pydantic 当未知字段忽略，分组就静默丢了。
         return self.call(
             "POST",
             "/api/v1/profiles",
-            json_body={"name": name, "group_name": group, "note": note},
+            json_body={"name": name, "group_name": group, "note": note,
+                       "with_default_packs": with_default_packs},
         )
 
     def start_profile(self, ref: str) -> tuple[bool, Any, dict[str, Any] | None]:
@@ -855,6 +857,27 @@ class TextOverlay(_Overlay):
         self.result_label.pack(fill="x", pady=(3, 0))
         return self.result_label
 
+    def add_check_row(self, key: str, text: str, *, checked: bool = True,
+                      hint: str = "") -> None:
+        """在输入框下面插一个勾选项，值会以 `"1"` / `""` 出现在 `_values()` 里。
+
+        为什么需要它：`fields` 只支持文本输入，而"要不要带默认扩展包"这种开关
+        必须是个勾选。塞进文本框让用户输 y/n 是不可接受的。
+        """
+        row = tk.Frame(self.body, bg=self.theme.card2)
+        row.pack(fill="x", pady=(8, 0), before=self.error_label)
+        var = tk.StringVar(value="1" if checked else "")
+        box = tk.Frame(row, bg=self.theme.card2)
+        box.pack(anchor="w")
+        ttk.Checkbutton(box, text=text, style="Card.TCheckbutton",
+                        variable=var, onvalue="1", offvalue="").pack(side="left")
+        if hint:
+            tk.Label(row, text=hint, bg=self.theme.card2, fg=self.theme.faint,
+                     font=self.fonts["tiny"], anchor="w", justify="left",
+                     wraplength=320).pack(fill="x", pady=(2, 0))
+        self.vars[key] = var          # 复用 _values() 的收集逻辑
+        self._placeholders.pop(key, None)
+
     def set_result(self, msg: str, bad: bool = False) -> None:
         if self.result_label is None:
             return
@@ -1099,6 +1122,14 @@ class CreateProfileOverlay(TextOverlay):
             on_submit=on_submit,
         )
         self.api = api
+        # 「当然也可以选择关闭」：取消勾选就建一个不带插件/数据的干净环境。
+        # 用途：临时环境、做指纹对照、排查"是不是某个插件导致的问题"。
+        self.add_check_row(
+            "with_default_packs", "带上默认扩展包",
+            checked=True,
+            hint="默认会把「设为默认」的扩展包（插件+数据）一起带上；"
+                 "取消勾选则建一个干净的。",
+        )
         self.add_action_row("测试这个代理", self._test)
 
     def _test(self) -> None:
@@ -2338,8 +2369,11 @@ class ProfilePanel(tk.Frame):
         self._busy += 1
         self.set_status(f"正在创建「{name}」…")
         self.on_log(f"正在创建环境「{name}」", "info")
-        call_async(self, lambda: self.api.create_profile(name, group),
-                   lambda res: self._after_create(res, name, ov, proxy_text))
+        # 「当然也可以选择关闭」：勾选框的值是 "1"/""，这里转成布尔
+        with_defaults = (values.get("with_default_packs") or "") == "1"
+        call_async(self, lambda: self.api.create_profile(
+            name, group, with_default_packs=with_defaults),
+            lambda res: self._after_create(res, name, ov, proxy_text))
         return True
 
     def _after_create(self, res: tuple[bool, Any, dict[str, Any] | None],

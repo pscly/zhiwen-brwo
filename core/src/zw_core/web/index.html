@@ -1572,6 +1572,7 @@ function openProfileForm(profile) {
           <label class="switch"><input type="checkbox" id="f-sync_enabled" ${p.sync_enabled !== false ? 'checked' : ''}> 允许同步</label>
           <label class="switch"><input type="checkbox" id="f-cdp_enabled" ${p.cdp_enabled !== false ? 'checked' : ''}> 开放 CDP 端口</label>
           <label class="switch"><input type="checkbox" id="f-ephemeral" ${p.ephemeral ? 'checked' : ''} ${isEdit ? 'disabled' : ''}> 临时环境（不可导出）</label>
+          ${isEdit ? '' : `<label class="switch" title="默认带上「默认扩展包」（插件+数据）；取消勾选建一个干净的，适合对照测试或排查是不是插件导致的问题"><input type="checkbox" id="f-with_default_packs" ${p.with_default_packs !== false ? 'checked' : ''}> 带上默认扩展包</label>`}
         </div></div>
       </div>
       <div class="hint mt2">关闭 CDP 后 cookie / 页面类接口都不可用（它们全靠调试端口）。</div>
@@ -1635,6 +1636,9 @@ function collectProfileForm() {
     sync_enabled: b('f-sync_enabled'),
     cdp_enabled: b('f-cdp_enabled'),
   };
+  // 只在**新建**时有这个勾选（改环境时不动已绑定的扩展集合）
+  const wdp = $('#f-with_default_packs');
+  if (wdp) payload.with_default_packs = !!wdp.checked;
   const pidNode = $('#f-proxy-id');
   if (pidNode && pidNode.value) payload.proxy_id = pidNode.value;
   return payload;

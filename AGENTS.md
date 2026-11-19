@@ -123,7 +123,7 @@ node scripts/ui-check.cjs                      # 37 通过 / 0 失败（客户�
 ZW_CORE_IP=<本机LAN> ZW_CORE=http://127.0.0.1:8730 ZW_DEVICE_ID=zwd_xxx \
   node scripts/remote-console-check.cjs        # 12 通过 / 0 失败（远程凭机器码进控制台）
 node scripts/console-ui-check.cjs              # 81 通过 / 0 失败（hub 主控台，mock 后端）
-DISPLAY=:78 .venv/bin/python scripts/gui-check.py  # 37 通过 / 0 失败（客户端 tkinter GUI，含真改代理、扫描本机、下载内核）
+DISPLAY=:78 .venv/bin/python scripts/gui-check.py  # 39 通过 / 0 失败（客户端 tkinter GUI，含真改代理、扫描本机、下载内核、默认包开关）
 ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失败（检测页 + 标签恢复）
 ```
 
@@ -147,8 +147,8 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 ## 七、当前状态与待办
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
-- **九项门槛**：631 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、37 条客户端控制台断言、37 条客户端 GUI 断言、23 项网关接管 —— 全绿
-- hub **0.7.88** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
+- **九项门槛**：631 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**30 项跨机端到端**、81 条主控台断言、37 条客户端控制台断言、39 条客户端 GUI 断言、23 项网关接管 —— 全绿
+- hub **0.7.89** 在 3.5 的 Docker 里跑着；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
