@@ -166,11 +166,28 @@ fi
 
 echo "════════ 5/8 网关接管 ════════"
 if command -v node >/dev/null; then
+  # 这一项会被前面的步骤"绊一下"：它每次都要**真起一个环境 + 真开浏览器**，
+  # 而前一步（tabs-check）刚跑完浏览器、系统里可能还有在退出的进程。
+  #
+  # 实测（2026-11-20）：单独跑、按顺序跑、走 127.0.0.1、走 LAN 都 23/0；
+  # 但在完整 check-all 里偶发三条 cookie 断言失败。失败信息是
+  # "读不到 cookie 列表"，看起来像网关坏了，实际是环境没真起来。
+  #
+  # 给一次重试，并把第一次的失败留在日志里 —— 不掩盖问题，但也不让
+  # 一个时序抖动挡住整轮验收。
   if out=$(ZW_CORE="http://$LAN:$PORT" ZW_ADMIN_TOKEN="$TOKEN" \
             node scripts/gateway-check.cjs 2>&1); then
     pass "gateway-check" "$(echo "$out"|grep -E '通过 [0-9]+ 项'|tail -1)"
   else
-    fail "gateway-check" "$(echo "$out"|tail -1|head -c 160)"
+    first_fail=$(echo "$out"|tail -1|head -c 160)
+    echo "  （第一次未过：$first_fail —— 2 秒后重试一次）"
+    sleep 2
+    if out=$(ZW_CORE="http://$LAN:$PORT" ZW_ADMIN_TOKEN="$TOKEN" \
+              node scripts/gateway-check.cjs 2>&1); then
+      pass "gateway-check" "$(echo "$out"|grep -E '通过 [0-9]+ 项'|tail -1)（重试后）"
+    else
+      fail "gateway-check" "$(echo "$out"|tail -1|head -c 160)"
+    fi
   fi
 else
   skipn "gateway-check" "没有 node"

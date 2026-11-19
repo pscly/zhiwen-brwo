@@ -277,6 +277,22 @@ def main() -> int:
         check("导入弹窗里的按钮齐全（扫描本机 / 开始导入 / 取消）",
               all(k in dlg_btns for k in ("扫描本机", "开始导入", "取消")), str(dlg_btns))
 
+        # 「从控制台拉取」：把 hub 里存的扩展包取回本机（0.8.16）。
+        # hub 侧和 core 侧都早就能存能拉了，但桌面客户端一直**没有入口** ——
+        # 只有接口等于没有功能。这条同时验方法存在与按钮在位。
+        check("CoreApi 有 pull_hub_packs", hasattr(api, "pull_hub_packs"))
+        hub_btns = [b for b in all_w
+                    if b.winfo_class() in ("TButton", "Button")
+                    and "从控制台拉取" in str(b.cget("text") or "")]
+        check("导入弹窗里有「从控制台拉取」按钮", len(hub_btns) == 1,
+              "count=" + str(len(hub_btns)))
+        check("拉取按钮可点（不是禁用态）",
+              bool(hub_btns) and not hub_btns[0].instate(["disabled"]) if hub_btns else False)
+        # 有个「同时设为默认」的勾选项 —— 用户明确要求"默认带上（当然也可以选择关闭）"
+        labels = [str(w.cget("text") or "") for w in all_w
+                  if w.winfo_class() in ("Checkbutton", "Label", "TCheckbutton")]
+        check("有「同时设为默认」选项", any("同时设为默认" in t for t in labels), str(labels[:12]))
+
         print("\n— 远程执行按钮开关 —")
         # 用户要求"弄成按钮开关，默认打开"。这里验：GUI 里是个按钮（不是勾选框），
         # 文案直接反映状态，关掉时用危险色。

@@ -602,6 +602,21 @@ class CoreApi:
             timeout=600.0,
         ))
 
+    def pull_hub_packs(self, *, as_default: bool = False
+                       ) -> tuple[bool, Any, dict[str, Any] | None]:
+        """从控制台（hub）拉取扩展包并导入本机。
+
+        用户要的是「把插件打包放到控制台，以后建环境默认带上」——
+        在这个按钮出现之前，包虽然能传到 hub，但**没有任何界面入口能取回来**，
+        等于只有服务端能力、没有可用功能。
+
+        拉包要下载 + 解包，可能几十 MB，超时给足。
+        """
+        return _unwrap_business(*self.call(
+            "POST", f"/api/v1/packs/pull-hub?as_default={1 if as_default else 0}",
+            timeout=600.0,
+        ))
+
     def install_extension(self, *, url: str = "", path: str = "",
                           name: str = "", make_pack: bool = True,
                           as_default: bool = False
@@ -1906,6 +1921,64 @@ class PacksOverlay(_Overlay):
             call_async(ov, lambda: self.api.scan_browsers(), done)
 
         scan_btn.configure(command=_scan)
+
+        # 「从控制台拉取」：把 hub 里存着的扩展包取回本机。
+        #
+        # 用户要的是「打包放到控制台，以后建环境默认带上」。hub 侧和 core 侧都
+        # 已经能存能拉了，但**桌面客户端没有入口** —— 只有接口等于没有功能。
+        # 这一排就是那个入口。
+        hub_row = tk.Frame(ov.body, bg=self.theme.card2)
+        hub_row.pack(fill="x", pady=(8, 0))
+        hub_btn = ttk.Button(hub_row, text="从控制台拉取", style="Tiny.TButton")
+        hub_btn.pack(side="left")
+        set_def = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            hub_row, text="同时设为默认", variable=set_def, bg=self.theme.card2,
+            fg=self.theme.dim, font=self.fonts["tiny"], selectcolor=self.theme.card2,
+            activebackground=self.theme.card2, activeforeground=self.theme.ink,
+            highlightthickness=0, bd=0,
+        ).pack(side="left", padx=(8, 0))
+        hub_msg = tk.Label(hub_row, text="", bg=self.theme.card2, fg=self.theme.faint,
+                           font=self.fonts["tiny"], anchor="w")
+        hub_msg.pack(side="left", padx=(8, 0))
+
+        def _pull_done(res: Any) -> None:
+            try:
+                hub_btn.state(["!disabled"])
+            except Exception:
+                pass
+            ok_, data, err = res
+            if not ok_:
+                msg = (err or {}).get("message", "")
+                # 这两个错误最常见，直接给出下一步该做什么
+                if "待" in msg or "pending" in msg.lower():
+                    hub_msg.configure(text="这台机器还没被服务器授权，去控制台点「允许」后重试")
+                elif "注册" in msg or "enroll" in msg or "DEVICE" in msg:
+                    hub_msg.configure(text="这台机器还没在服务器注册，先在客户端连一次服务器")
+                else:
+                    hub_msg.configure(text=f"拉取失败：{msg or '未知原因'}")
+                return
+            d = data or {}
+            added = d.get("added") or []
+            skipped = d.get("skipped") or []
+            if added:
+                hub_msg.configure(text=f"拉下 {len(added)} 个：{'、'.join(added)}")
+            elif skipped:
+                hub_msg.configure(text=f"没有新包（{skipped[0]}）")
+            else:
+                hub_msg.configure(text="控制台里还没有扩展包")
+            try:
+                self.refresh(force=True)
+            except Exception:
+                pass
+
+        def _pull() -> None:
+            hub_btn.state(["disabled"])
+            hub_msg.configure(text="正在从控制台拉取 …")
+            call_async(ov, lambda: self.api.pull_hub_packs(as_default=bool(set_def.get())),
+                       _pull_done)
+
+        hub_btn.configure(command=_pull)
         ov.open()
 
     def _import_from_chrome_path(self, values: dict[str, str]) -> None:
