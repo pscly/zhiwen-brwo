@@ -940,6 +940,34 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         connect_btn.state(["disabled"])
         root.update_idletasks()          # 先把"连接中…"画出来，再进后台
 
+        # **超时兜底**：后台线程卡住时不能让界面永远停在"连接中…"。
+        #
+        # `probe_server` / `enroll` / `core.start` 都会阻塞；虽然各有自己的超时，
+        # 但一旦哪个环节真的挂死（DNS、半开连接、uvicorn 卡在 startup），
+        # 界面就一直是"连接中…"，用户只能强杀进程 —— 看起来就是"客户端坏了"。
+        #
+        # 120 秒（`core.start` 自己的就绪等待是 45 秒，加网络往返留足余量），
+        # 超时后切到明确错误态并允许重试。
+        state["connect_seq"] = int(state.get("connect_seq") or 0) + 1
+        _seq = state["connect_seq"]
+
+        def _watchdog(seq: int) -> None:
+            if state.get("connect_seq") != seq:
+                return                     # 已经重连过，这轮看护作废
+            if state.get("phase") == "connecting":
+                set_phase("error", "连接超时")
+                log("连接超过 120 秒没有结果，已中止等待。可以点「连接并开始」重试，"
+                    "或检查服务器地址 / 本机端口是否被占用。", "bad")
+                try:
+                    connect_btn.state(["!disabled"])
+                except Exception:
+                    pass
+
+        try:
+            root.after(120_000, lambda: _watchdog(_seq))
+        except Exception:
+            pass
+
         token = token_var.get().strip()
 
         def work() -> dict[str, Any]:
