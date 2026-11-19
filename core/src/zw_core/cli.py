@@ -162,6 +162,107 @@ def cmd_mcp(args: argparse.Namespace) -> None:
     serve_stdio()
 
 
+def cmd_diagnose(args: argparse.Namespace) -> None:
+    """离线诊断：**不连任何服务**，直接查本机为什么起不来。
+
+    ## 为什么需要它
+
+    `doctor` 走 `POST /api/v1/maintenance/doctor` —— 那是**正在跑的 core** 在体检。
+    可用户最需要体检的时刻恰恰是"core 起不来"的时候，那时 doctor 根本连不上。
+
+    （2026-11-20 云电脑上就卡在这：core 不可达，我这边什么也做不了，
+    用户也不知道去哪看。最后只能靠猜。）
+
+    这里查的都是"不需要服务"的事实：
+      · 配置能不能读出来（坏 JSON 会导致机器码变化）
+      · 数据目录能不能写
+      · 端口被谁占着（可能是另一个旧实例）
+      · 内核在不在
+      · 日志尾部（真正的报错通常就在最后几行）
+    """
+    from zw_core import client as cl
+    from zw_core.config import Settings, get_settings
+
+    def line(ok: bool | None, name: str, detail: str) -> None:
+        mark = "✅" if ok is True else ("❌" if ok is False else "•")
+        print(f"{mark} {name:<12} {detail}")
+
+    print("知纹 · 离线诊断（不需要本机服务在跑）")
+    print()
+
+    # ① 配置
+    cfg = cl.load_config()
+    cfg_path = cl.config_path()
+    broken = sorted(p.name for p in cfg_path.parent.glob("client.json.broken-*"))
+    if cfg:
+        line(True, "配置文件", f"{cfg_path}（可读，{len(cfg)} 个键）")
+    elif cfg_path.exists():
+        line(False, "配置文件", f"{cfg_path} 存在但读不出来")
+    else:
+        line(None, "配置文件", f"{cfg_path} 不存在（首次运行会创建）")
+    if broken:
+        line(False, "坏配置备份", "、".join(broken[-3:]) + " —— 曾读取失败，机器码可能已变")
+    for k in ("server", "device_id", "shell_enabled"):
+        if k in cfg:
+            val = cfg[k]
+            if k == "device_id":
+                val = f"{str(val)[:12]}…"
+            line(None, k, str(val))
+
+    # ② 数据目录可写
+    try:
+        s = Settings()
+        s.root.mkdir(parents=True, exist_ok=True)
+        probe = s.root / ".diagnose-write-test"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        line(True, "数据目录", f"{s.root}（可写）")
+    except Exception as exc:  # noqa: BLE001
+        line(False, "数据目录", f"不可写：{type(exc).__name__}: {exc}")
+        s = get_settings()
+
+    # ③ 端口归属
+    port = int(args.port or cl._resolve_core_port(cfg))
+    from zw_core.services import engines as engsvc
+
+    pid = engsvc.port_owner_pid(port)
+    if pid:
+        name = cl._proc_name(pid) or "未知"
+        sure = "zhiwen" in name.lower()
+        line(
+            False if sure else None,
+            f"端口 {port}",
+            f"被 pid={pid}（{name}）占用"
+            + ("—— 这就是旧实例，关掉它或换端口" if sure else "—— 不是本程序，换端口"),
+        )
+    else:
+        line(True, f"端口 {port}", "空闲")
+
+    # ④ 内核
+    try:
+        binp = engsvc.find_chrome(s)
+        line(True, "内核", str(binp))
+    except Exception as exc:  # noqa: BLE001
+        line(False, "内核", f"找不到：{getattr(exc, 'message', str(exc))[:120]}")
+
+    # ⑤ 日志尾部
+    log_path = s.root / "logs" / "zhiwen.log"
+    print()
+    if log_path.is_file():
+        try:
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            tail = lines[-max(1, int(args.tail)):]
+            print(f"—— 日志尾部（{log_path}，共 {len(lines)} 行）——")
+            for ln in tail:
+                print("  " + ln)
+        except OSError as exc:
+            print(f"读日志失败：{exc}")
+    else:
+        print(f"—— 没有日志文件（{log_path}）——")
+    print()
+    print("把上面整段发给维护者即可定位问题。")
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     data = _call("POST", "/api/v1/maintenance/doctor")
     if args.json:
@@ -735,9 +836,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("mcp", help="以 MCP 协议在 stdio 上服务（给 AI 客户端拉起）")
     sp.set_defaults(func=cmd_mcp)
 
-    sp = sub.add_parser("doctor", help="自检")
+    sp = sub.add_parser("doctor", help="自检（需要本机服务在跑）")
     j(sp)
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser(
+        "diagnose",
+        help="离线诊断：本机服务起不来时用它（**不依赖任何服务在跑**）")
+    sp.add_argument("--port", type=int, default=0, help="要检查的端口（默认取配置/8730）")
+    sp.add_argument("--tail", type=int, default=20, help="日志尾部行数")
+    sp.set_defaults(func=cmd_diagnose)
 
     sp = sub.add_parser("stats", help="容量与状态统计")
     j(sp)
