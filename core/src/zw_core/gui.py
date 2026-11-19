@@ -793,7 +793,60 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         except Exception:
             pass
 
+    def log_bg(text: str, level: str = "info") -> None:
+        """后台线程专用的日志：`log()` 会动控件，必须排队回主线程再调。"""
+        try:
+            root.after(0, lambda: log(text, level))
+        except Exception:
+            pass
+
+    def run_bg(fn, done) -> None:
+        """后台线程跑 `fn()`，结果回 Tk 主线程交给 `done()`。
+
+        为什么必须有这一层：Tk 控件只能在创建它的线程里动，后台线程直接
+        `configure()` 在 Windows 上会崩或随机卡死。所以统一 `after(0, ...)` 回主线程。
+        窗口已销毁时静默丢弃。
+        """
+
+        def work() -> None:
+            try:
+                out = fn()
+            except Exception as exc:  # noqa: BLE001 —— 后台异常不能静默，也不能杀进程
+                out = {"phase": "crash", "error": f"{type(exc).__name__}: {exc}"}
+
+            def finish() -> None:
+                try:
+                    if not root.winfo_exists():
+                        return
+                except Exception:
+                    return
+                done(out)
+
+            try:
+                root.after(0, finish)
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
+
     def connect() -> None:
+        """点「连接并开始」/ 启动时自动连接。
+
+        ## 为什么整段都挪到后台线程（2026-11-19 修）
+
+        用户反馈"每次打开都会无响应几秒钟"。原因就在这里：这个函数原来**全在
+        Tk 主线程**上跑，其中三步都是秒级阻塞 ——
+
+          1. `probe_server(base)`  网络往返；服务器不通时要等超时
+          2. `enroll(...)`         又一次网络往返
+          3. `core.start(...)`     起 uvicorn 并**轮询等它就绪**（本机量到 1215ms，
+                                   Windows 过杀软扫描更久）
+
+        而启动时还会 `root.after(200, connect)` 自动连一次，于是每次打开都要
+        卡住整个界面好几秒 —— 窗口变白、标题栏「无响应」。
+
+        现在：阻塞三步放后台，界面立刻能响应；结果回主线程再改控件。
+        """
         state["stop_watch"] = False
         state["approval_thread"] = None
         raw = server_var.get().strip()
@@ -805,10 +858,40 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         set_phase("connecting", "连接中…")
         log(f"正在连接 {base}")
         connect_btn.state(["disabled"])
-        root.update_idletasks()
+        root.update_idletasks()          # 先把"连接中…"画出来，再进后台
 
-        info = probe_server(base)
-        if not info.get("ok"):
+        token = token_var.get().strip()
+
+        def work() -> dict[str, Any]:
+            info = probe_server(base)
+            if not info.get("ok"):
+                return {"phase": "probe_failed", "info": info}
+            if info.get("token_required") and not token:
+                return {"phase": "need_token", "info": info}
+            log_bg("正在注册这台电脑 …")
+            res = enroll(base, state["device_id"], token, app_version=__version__)
+            if not res.get("ok"):
+                return {"phase": "enroll_failed", "res": res, "info": info}
+            log_bg("正在启动本机浏览器服务 …")
+            ok = core.start(device_id=state["device_id"], hub_url=base)
+            return {"phase": "started" if ok else "core_failed",
+                    "res": res, "info": info}
+
+        run_bg(work, lambda out: on_connect_done(base, token, out))
+
+    def on_connect_done(base: str, token: str, out: dict[str, Any]) -> None:
+        """`connect()` 的后台结果 → 界面。**全程在 Tk 主线程**。"""
+        phase = out.get("phase")
+        info = out.get("info") or {}
+        res = out.get("res") or {}
+
+        if phase == "crash":
+            set_phase("error", "连接出错")
+            log(f"连接过程出错：{out.get('error')}", "bad")
+            connect_btn.state(["!disabled"])
+            return
+
+        if phase == "probe_failed":
             set_phase("error", "连不上")
             log(f"连接失败：{info.get('error')}", "bad")
             # 连不上服务器**不等于这个工具不能用**：本机环境管理不依赖服务器。
@@ -820,18 +903,15 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             connect_btn.state(["!disabled"])
             return
 
-        if info.get("token_required") and not token_var.get().strip():
+        if phase == "need_token":
             set_phase("idle", "需要对接码")
             log("这台服务器要求对接码，请填写后重试。", "warn")
             tok_card.pack(fill="x", pady=(10, 0), after=srv_card)
             messagebox.showinfo(APP_NAME, "这台服务器要求对接码，请在下方填写后点「连接并开始」。")
             connect_btn.state(["!disabled"])
             return
-        tok_card.pack_forget()
 
-        log("正在注册这台电脑 …")
-        res = enroll(base, state["device_id"], token_var.get().strip(), app_version=__version__)
-        if not res.get("ok"):
+        if phase == "enroll_failed":
             code = res.get("code", "")
             set_phase("error", "注册失败")
             if code == "DEVICE_REJECTED":
@@ -853,10 +933,25 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
             connect_btn.state(["!disabled"])
             return
 
+        if phase == "core_failed":
+            set_phase("error", "本机服务失败")
+            log(f"本机服务启动失败：{core.error}", "bad")
+            messagebox.showerror(APP_NAME, f"本机服务启动失败：\n\n{core.error}")
+            connect_btn.state(["!disabled"])
+            return
+
+        if phase != "started":
+            set_phase("error", "连接出错")
+            log(f"未预期的连接结果：{phase}", "bad")
+            connect_btn.state(["!disabled"])
+            return
+
+        # ── 到这里本机服务已经起来了 ──────────────────────────
+        tok_card.pack_forget()
         cfg.update({
             "server": base,
             "device_id": state["device_id"],
-            "token": token_var.get().strip(),
+            "token": token,
             "token_required": bool(info.get("token_required")),
         })
         save_config(cfg)
@@ -867,31 +962,15 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         dev_status = str(((res.get("device") or {}).get("status")) or "active")
         state["approved"] = dev_status != "pending"
 
-        log("正在启动本机浏览器服务 …")
-        if not core.start(device_id=state["device_id"], hub_url=base):
-            set_phase("error", "本机服务失败")
-            log(f"本机服务启动失败：{core.error}", "bad")
-            messagebox.showerror(APP_NAME, f"本机服务启动失败：\n\n{core.error}")
-            connect_btn.state(["!disabled"])
-            return
-
         state["core_on"] = True
         state["base"] = base
         # 配置里关掉的话，连上后立刻把 core 侧也关掉（默认值是开）
         if not bool(cfg.get("shell_enabled", True)):
-            try:
-                import httpx
-
-                httpx.post(
-                    f"http://127.0.0.1:{core.port}/api/v1/shell/enable",
-                    json={"enabled": False},
-                    headers={"Authorization": f"Bearer {os.environ.get('ZW_ADMIN_TOKEN', '')}"},
-                    timeout=5,
-                )
-            except Exception:
-                pass
-            log("远程命令行按上次的设置保持关闭", "warn")
-        start_heartbeat(base, token_var.get().strip(), int(res.get("heartbeat_seconds") or 60))
+            run_bg(
+                lambda: _post_shell_disable(),
+                lambda _r: log("远程命令行按上次的设置保持关闭", "warn"),
+            )
+        start_heartbeat(base, token, int(res.get("heartbeat_seconds") or 60))
         show_setup(False)
         conn_server.configure(text=base)
         conn_dev.configure(text=state["device_id"][:32] + "…")
@@ -905,7 +984,7 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         else:
             set_phase("pending", "等待服务器授权")
             log("这台电脑还没被服务器允许。远程终端现在就能用，除此之外等管理员点「允许」。", "warn")
-            start_approval_watch(base, token_var.get().strip())
+            start_approval_watch(base, token)
 
         log(f"控制台 http://127.0.0.1:{core.port}", "ok")
         refresh_stats()
@@ -915,6 +994,20 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         log_panel.refresh()
         try:
             webbrowser.open(f"http://127.0.0.1:{core.port}")
+        except Exception:
+            pass
+
+    def _post_shell_disable() -> None:
+        """把 core 侧的远程命令行关掉（配置里关着时才调）。放后台，别阻塞界面。"""
+        try:
+            import httpx
+
+            httpx.post(
+                f"http://127.0.0.1:{core.port}/api/v1/shell/enable",
+                json={"enabled": False},
+                headers={"Authorization": f"Bearer {os.environ.get('ZW_ADMIN_TOKEN', '')}"},
+                timeout=5,
+            )
         except Exception:
             pass
 
