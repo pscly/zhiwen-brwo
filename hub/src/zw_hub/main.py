@@ -1230,7 +1230,7 @@ def shell_submit(
     _require_shell_enabled()
     # 未授权（pending）的设备也允许被投递命令 —— 与设备侧一致：
     # "授权"管的是同步，不是"能不能被管理员操作"。
-    devices().require_known(device_id)
+    dev = devices().require_known(device_id)
     payload = body if isinstance(body, dict) else {}
     job = shell_queue().submit(
         device_id,
@@ -1240,7 +1240,34 @@ def shell_submit(
     )
     logger.info("管理员投递远程命令 device=%s job=%s actor=%s chars=%s",
                 device_id, job["id"], actor, len(job["command"]))
-    return ok({"job_id": job["id"], "status": job["status"]})
+    out: dict[str, Any] = {"job_id": job["id"], "status": job["status"]}
+    # **core 没在跑时必须当场说清**（2026-11-20）。
+    #
+    # 心跳和 core 是两回事：心跳由客户端 GUI 发，core 是它起的子服务。
+    # core 死了 → 心跳照发（服务器显示在线）→ 但命令永远拉不到。
+    # 以前这里只回一个 `queued`，调用方会一直等、以为"还在排队"，实际没人领。
+    #
+    # 排队本身保留（设备可能马上恢复），但把原因带上，让人知道该去那台机器点一下。
+    # `dev` 是设备原始行，里面**没有** `core_reachable`（那是首屏视图运行时算的）。
+    # 这里按同样方式现算一次 —— 之前我直接读 `dev.get("core_reachable")`，
+    # 永远拿到 None，警告根本不会出现（实测过）。
+    _base = str(dev.get("core_base") or "")
+    _reachable: bool | None = None
+    if _base:
+        try:
+            _reachable = _probe_core(_base)
+        except Exception:  # noqa: BLE001 —— 探不通就是不通，不影响排队
+            _reachable = False
+    if _reachable is False:
+        out["warning"] = (
+            "这台设备的本机服务（core）当前不可达，命令会一直排队、不会被执行。"
+            "常见原因：core 崩了、端口被占、或杀软拦截。需要到那台机器上打开一次客户端"
+            "（0.8.1 起客户端会自己把 core 拉起来）。"
+        )
+        out["core_reachable"] = False
+    elif _reachable is not None:
+        out["core_reachable"] = _reachable
+    return ok(out)
 
 
 # ⚠ 这条必须在下面的 `/{job_id}` 之前：段数一样，先声明才不会把 history 当 job_id
