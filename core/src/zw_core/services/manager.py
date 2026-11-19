@@ -181,7 +181,16 @@ def get_profile(ref: str) -> dict[str, Any]:
     # **不启动浏览器**，所以给列表/详情加这个字段没有额外开销。
     if out.get("extensions"):
         try:
-            ok, note = engines.extensions_loadable(str(out.get("engine_path") or ""))
+            # **`engine_path` 经常是空串**（环境没记具体内核，靠全局策略找），
+            # 直接拿空路径去探测必然失败 → 报 None（不知道），用户看到
+            # 「检测中/未检测」永远出不来结论。
+            # 云电脑真机就是这样：profile.engine_path='' 而内核明明装着。
+            # 空时回退到全局 `find_chrome()` —— `packs.py` 里早就是这么写的，
+            # 这里漏了同一步。
+            _bin = Path(str(out.get("engine_path") or ""))
+            if not str(out.get("engine_path") or "").strip():
+                _bin = engines.find_chrome(get_settings())
+            ok, note = engines.extensions_loadable(_bin)
             # **`ok` 为 None 表示"探测没跑成"，必须原样传出，不能 `bool(None)→False`。**
             # 压成 False 会让界面把"不知道"显示成"不能加载"，用户据此以为插件坏了
             # （本次云电脑真机就是这个现象：WinError 5 → 显示不加载）。

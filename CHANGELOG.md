@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## 0.7.96 — 2026-11-19
+
+**0.7.95 在真机上确认修好了包名；但 `extensions_active` 还是不给出结论 —— 找到第二个原因。**
+
+### 已在真机确认生效的（0.7.95）
+
+云电脑升到 0.7.95 后查包列表，4 个占位符全部还原成真名：
+
+```
+Bitwarden Password Manager        raw='__MSG_extName__'
+沉浸式翻译 - AI 双语网页翻译 …    raw='__MSG_brandName__'
+脚本猫                            raw='__MSG_scriptcat__'
+YesCaptcha 人机助手               raw='__MSG_name__'
+```
+
+`name` 给人看，`name_raw` 留原始值便于排查。
+
+### 还没修完的：`extensions_active` 永远是 None
+
+内核层面 `extensions_loadable: True`（正确），但每个环境都显示 `None`（不知道）。
+根因是这一行：
+
+```python
+ok, note = engines.extensions_loadable(str(out.get("engine_path") or ""))   # → ''
+```
+
+而云电脑上 `profile.engine_path` **就是空串**（环境没记具体内核，靠全局策略找）。
+拿空路径去探测必然失败 → None。
+
+`packs.py` 里早就有正确写法（空则 `find_chrome()`），`manager.py` 漏了同一步。
+现在补上：
+
+```python
+_bin = Path(str(out.get("engine_path") or ""))
+if not str(out.get("engine_path") or "").strip():
+    _bin = engines.find_chrome(get_settings())
+ok, note = engines.extensions_loadable(_bin)
+```
+
+本地验证：强制把 `engine_path` 清空后，`extensions_active` 从 `None` 变成 **True**。
+
+### 测试
+
+654 → **655 项**。新测试用桩证明**回退链路真的被走到**：把 `find_chrome`
+换成返回标记路径、`extensions_loadable` 换成只认那个路径并记录入参 ——
+如果代码仍拿空串探测，记录的入参会是 `''`，断言即失败。
+
+> 第一版测试写成"造个环境看结果"，但测试机没内核 → 走 `EngineError` 分支 →
+> 仍然 None，测不出区别。改成验"传给探测的路径是什么"，才真正钉住行为。
+
+九项门槛全绿（655 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 39）。
+
 ## 0.7.95 — 2026-11-19
 
 **清掉扩展库里的垃圾条目；顺手修好"包名显示成 `__MSG_xxx__`"。**

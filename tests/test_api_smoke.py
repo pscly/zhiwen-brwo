@@ -932,3 +932,58 @@ def _tmp_ext_dir():
     }, ensure_ascii=False), encoding="utf-8")
     (d / "cs.js").write_text("void 0;", encoding="utf-8")
     return d
+
+
+def test_extensions_active_resolves_engine_when_profile_path_empty(client, monkeypatch):
+    """`profile.engine_path` 为空时，必须回退到全局内核，不能拿空路径去探测。
+
+    云电脑真机（0.7.95，TEST3）：环境有 5 个扩展、内核也装着，
+    但 `extensions_active` 一直是 `None`（"不知道"）。根因是
+
+        engines.extensions_loadable(str(out.get("engine_path") or ""))   # → ''
+
+    空路径必然探测失败 → None。`packs.py` 里早就有"空则 find_chrome()"的写法，
+    `manager.py` 漏了这一步。
+
+    这里用桩证明**回退链路真的被走到**：把 `find_chrome` 换成返回一个标记路径、
+    把 `extensions_loadable` 换成只认那个路径。若代码仍拿空串去探测，
+    记到的路径就会是空串，断言会失败。
+    """
+    import json as _json
+    import tempfile as _tf
+    from pathlib import Path as _P
+
+    from zw_core import db
+    from zw_core.services import engines as eng_mod
+    from zw_core.services import manager as mgr
+
+    p = mgr.create_profile({"name": "空路径回退自检"})
+    with db.get_db().conn() as c:
+        c.execute("UPDATE profiles SET engine_path='' WHERE id=?", (p["id"],))
+
+    d = _P(_tf.mkdtemp()) / "FallbackExt"
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(_json.dumps(
+        {"manifest_version": 3, "name": "FallbackExt", "version": "1.0"}))
+    mgr.update_profile(p["id"], {"extensions": [str(d)]})
+
+    marker = _P(_tf.mkdtemp()) / "fake-engine" / "chrome"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("")
+    seen: list[str] = []
+
+    monkeypatch.setattr(eng_mod, "find_chrome", lambda *a, **k: marker)
+
+    def _fake_loadable(bin_path):
+        seen.append(str(bin_path))
+        return (True, "")
+
+    monkeypatch.setattr(eng_mod, "extensions_loadable", _fake_loadable)
+
+    got = mgr.get_profile(p["id"])
+    assert got["extensions"], got
+    assert seen, "压根没调 extensions_loadable"
+    assert seen[-1] == str(marker), (
+        f"没有回退到 find_chrome：传给探测的路径是 {seen[-1]!r}"
+    )
+    assert got.get("extensions_active") is True, got.get("extensions_active")
