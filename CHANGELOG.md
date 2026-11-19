@@ -1,5 +1,67 @@
 # CHANGELOG
 
+## 0.7.97 — 2026-11-19
+
+**「常驻终端连不上」的根因：两端都不发心跳，设备安静 90 秒就被判掉线。**
+
+### 现象
+
+用户要求"全程留个终端连接，方便随时通讯和修改"。查下来：
+
+```
+云电脑 8730 通、版本 0.7.95、设备 online=True、shell_enabled=True
+但 hub 控制台 realtime=False
+```
+
+而设备日志明确写着 `终端 WS 已连上 hub`。也就是说**连接是好的，判定是错的**。
+
+### 根因
+
+hub 侧判据（`termrelay.online`）：
+
+```python
+return (time.time() - link.last_seen) < DEVICE_IDLE_TIMEOUT   # 90 秒
+```
+
+`last_seen` 只在**收到设备消息**时更新。而两端都不主动发消息：
+- 设备只在**收到** hub 的 ping 时才回 pong
+- hub **从不发** ping
+- `_PING_EVERY = 20.0` 这个常量早就定义了，**没有任何地方引用它** —— 写了一半
+
+于是设备安静挂着 90 秒 → 判掉线 → `/v1/console/term/{device_id}` 直接回
+`device_offline` 并关连接。**常驻终端在正常空闲状态下永远建不起来。**
+
+### 修法
+
+设备侧真的按 `_PING_EVERY`（20 秒）发应用层 ping：
+
+```python
+asyncio.create_task(self._ping_loop())     # 之前只有 send/recv 两个任务
+```
+
+20 秒 ≪ 90 秒窗口，中间丢一次也不会误判。
+
+### 顺带：给"远程改 Windows"做了个可靠通道
+
+排查时反复踩引号转义（项目笔记里早有记录：远端 shell 把 `"` 转成 `\"`，
+`&` 失去保护被 cmd 当分隔符）。新增 `scripts/winrun.py`：
+
+```bash
+python scripts/winrun.py -c "Get-ChildItem C:/Users/Administrator/AppData/Local/zhiwen"
+python scripts/winrun.py -f task.ps1        # 长脚本从文件读
+```
+
+内部走 PowerShell `-EncodedCommand`（base64 UTF-16LE），命令行里只剩字母数字，
+一次就成；并前置 `$ProgressPreference='SilentlyContinue'` 压掉进度流
+（实测一次成功调用会在 stderr 塞 1.5KB 的 CLIXML 噪音，把真错误淹没）。
+
+### 测试
+
+655 → **657 项**（`tests/test_termhub_ping.py`）：`_ping_loop` 必须被
+`create_task` 起来（防止再写一半）、ping 间隔必须显著小于 hub 的 90 秒窗口。
+
+九项门槛全绿（657 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 39）。
+
 ## 0.7.96 — 2026-11-19
 
 **0.7.95 在真机上确认修好了包名；但 `extensions_active` 还是不给出结论 —— 找到第二个原因。**

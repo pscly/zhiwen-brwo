@@ -199,6 +199,7 @@ class TermClient:
             tasks = [
                 asyncio.create_task(self._send_loop(ws)),
                 asyncio.create_task(self._recv_loop(ws)),
+                asyncio.create_task(self._ping_loop()),
             ]
             try:
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -224,6 +225,32 @@ class TermClient:
                 return
             text = await q.get()
             await ws.send(text)
+
+    async def _ping_loop(self) -> None:
+        """定时给 hub 发应用层 ping。
+
+        ## 为什么必须有（2026-11-19 云电脑真机）
+
+        hub 侧的 `online()` 判据是"90 秒内收到过这条设备的任何消息"。而两端
+        **都不主动发消息**：设备只在**收到** hub 的 ping 时回 pong，hub 也从不发 ping。
+
+        结果：设备安静挂着 90 秒后就被判"实时通道未连" ——
+        控制台 `realtime` 显示 False，`/v1/console/term/{id}` 直接回
+        `device_offline` 并关连接。**常驻终端因此在正常空闲状态下永远建不起来。**
+
+        `_PING_EVERY` 这个常量早就定义好了，却没有任何地方用它 —— 属于写了一半。
+        现在真正用上：每 20 秒发一次，远小于 90 秒窗口。
+        """
+        try:
+            while self.connected:
+                await asyncio.sleep(_PING_EVERY)
+                if not self.connected:
+                    return
+                await self._send({"t": "ping"})
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 —— 发不出去说明连接要断了，交给外层重连
+            return
 
     async def _recv_loop(self, ws: Any) -> None:
         async for raw in ws:
