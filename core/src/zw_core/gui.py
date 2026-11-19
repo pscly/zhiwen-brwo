@@ -52,6 +52,7 @@ from typing import Any
 from zw_core import __version__
 from zw_core.client import (
     APP_NAME,
+    DEFAULT_SERVER,
     MONO_FAMILY,
     cjk_font_missing,
     Heartbeat,
@@ -256,7 +257,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         "core_on": False,
         "events": [],             # [(ts, text, level)]
     }
-    server_var = tk.StringVar(value=cfg.get("server") or "")
+    # 默认填 3.5：装好双击就能连，不用先填地址。
+    # 用户明确要求"默认打开直接就尝试连接 3.5，连不上再提醒是否修改"。
+    server_var = tk.StringVar(value=cfg.get("server") or DEFAULT_SERVER)
     token_var = tk.StringVar(value=cfg.get("token") or "")
     addr_hint = tk.StringVar(value="")
     status_text = tk.StringVar(value="未连接")
@@ -696,6 +699,61 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         except Exception:
             pass
 
+    # ── core 看护：本机服务掉了就自己拉起来 ──────────────────
+    #
+    # ## 为什么必须做（2026-11-19 云电脑真机，把自己锁在外面）
+    #
+    # 心跳由**GUI 进程**发（`Heartbeat`），而 core 是 `LocalCore` 起的子服务。
+    # 两者独立：core 挂了之后心跳照发，服务器上显示"在线"，但
+    #
+    #   · 远程命令走 core 的 HTTP 队列 → 拉不到
+    #   · 实时终端走 core 的 WS 隧道 → 连不上
+    #
+    # 于是**整台机器对外完全够不着**，只能跑到机器前点一下。我这次就是这么失去
+    # 通道的（清旧进程时顺手把 core 也带走）。用户也反复遇到过。
+    #
+    # 做法：每 5 秒的 tick 里核一次 `/healthz`。连续两次不通才重启（一次抖动不算），
+    # 重启成功后立刻重连（含心跳、面板）。
+    state["core_miss"] = 0
+    state["core_healing"] = False
+
+    def watch_core() -> None:
+        if not state.get("core_on") or state.get("core_healing"):
+            return
+        try:
+            if core.is_running():
+                state["core_miss"] = 0
+                return
+        except Exception:
+            pass
+        state["core_miss"] = int(state.get("core_miss") or 0) + 1
+        if state["core_miss"] < 2:
+            return          # 单次抖动不重启（避免误判把好的服务干掉）
+        state["core_healing"] = True
+        log("本机服务没响应，正在自动重启 …", "warn")
+
+        def work() -> dict:
+            okk = core.start(device_id=state.get("device_id", ""),
+                             hub_url=state.get("base", ""))
+            return {"ok": okk, "err": core.error}
+
+        def done(res: dict) -> None:
+            state["core_healing"] = False
+            state["core_miss"] = 0
+            if res.get("ok"):
+                state["core_on"] = True
+                log(f"本机服务已自动恢复（端口 {core.live_port}）", "ok")
+                if state.get("base"):
+                    start_heartbeat(state["base"], token_var.get().strip(),
+                                    int(state.get("hb_interval") or 60))
+                refresh_stats()
+                profiles_panel.refresh(force=True)
+            else:
+                log(f"自动重启失败：{res.get('err') or ''}", "bad")
+                set_phase("error", "本机服务未运行")
+
+        run_bg(work, done)
+
     def tick() -> None:
         """统一的 5 秒刷新节拍：统计 + 环境列表 + 事件。
 
@@ -704,6 +762,7 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         所以"自动刷新"永远不会打断用户输入，也不会在启动浏览器那几十秒里
         半路把列表重排一遍（用户会以为点空了）。
         """
+        watch_core()
         for job in (refresh_stats, profiles_panel.autorefresh, log_panel.autorefresh):
             try:
                 job()
@@ -793,7 +852,9 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         old = state.get("heartbeat")
         if old is not None:
             old.stop()
-        hb = Heartbeat(base, state["device_id"], token, interval=interval,
+        # 记下间隔：core 自动重启后要用同一个值重建心跳，不能退回写死的 60
+        state["hb_interval"] = int(interval or 60)
+        hb = Heartbeat(base, state["device_id"], token, interval=state["hb_interval"],
                        stats_provider=local_summary)
         hb.on_revoked = lambda: root.after(0, on_revoked)
         hb.start()
@@ -913,6 +974,11 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
         if phase == "probe_failed":
             set_phase("error", "连不上")
             log(f"连接失败：{info.get('error')}", "bad")
+            # 默认地址是 3.5；连不上时把"该怎么改"直接说清，别让人干瞪眼。
+            if base == normalize_server(DEFAULT_SERVER):
+                log(f"默认连的是 {DEFAULT_SERVER}。要换服务器：改上面输入框里的地址"
+                    f"（形如 192.168.3.6:8700），再点「连接并开始」。", "warn")
+                addr_hint.set(f"连不上默认服务器 {DEFAULT_SERVER}，可以改成别的地址后重试")
             # 连不上服务器**不等于这个工具不能用**：本机环境管理不依赖服务器。
             # 但单文件客户端只有图形界面入口，用户不知道还有 `serve` 这条路，
             # 于是就卡在"连不上"这里，以为软件坏了。
