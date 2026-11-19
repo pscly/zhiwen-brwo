@@ -251,8 +251,19 @@ def probe(engine_path: Path | str, *, timeout: float = 25.0, use_cache: bool = T
         return out
     except Exception as exc:  # noqa: BLE001
         logger.debug("扩展探测失败", exc_info=True)
-        return {"loadable": False,
-                "reason": f"探测过程出错（{type(exc).__name__}: {exc}），已按不加载处理",
+        # **出错时给"未知"（None），不能给 False。**
+        #
+        # 实测（2026-11-19，云电脑 Windows，内核 ungoogled-157.0.8103.78）：
+        # 探测抛 `PermissionError: [WinError 5] 拒绝访问`（杀软/权限拦住了
+        # 探针进程），旧代码返回 `loadable: False` —— 于是界面显示
+        # 「不能加载扩展」，用户以为插件坏了，实际是**探测根本没跑成**。
+        #
+        # 三态必须保住：True=能 / False=不能 / None=不知道。
+        # 而且在 finally 里也不写缓存（见 `_save_cache` 只在成功路径调用），
+        # 这样下次还能重试 —— 旧代码把 False 缓存住，之后永远显示"不能加载"。
+        return {"loadable": None,
+                "reason": f"探测没能完成（{type(exc).__name__}: {exc}），"
+                          f"无法判断这个内核能否加载扩展；下次会重试",
                 "cached": False, "ms": int((time.time() - started) * 1000)}
     finally:
         if srv is not None:

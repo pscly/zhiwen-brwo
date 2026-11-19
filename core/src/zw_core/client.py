@@ -616,6 +616,35 @@ class LocalCore:
             _db.reset_db()
         except Exception:
             pass
+        # **桌面客户端也要自动准备内核。**
+        #
+        # 真踩到（2026-11-19，云电脑 0.7.91）：用户双击客户端图标启动，
+        # 建环境时却报「没有找到可用的 ungoogled-chromium 内核」，
+        # `GET /api/v1/engine` 的 `download.state` 一直是 `idle` —— 说明
+        # 自动下载**根本没被触发**。
+        #
+        # 原因：`prepare_engine_async()` 只写在 `main.run()` 里（命令行 serve 走那条），
+        # 而 GUI 是通过 `LocalCore` 直接 `from zw_core.main import app` 起 uvicorn 的，
+        # **完全绕过 `run()`**。于是 0.7.72 起号称的"客户端自己下载内核"
+        # 在用户实际使用的入口上从未生效。
+        #
+        # 放在这里而不是 `create_app()` 的 startup 事件里：测试也用 `create_app()`，
+        # 若在 startup 里自动下载，每跑一次测试就会去下 150MB。
+        try:
+            # `get_settings` 在**下面那个 try** 里才 import，而函数内 import 是局部名 ——
+            # 这里必须自己 import 一次，否则 NameError 会被下面的 except 吞掉，
+            # 表现成"加了代码但依然不下载"。
+            from zw_core.config import get_settings as _get_settings
+            from zw_core.services import engines as _engines
+
+            _info = _engines.prepare_engine_async(_get_settings())
+            if _info.get("started"):
+                logging.getLogger("zw.client").info(
+                    "后台开始下载 ungoogled-chromium 内核（约 150–200MB，进度看控制台「运维→内核」）")
+            elif _info.get("reason"):
+                logging.getLogger("zw.client").info("内核准备跳过：%s", _info["reason"])
+        except Exception:  # noqa: BLE001 —— 内核是增值项，失败不能拦住 core 启动
+            logging.getLogger("zw.client").warning("内核准备检查失败（不影响启动）", exc_info=True)
         try:
             import uvicorn
 

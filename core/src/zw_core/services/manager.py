@@ -182,7 +182,10 @@ def get_profile(ref: str) -> dict[str, Any]:
     if out.get("extensions"):
         try:
             ok, note = engines.extensions_loadable(str(out.get("engine_path") or ""))
-            out["extensions_active"] = bool(ok)
+            # **`ok` 为 None 表示"探测没跑成"，必须原样传出，不能 `bool(None)→False`。**
+            # 压成 False 会让界面把"不知道"显示成"不能加载"，用户据此以为插件坏了
+            # （本次云电脑真机就是这个现象：WinError 5 → 显示不加载）。
+            out["extensions_active"] = None if ok is None else bool(ok)
             out["extensions_note"] = note
         except Exception as exc:  # noqa: BLE001 —— 判断失败不能拖垮"看详情"
             out["extensions_active"] = None

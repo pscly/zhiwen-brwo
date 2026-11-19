@@ -1,5 +1,77 @@
 # CHANGELOG
 
+## 0.7.92 — 2026-11-19
+
+**云电脑真机验收抓到两个 bug：桌面客户端从不自动下载内核；扩展探测把"没测成"报成"不能加载"。**
+
+### ① 双击打开的客户端，从来没有自动下载过内核
+
+用户报：客户端（0.7.91）打开后建环境报
+「没有找到可用的 ungoogled-chromium 内核」，`GET /api/v1/engine` 里
+`download.state` 一直是 **idle** —— 说明自动下载压根没被触发。
+
+根因：`prepare_engine_async()` 只写在 `main.run()` 里，而
+
+| 入口 | 怎么起 core | 会不会自动下载 |
+|---|---|---|
+| `zhiwen-client serve` | 走 `run()` | ✅ 会 |
+| **双击客户端图标（GUI）** | `LocalCore` 直接 `from zw_core.main import app` 起 uvicorn，**绕过 `run()`** | ❌ 从来不会 |
+
+也就是说 0.7.72 起号称的"客户端自己下载内核"，在**用户实际使用的那个入口**上从未生效。
+只有命令行 `serve` 才会。
+
+修法：在 `LocalCore.start()` 里也调 `prepare_engine_async()`（放在启动 uvicorn 之前）。
+不放 `create_app()` 的 startup 事件里，是因为测试也用 `create_app()` ——
+那样每跑一次测试就会去下 150MB。
+
+> 中途还踩了自己一个坑：第一版插进去用了 `get_settings()`，而那个名字要到**后面几行**
+> 才 import（函数内 import 是局部名）→ NameError 被 `except` 吞掉，
+> 表现成"加了代码但依然不下载"。已改成在自己的 try 里 import。
+
+### ② 扩展探测报"不能加载"，其实只是没测成
+
+同一台机器上，环境已经跑起来、6 个扩展都绑着，但详情里
+`extensions_active: False`，note 是：
+
+```
+探测过程出错（PermissionError: [WinError 5] 拒绝访问。），已按不加载处理
+```
+
+杀软/权限拦住了探针进程，而旧代码把**异常当成"确定不能加载"**，还**写进了缓存** ——
+于是之后一直显示"不能加载"，用户以为插件坏了。
+
+改成三态语义：
+
+| 值 | 含义 |
+|---|---|
+| `True` | 实测能加载 |
+| `False` | 实测不能加载（官方 Chrome 137+ 忽略 `--load-extension`） |
+| `None` | **没测出来**（探测本身失败）→ 界面显示"检测中/未检测"，不误导 |
+
+失败时**不写缓存**，下次还能重试。`manager.get_profile` 里原来的
+`bool(ok)` 会把 `None` 压成 `False`，一并改成保留三态。
+
+### 云电脑上的实测结果（0.7.91 + 手动触发安装）
+
+```
+内核：C:\Users\Administrator\AppData\Local\zhiwen\engines\ungoogled-157.0.8103.78-1.1\chrome.exe
+版本：157.0.8103.78   extensions_loadable: True
+下载：193.5MB / 193.5MB (100%)，自动发现代理 http://127.0.0.1:21080
+环境 TEST3：state=running，6 个扩展已绑定
+```
+
+而且浏览器里出现了**扩展自己打开的页面**：
+`bitwarden.com/browser-start/`、`onboarding.immersivetranslate.com/...`、
+`docs.scriptcat.org/docs/use/...` —— 这些只有扩展真的被加载并运行才会出现。
+**所以插件是好的，之前那个 `False` 是探测误报。**
+
+### 测试
+
+644 → **648 项**（新增 `tests/test_extprobe.py` 4 项：异常→None、失败不缓存、
+peek 无缓存→None、脏缓存→None）。
+
+九项门槛全绿（648 / 34 / 73 / 13 / 23 / 81 / 37 / 12 / 39）。
+
 ## 0.7.91 — 2026-11-19
 
 **「云电脑离线」这个判断，我一直说得太笼统 —— 它其实分两种情况，处置方式完全不同。**
