@@ -586,10 +586,41 @@ def test_delivery_notes_track_current_version():
     text = latest.read_text(encoding="utf-8")
     assert core_ver in latest.name, f"最新交付说明是 {latest.name}，但当前版本是 {core_ver}"
     assert core_ver in text
-    assert "736 项" in text, "测试总数没更新"
-    assert "734 passed" in text, "passed 数没更新"
+    assert "737 项" in text, "测试总数没更新"
+    assert "735 passed" in text, "passed 数没更新"
     # 顺带确认 12 条需求表还在
     assert "十二条需求" in text
     # 版本号形如 0.8.19 的写法不该出现在别处（防止文件名与内容不一致）
     m = re.search(r"交付说明 · v([0-9.]+)", text)
     assert m and m.group(1) == core_ver, f"标题版本 {m.group(1) if m else None} != {core_ver}"
+
+
+def test_delivery_notes_counts_match_code():
+    """交付说明里的**接口数**必须与代码里实际注册的路由数一致。
+
+    ## 为什么（2026-11-20 对抗审查）
+
+    我先写了"core 104 / hub 66"，审查去核发现口径复现不出来：
+    104 其实是 `@app.` 装饰器总数，**含 15 个 `exception_handler`**；
+    hub 的 66 也不对应任何口径。真实数字是 core 94 / hub 63（已注册 HTTP 路由）。
+
+    给用户看"有 104 个接口"而实际是 88 个路由，会把规模说大。
+    这条按 `app.routes` 现数，文档对不上就红。
+    """
+    import re
+
+    notes = sorted((ROOT / "docs").glob("交付说明-v*.md"))
+    assert notes
+    text = notes[-1].read_text(encoding="utf-8")
+
+    from zw_core.main import app as core_app
+    from zw_hub.main import app as hub_app
+
+    def n_routes(app):
+        return len([r for r in app.routes if hasattr(r, "methods")])
+
+    core_n, hub_n = n_routes(core_app), n_routes(hub_app)
+    m = re.search(r"core (\d+) 条路由.*?hub (\d+) 条路由", text)
+    assert m, f"交付说明里找不到接口数（期望 'core {core_n} 条路由' / 'hub {hub_n} 条路由'）"
+    assert int(m.group(1)) == core_n, f"文档写 core {m.group(1)}，实际 {core_n}"
+    assert int(m.group(2)) == hub_n, f"文档写 hub {m.group(2)}，实际 {hub_n}"
