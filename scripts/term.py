@@ -39,6 +39,11 @@ import pathlib
 import sys
 import urllib.request
 
+try:
+    import httpx
+except ImportError:  # pragma: no cover
+    httpx = None  # type: ignore[assignment]
+
 DEFAULT_HUB = os.environ.get("ZW_HUB", "http://192.168.3.5:8700")
 DEFAULT_DEV = os.environ.get(
     "ZW_DEVICE_ID", "zwd_HS4ClQKT3qD977dDSktRWWCSqD4N5S9W")
@@ -174,10 +179,39 @@ async def _main_async(args: argparse.Namespace) -> int:
     return 0
 
 
+def _online_device(hub: str, cookie: str) -> str:
+    """从 hub 里挑一台**当前在线**的设备。
+
+    ## 为什么（2026-11-20）
+
+    以前 `--device` 的默认值是**写死的一台机器码**。那台机器换过机器码之后
+    （覆盖安装、配置目录变化都会导致），默认值就指向一台离线设备，
+    于是终端永远报「设备离线」—— 而 hub 上明明另一台是 `realtime=True`。
+
+    实测踩过：`DEFAULT_DEV` 指向 `zwd_HS4ClQKT…`（离线），
+    真正在线的是 `zwd_toMfovGt…`，排查了半天才发现是脚本自己的默认值过期。
+
+    现在：显式给了 `--device` 就用它；没给就挑在线的那台；
+    只有这样最稳。
+    """
+    try:
+        r = httpx.get(f"{hub}/v1/console/overview",
+                      headers={"Cookie": f"zw_panel={cookie}"}, timeout=15)
+        machines = ((r.json() or {}).get("data") or {}).get("machines") or []
+    except Exception:  # noqa: BLE001 —— 挑不出来就退回默认值
+        return ""
+    # 优先"实时通道在线"的，其次"心跳在线"的
+    for key in ("realtime", "online"):
+        for m in machines:
+            if m.get(key) and m.get("device_id"):
+                return str(m["device_id"])
+    return ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="云电脑常驻终端（经 hub 中继）")
     ap.add_argument("--hub", default=DEFAULT_HUB)
-    ap.add_argument("--device", default=DEFAULT_DEV)
+    ap.add_argument("--device", default="", help="留空=自动挑当前在线的设备")
     ap.add_argument("-c", "--command", help="执行一条命令后退出")
     ap.add_argument("--timeout", type=int, default=120)
     ap.add_argument("--login", action="store_true", help="登录面板并保存 cookie")
@@ -197,6 +231,20 @@ def main() -> int:
             return 2
         print(f"已保存 cookie 到 {COOKIE_FILE}")
         return 0
+
+    # 没显式给设备就自动挑在线的；挑不到再退回内置默认值（提示用户）
+    if not args.device:
+        cookie = ""
+        try:
+            cookie = COOKIE_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        if cookie:
+            args.device = _online_device(args.hub, cookie)
+        if not args.device:
+            args.device = DEFAULT_DEV
+            print(f"[提示] 没找到在线设备，退回默认 {args.device}"
+                  f"（可用 --device 指定）", file=sys.stderr)
 
     return asyncio.run(_main_async(args))
 

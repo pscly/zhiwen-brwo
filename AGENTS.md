@@ -169,7 +169,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - **九项门槛**：740 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**32 项跨机端到端**、93 条主控台断言、45 条客户端控制台断言、46 条客户端 GUI 断言、23 项网关接管 —— 全绿
-- hub **0.8.27** 在 3.5 的 Docker 里跑着（云电脑 0.8.0 的机器码变成了 `zwd_toMfovGt43aSixO64UJOCgmqFodb0Lvq`，旧的 `zwd_HS4ClQKT…` 仍在库）；主页/监控/代理库/实时终端都通
+- hub **0.8.28** 在 3.5 的 Docker 里跑着（云电脑 0.8.0 的机器码变成了 `zwd_toMfovGt43aSixO64UJOCgmqFodb0Lvq`，旧的 `zwd_HS4ClQKT…` 仍在库）；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
@@ -218,10 +218,11 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 带认证的**真实**上游代理握手（落地代理只能经前置访问，本仓库所在网络连不到）。
 
 **待办（按优先级）**：
-1. RXYCDP 的扩展实物导入：**扫描→导入→默认带上整链已在云电脑真机跑通**
-   （扫到 Edge/Chrome；用扫到的路径导入 2 个扩展、`as_default` 生效、
-   新建环境自动带上）。仍缺的是"那台装着 RXYCDP 的机器"本身
-   —— 云电脑上确认没有这个浏览器，需要用户在自己机器上点一次「扫描本机」
+1. **扩展链路已真机验证（2026-11-20）**：5 个用户扩展（Bitwarden / Cookie-Editor /
+   沉浸式翻译 / 脚本猫 / YesCaptcha）全部 `is_default` → 新建环境全挂上 →
+   启动后 CDP 里能看到 `chrome-extension://` 的 service_worker 在跑。
+   仍缺的只是"从 RXYCDP 那个特定浏览器导出"——云电脑上确认没装它，
+   需要一台装着它的机器（在客户端点「扫描本机」即可）
 3. `zw sync rekey`（换主密码逐包重加密；碰主密码与加密快照，属危险区，需用户明确要求）
 4. hub 多用户/权限
 
