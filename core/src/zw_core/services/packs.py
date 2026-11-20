@@ -896,6 +896,68 @@ def default_pack_ids() -> list[str]:
     return [p["id"] for p in list_packs() if p.get("is_default")]
 
 
+def pack_usage(pack_id: str) -> list[dict[str, Any]]:
+    """这个包里的扩展，被哪些环境用着？
+
+    ## 为什么要它（2026-11-20 用户反馈）
+
+    用户要的不只是"建环境时带上哪些插件"，还要反过来看
+    「**每个插件装到了哪些浏览器**」。没有这个查询，删包前无法判断
+    "会不会影响正在用它的环境"，也没法回答"我这 5 个插件都装哪儿了"。
+
+    判据是**扩展 slug 是否出现在环境的 `extensions` 里**（那条字段存的是
+    扩展库 slug 或绝对路径）。包与 slug 的关系由包内 `extensions[].slug` 决定。
+    """
+    from . import manager
+
+    meta = _load_meta(pack_id)
+    slugs = {str(e.get("slug") or "") for e in (meta.get("extensions") or [])}
+    slugs.discard("")
+    if not slugs:
+        return []
+    hits: list[dict[str, Any]] = []
+    for prof in manager.list_profiles():
+        refs = {str(x) for x in (prof.get("extensions") or [])}
+        # 环境的 extensions 里也可能存绝对路径（老数据），路径里的目录名也算
+        norm = set()
+        for r in refs:
+            norm.add(r)
+            norm.add(Path(r).name)
+        common = slugs & norm
+        if common:
+            hits.append({
+                "profile_id": prof.get("id"),
+                "name": prof.get("name"),
+                "running": bool(prof.get("running")),
+                "matched": sorted(common),
+            })
+    return hits
+
+
+def remove_extensions_from_profile(profile_ref: str, slugs: list[str]) -> dict[str, Any]:
+    """把指定扩展从环境里摘掉（只改环境记录，不动扩展库与包）。
+
+    用户要能"管理每个浏览器装了哪些插件" —— 有加就得有减。
+    环境正跑着时返回 `needs_restart`：`--load-extension` 只在启动时读。
+    """
+    from . import manager
+
+    p = manager.get_profile(profile_ref)
+    drop = {str(s) for s in (slugs or []) if s}
+    before = [str(x) for x in (p.get("extensions") or [])]
+    after = [x for x in before if x not in drop and Path(x).name not in drop]
+    # 用 update_profile 走同一条热更新路径（它会把 extensions 写库并置需要重启）
+    res = manager.update_profile(p["id"], {"extensions": after})
+    return {
+        "ok": True,
+        "profile": p["id"],
+        "name": p.get("name"),
+        "removed": sorted(set(before) - set(after)),
+        "extensions": after,
+        "needs_restart": bool(res.get("needs_restart") or res.get("restart_required")),
+    }
+
+
 def export_zip(pack_id: str) -> tuple[bytes, str]:
     """把一个本机包打成 zip 字节，返回 `(字节, 建议文件名)`。
 

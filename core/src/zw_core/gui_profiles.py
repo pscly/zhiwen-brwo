@@ -495,15 +495,16 @@ class CoreApi:
     def create_profile(
         self, name: str, group: str = "", note: str = "",
         with_default_packs: bool = True,
+        pack_ids: list[str] | None = None,
     ) -> tuple[bool, Any, dict[str, Any] | None]:
+        """建环境。`pack_ids` 非空时**只带这些包**（优先于 with_default_packs）。"""
         # 注意字段名是 `group_name`（见 api.py 的 ProfileCreate）：
         # 传 `group` 会被 pydantic 当未知字段忽略，分组就静默丢了。
-        return self.call(
-            "POST",
-            "/api/v1/profiles",
-            json_body={"name": name, "group_name": group, "note": note,
-                       "with_default_packs": with_default_packs},
-        )
+        body: dict[str, Any] = {"name": name, "group_name": group, "note": note,
+                                "with_default_packs": with_default_packs}
+        if pack_ids:
+            body["pack_ids"] = list(pack_ids)
+        return self.call("POST", "/api/v1/profiles", json_body=body)
 
     def start_profile(self, ref: str) -> tuple[bool, Any, dict[str, Any] | None]:
         # 拉起浏览器是同步的：要等 /json/version 就绪，可能几十秒。
@@ -658,6 +659,14 @@ class CoreApi:
     def delete_pack(self, pack_id: str) -> tuple[bool, Any, dict[str, Any] | None]:
         return _unwrap_business(*self.call(
             "DELETE", f"/api/v1/packs/{quote(pack_id, safe='')}", timeout=60.0,
+        ))
+
+    def remove_extensions(self, ref: str,
+                          slugs: list[str]) -> tuple[bool, Any, dict[str, Any] | None]:
+        """从环境里摘掉指定扩展（只改环境记录，不动扩展库与包）。"""
+        return _unwrap_business(*self.call(
+            "POST", f"/api/v1/profiles/{quote(ref, safe='')}/extensions/remove",
+            json_body={"slugs": list(slugs)}, timeout=120.0,
         ))
 
     def apply_packs(self, ref: str, pack_ids: list[str]) -> tuple[bool, Any, dict[str, Any] | None]:
@@ -882,6 +891,61 @@ class TextOverlay(_Overlay):
                                      wraplength=320)
         self.result_label.pack(fill="x", pady=(3, 0))
         return self.result_label
+
+    def add_pack_picker(self, packs: list[dict[str, Any]]) -> None:
+        """在浮层里列出所有扩展包，让用户**逐个勾选**要带哪些。
+
+        ## 为什么（2026-11-20 用户反馈）
+
+        以前只有一个「带上默认扩展包」的勾选框：要么全带、要么全不带。
+        用户的原话是「新建浏览器的时候，我希望是可以直接继承插件的」——
+        他要的是**能选**，比如只要 Bitwarden + 脚本猫 + 沉浸式翻译，
+        不要那两个测试用的。
+
+        勾选结果放进 `self.vars["pack_ids"]`，`_values()` 会把它当普通字段收走，
+        提交时由 `pack_ids` 参数传给后端（后端优先级高于 with_default_packs）。
+        """
+        row = tk.Frame(self.body, bg=self.theme.card2)
+        row.pack(fill="x", pady=(8, 0), before=self.error_label)
+        tk.Label(row, text="插件（勾选要带的包）", bg=self.theme.card2,
+                 fg=self.theme.dim, font=self.fonts["tiny"], anchor="w").pack(fill="x")
+        if not packs:
+            tk.Label(row, text="还没有扩展包 —— 先去「扩展包」面板导入或从控制台拉取。",
+                     bg=self.theme.card2, fg=self.theme.faint, font=self.fonts["tiny"],
+                     anchor="w", justify="left", wraplength=320).pack(fill="x", pady=(2, 0))
+            self.vars["pack_ids"] = tk.StringVar(value="")
+            return
+
+        box = tk.Frame(row, bg=self.theme.card2)
+        box.pack(fill="x", pady=(2, 0))
+        picked: list[tuple[tk.StringVar, str]] = []
+        for p in packs[:12]:
+            pid = str(p.get("id") or "")
+            label = f"{p.get('name') or pid}（{p.get('extension_count', 0)} 个扩展" \
+                    + ("，带数据" if p.get("with_data") else "") + "）"
+            var = tk.StringVar(value="1" if p.get("is_default") else "")
+            ttk.Checkbutton(box, text=label, style="Card.TCheckbutton",
+                            variable=var, onvalue="1", offvalue="").pack(anchor="w")
+            picked.append((var, pid))
+        tk.Label(row, text="勾了就只带这些（覆盖上面的「带上默认扩展包」）；"
+                           "一个都不勾 = 干净环境。",
+                 bg=self.theme.card2, fg=self.theme.faint, font=self.fonts["tiny"],
+                 anchor="w", justify="left", wraplength=320).pack(fill="x", pady=(2, 0))
+
+        # 用一个 StringVar 承载"逗号分隔的选中 id"，这样能直接复用 _values()
+        holder = tk.StringVar(value=",".join(pid for v, pid in picked if v.get() == "1"))
+        for var, pid in picked:
+            def _sync(*_a, _v=var, _p=pid) -> None:
+                cur = [x for x in (holder.get() or "").split(",") if x]
+                if _v.get() == "1":
+                    if _p not in cur:
+                        cur.append(_p)
+                else:
+                    cur = [x for x in cur if x != _p]
+                holder.set(",".join(cur))
+            var.trace_add("write", _sync)
+        self.vars["pack_ids"] = holder
+        self._placeholders.pop("pack_ids", None)
 
     def add_check_row(self, key: str, text: str, *, checked: bool = True,
                       hint: str = "") -> None:
@@ -1156,6 +1220,10 @@ class CreateProfileOverlay(TextOverlay):
             hint="默认会把「设为默认」的扩展包（插件+数据）一起带上；"
                  "取消勾选则建一个干净的。",
         )
+        try:
+            self.add_pack_picker(self.api.list_packs()[1] or [])
+        except Exception:  # noqa: BLE001 —— 拉不到包列表就退化成"全带/全不带"
+            pass
         self.add_action_row("测试这个代理", self._test)
 
     def _test(self) -> None:
@@ -2438,6 +2506,8 @@ class ProfilePanel(tk.Frame):
                    command=lambda: self.ask_proxy(pid, name)).pack(side="right", padx=(0, 6))
         ttk.Button(acts, text="应用包", style="Tiny.TButton",
                    command=lambda: self.ask_apply_packs(pid, name)).pack(side="right", padx=(0, 6))
+        ttk.Button(acts, text="管理插件", style="Tiny.TButton",
+                   command=lambda: self.ask_manage_plugins(pid, name)).pack(side="right", padx=(0, 6))
 
     # -- 浮层统一入口 --
     def _open_overlay(self, ov: _Overlay) -> None:
@@ -2487,8 +2557,11 @@ class ProfilePanel(tk.Frame):
         self.on_log(f"正在创建环境「{name}」", "info")
         # 「当然也可以选择关闭」：勾选框的值是 "1"/""，这里转成布尔
         with_defaults = (values.get("with_default_packs") or "") == "1"
+        # 勾了具体包就只带那些（后端 pack_ids 优先于 with_default_packs）
+        picked = [x for x in (values.get("pack_ids") or "").split(",") if x.strip()]
         call_async(self, lambda: self.api.create_profile(
-            name, group, with_default_packs=with_defaults),
+            name, group, with_default_packs=with_defaults,
+            pack_ids=picked or None),
             lambda res: self._after_create(res, name, ov, proxy_text))
         return True
 
@@ -2744,6 +2817,71 @@ class ProfilePanel(tk.Frame):
             self._open_overlay(ov)
 
         call_async(self, self.api.list_packs, open_picker)
+
+    def ask_manage_plugins(self, pid: str, name: str) -> None:
+        """看这个环境装了哪些插件，并能逐个摘掉。
+
+        ## 为什么（2026-11-20 用户反馈）
+
+        用户要「每个浏览器的插件」这个视角：不只是"给它装"，还要能看见
+        "它现在有哪些、哪些是测试用的、把不需要的去掉"。
+
+        以前只有「应用扩展包」（只加不减）和一个裸文本框（要手输 slug），
+        管理起来很别扭。
+        """
+        def open_it(res: Any) -> None:
+            ok, data, err = res
+            if not ok:
+                self.set_status(f"读取环境失败：{(err or {}).get('message', '')}", bad=True)
+                return
+            d = data or {}
+            exts = [str(x) for x in (d.get("extensions") or [])]
+            running = bool(d.get("running"))
+            ov = _Overlay(self, self.theme, self.fonts)
+            card = self._make_card(ov, f"「{name}」的插件（{len(exts)} 个）")
+            if not exts:
+                tk.Label(card, text="这个环境还没有装插件。点「应用扩展包」给它装。",
+                         bg=self.theme.card2, fg=self.theme.faint, font=self.fonts["tiny"],
+                         anchor="w", justify="left", wraplength=380).pack(fill="x", pady=(6, 0))
+            else:
+                box = tk.Frame(card, bg=self.theme.card2)
+                box.pack(fill="x", pady=(6, 0))
+                for slug in exts:
+                    r = tk.Frame(box, bg=self.theme.card2)
+                    r.pack(fill="x", pady=1)
+                    tk.Label(r, text=slug, bg=self.theme.card2, fg=self.theme.ink,
+                             font=self.fonts["tiny"], anchor="w").pack(side="left")
+                    ttk.Button(r, text="移除", style="Tiny.TButton",
+                               command=lambda s_=slug: self._do_remove_ext(pid, name, s_, ov)
+                               ).pack(side="right")
+            if running:
+                tk.Label(card, text="环境正在运行：改完插件要重启才生效"
+                                    "（--load-extension 只在启动时读一次）。",
+                         bg=self.theme.card2, fg=self.theme.warn, font=self.fonts["tiny"],
+                         anchor="w", justify="left", wraplength=380).pack(fill="x", pady=(6, 0))
+            ttk.Button(card, text="关闭", style="Tiny.TButton",
+                       command=ov.close).pack(anchor="e", pady=(8, 0))
+            ov.open()
+
+        call_async(self, lambda: self.api.get_profile(pid), open_it)
+
+    def _do_remove_ext(self, pid: str, name: str, slug: str, ov: Any) -> None:
+        def done(res: Any) -> None:
+            ok, data, err = res
+            if not ok:
+                self.set_status(f"移除失败：{(err or {}).get('message', '')}", bad=True)
+                return
+            left = (data or {}).get("extensions") or []
+            self.on_log(f"已从「{name}」移除 {slug}，剩余 {len(left)} 个", "ok")
+            self.set_status(f"已移除 {slug}")
+            try:
+                ov.close()
+            except Exception:
+                pass
+            self.ask_manage_plugins(pid, name)      # 重开，看到最新列表
+            self.refresh(force=True)
+
+        call_async(self, lambda: self.api.remove_extensions(pid, [slug]), done)
 
     def _do_apply_packs(self, pid: str, name: str, pack_ids: list[str]) -> None:
         if self._busy:

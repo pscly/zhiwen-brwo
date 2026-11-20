@@ -197,10 +197,15 @@ class ProfileCreate(BaseModel):
     trim_on_stop: bool = False
     sync_enabled: bool = True
     cdp_enabled: bool = True
+    pack_ids: list[str] = Field(
+        default_factory=list,
+        description="只带这几个扩展包（显式选择，优先于 with_default_packs）。"
+                    "留空且 with_default_packs=true 时带所有默认包",
+    )
     with_default_packs: bool = Field(
         default=True,
         description="是否自动带上「默认扩展包」。false = 建一个干净的（插件/数据都不带），"
-                    "适合对照测试或排查'是不是插件导致的'",
+                    "适合对照测试或排查'是不是插件导致的'。给了 pack_ids 时本字段被忽略",
     )
 
 
@@ -674,6 +679,8 @@ def build_app() -> FastAPI:
                         {"method": "GET", "path": f"{API_PREFIX}/packs/scan-browsers", "说明": "扫描本机已装浏览器（Chrome/Edge 等）的用户数据目录，用来导入插件+数据"},
                         {"method": "POST", "path": f"{API_PREFIX}/packs/pull-hub", "说明": "从控制台（hub）拉取扩展包并导入本机，as_default=1 同时设为默认"},
                         {"method": "GET", "path": f"{API_PREFIX}/packs/{{pack_id}}/export", "说明": "把本机扩展包导出成 zip（上传到控制台用）"},
+                        {"method": "GET", "path": f"{API_PREFIX}/packs/{{pack_id}}/usage", "说明": "这个包的扩展被哪些环境用着（删包前判断影响）"},
+                        {"method": "POST", "path": f"{API_PREFIX}/profiles/{{ref}}/extensions/remove", "说明": "从环境里摘掉指定扩展（只改环境记录）"},
                         {"method": "GET", "path": f"{API_PREFIX}/packs/pull-hub/status", "说明": "上一次从控制台拉取扩展包的结果"},
                         {"method": "POST", "path": f"{API_PREFIX}/packs/push-hub", "说明": "把本机扩展包上传到控制台（不给 pack_id = 全部）"},
                         {"method": "GET", "path": f"{API_PREFIX}/engine", "说明": "内核状态：策略/路径/版本/能否加载扩展/下载进度（能加载扩展＝插件才会生效）"},
@@ -1168,6 +1175,29 @@ def build_app() -> FastAPI:
                 res["is_default"] = False
                 res["default_warning"] = f"包已导入，但设为默认失败：{type(exc).__name__}: {exc}"
         return ok(res)
+
+    @app.get(f"{API_PREFIX}/packs/{{pack_id}}/usage", tags=["扩展"], dependencies=[Auth],
+             summary="这个包里的扩展被哪些环境用着")
+    def packs_usage(pack_id: str) -> dict[str, Any]:
+        """反过来查：这个插件装到了哪些浏览器。
+
+        用户要「每个插件安装到哪些浏览器」的视图，删包前也要知道会影响谁。
+        """
+        from zw_core.services import packs as packsvc
+
+        try:
+            return ok({"profiles": packsvc.pack_usage(pack_id)})
+        except packsvc.PackError as exc:
+            raise HTTPException(status_code=exc.status,
+                                detail={"code": exc.code, "message": exc.message}) from exc
+
+    @app.post(f"{API_PREFIX}/profiles/{{ref}}/extensions/remove", tags=["扩展"], dependencies=[Auth],
+              summary="从环境里摘掉指定的扩展（只改环境记录，不动库与包）")
+    def profile_extensions_remove(ref: str, body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        from zw_core.services import packs as packsvc
+
+        slugs = body.get("slugs") or body.get("extensions") or []
+        return ok(packsvc.remove_extensions_from_profile(ref, [str(x) for x in slugs]))
 
     @app.get(f"{API_PREFIX}/packs/{{pack_id}}/export", tags=["扩展"], dependencies=[Auth],
              summary="把本机扩展包导出成 zip（用来上传到控制台）")

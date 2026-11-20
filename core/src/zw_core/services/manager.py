@@ -496,13 +496,28 @@ def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
     # 默认值 true：不带这个字段时行为不变（老调用方/老客户端照旧带上）。
     want_defaults = payload.get("with_default_packs")
     want_defaults = True if want_defaults is None else bool(want_defaults)
-    if not profile_id and want_defaults:
+
+    # **用户显式点选的插件优先**（2026-11-20 用户反馈）。
+    #
+    # 以前这里只有"全带"或"全不带"两个选项，没法"只要 Bitwarden 和脚本猫"。
+    # 用户的原话：「新建浏览器的时候，我希望是可以直接继承插件的」——
+    # 他要的是**能选**，不是"要么全有要么全无"。
+    #
+    # 语义约定（三者互斥，优先级从高到低）：
+    #   1. `pack_ids`：只带这几个包（显式选择）
+    #   2. `with_default_packs=false`：一个都不带（干净环境）
+    #   3. 都不给：带所有 is_default 的包（老行为，保持兼容）
+    want_pack_ids = payload.get("pack_ids")
+    if not profile_id:
         try:
             from . import packs as packsvc
 
-            packsvc.apply_default_packs(pid)
+            if want_pack_ids:
+                packsvc.apply_to_profile(pid, [str(x) for x in want_pack_ids])
+            elif want_defaults:
+                packsvc.apply_default_packs(pid)
         except Exception as exc:  # noqa: BLE001 —— 环境已建好，失败不该让它回滚
-            msg = f"默认扩展包没能带上：{type(exc).__name__}: {exc}（环境已创建，可稍后手动应用）"
+            msg = f"扩展包没能带上：{type(exc).__name__}: {exc}（环境已创建，可稍后手动应用）"
             logger.warning("%s", msg)
             _DEFAULT_PACK_WARNINGS.setdefault(pid, []).append(msg)
         try:
