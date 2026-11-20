@@ -254,3 +254,44 @@ def test_ext_id_only_recorded_when_it_looks_like_a_real_id(tmp_path, monkeypatch
         assert i2["extensions"][0]["ext_id"] == real
     finally:
         config.reset_settings()
+
+
+def test_own_pack_wins_over_browser_detection(tmp_path, monkeypatch):
+    """本项目自己导出的包，不能被"浏览器目录"判据误吞。
+
+    ## 为什么（2026-11-20 Windows CI 真踩到）
+
+    包结构是 `extensions/` + `data/`。而 Windows / macOS **文件系统不区分大小写**，
+    所以 `(d / "Extensions").is_dir()` 会匹配到 `extensions/` →
+
+        被判成浏览器用户数据目录 → 转去 chrome 导入 → `data/` 丢失
+        往返后 with_data=0
+
+    Linux 大小写敏感，所以本地一直绿；CI 的 Windows 直接红了两条。
+
+    修法：**包自身结构优先** —— 同时有 `data/` 和 `extensions/`（不区分大小写）
+    就是本项目的包，不再走浏览器目录那条路。
+    """
+    import io
+    import zipfile
+
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        # 大写 Extensions —— 模拟 Windows 上两者是同一个目录
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("Extensions/aaa/manifest.json",
+                       json.dumps({"name": "导出扩展", "version": "1"}))
+            z.writestr("data/aaa/000003.log", b"STATE")
+        zp = tmp_path / "win.zip"
+        zp.write_bytes(buf.getvalue())
+
+        info = packs.import_pack(str(zp), name="Windows 往返")
+        assert info["with_data"] == 1, f"包被误判成浏览器目录了：{info}"
+        assert info["extensions"][0]["data_dir"], "data_dir 为空"
+    finally:
+        config.reset_settings()

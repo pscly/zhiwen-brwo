@@ -1,5 +1,74 @@
 # CHANGELOG
 
+## 0.8.25 — 2026-11-20
+
+**Windows / macOS CI 红了两条 —— 根因是文件系统不区分大小写。**
+
+### 现象
+
+0.8.24 的 CI：Linux `success`，Windows 与 macOS `failure`。
+失败的是我新加的往返测试：
+
+```
+FAILED test_packsync_e2e.py::test_export_roundtrip_keeps_data
+  AssertionError: 往返后数据丢了：with_data: 0, data_dir: ''
+FAILED test_packsync_e2e.py::test_push_then_delete_then_pull
+  AssertionError: 拉回来数据丢了：with_data: 0
+```
+
+**本地一直绿**（Linux 大小写敏感）。
+
+### 根因
+
+0.8.22 我给"zip 里装的是浏览器目录"加了识别：
+
+```python
+if _looks_like_browser_userdata(root):
+    return _import_from_chrome(str(root), name)
+```
+
+而那个判据是 `(d / "Extensions").is_dir()`。
+
+本项目**自己导出的包**结构是 `extensions/` + `data/`。Windows / macOS 的
+文件系统**不区分大小写** —— `(d / "Extensions")` 会匹配到 `extensions/`：
+
+```
+包被误判成浏览器目录 → 转去 chrome 导入 → data/ 丢失 → with_data=0
+```
+
+Linux 上 `Extensions` ≠ `extensions`，所以永远走不到这条路。
+
+### 修法
+
+**包自身结构优先**：同时有 `data/` 和 `extensions/`（**不区分大小写**比较）
+就是本项目的包，不再走浏览器目录那条路。
+
+```python
+def _has_ci_dir(parent, name):   # ci = case-insensitive
+    return any(c.is_dir() and c.name.lower() == name.lower() for c in parent.iterdir())
+is_own_pack = _has_ci_dir(root, DATA_DIR) and _has_ci_dir(root, CODE_DIR)
+if not is_own_pack and _looks_like_browser_userdata(root):
+```
+
+### 验证
+
+本地用「大写 `Extensions`」的 zip 模拟 Windows 行为，修复前 `with_data=0`、
+修复后 `with_data=1`：
+
+```
+Windows 式：Extensions 大写: with_data=1 data_dir='data/导出扩展'
+Linux 式：extensions 小写:  with_data=1 data_dir='data/导出扩展'
+```
+
+已固化成 `test_own_pack_wins_over_browser_detection`。
+
+> 这轮教训：**测试只在 Linux 跑是不够的**。大小写不敏感这类平台差异，
+> 只能在 CI 的多平台上暴露 —— 或者本地主动用"另一个大小写"去模拟。
+
+### 测试
+
+737 → **738 项**。九项门槛全绿（738 / 34 / 73 / 13 / 23 / 93 / 45 / 12 / 46）。
+
 ## 0.8.24 — 2026-11-20
 
 **接口数口径修正，并把"数字必须对得上"这件事交给机械核对。**

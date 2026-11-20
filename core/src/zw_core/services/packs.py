@@ -355,7 +355,29 @@ def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
             # `Extensions/` + `Local Extension Settings/` 一起压缩上传）。
             # 这种包必须走 chrome 导入，否则数据会被静默丢掉 —— 2026-11-20
             # 对抗审查实测：`extension_count=1, data_dir=''`，且**没有任何警告**。
-            if _looks_like_browser_userdata(root):
+            #
+            # **但本项目自己导出的包不能被误判**（Windows CI 上真踩到）：
+            # 包结构是 `extensions/` + `data/`，而 Windows 文件系统**不区分大小写**，
+            # `(d / "Extensions").is_dir()` 会匹配到 `extensions/` →
+            # 被判成浏览器目录 → 转去 chrome 导入 → `data/` 丢失 →
+            # 往返后 `with_data=0`。Linux 大小写敏感，所以本地一直过。
+            #
+            # 判据加一条：**有 `data/` 子目录的是本项目的包**，优先按包处理。
+            def _has_ci_dir(parent: Path, name: str) -> bool:
+                """不区分大小写地判断子目录存在。
+
+                Windows/macOS 文件系统不区分大小写，`extensions/` 与 `Extensions/`
+                是**同一个目录** —— 所以"包自己的 extensions/ 被识别成浏览器的
+                Extensions/"这种事在那些平台上一定会发生。
+                """
+                try:
+                    return any(c.is_dir() and c.name.lower() == name.lower()
+                               for c in parent.iterdir())
+                except OSError:
+                    return False
+
+            is_own_pack = _has_ci_dir(root, DATA_DIR) and _has_ci_dir(root, CODE_DIR)
+            if not is_own_pack and _looks_like_browser_userdata(root):
                 logger.info("zip 内容像浏览器用户数据目录，按 chrome 导入（含本地数据）：%s", src)
                 return _import_from_chrome(str(root), name)
         else:
