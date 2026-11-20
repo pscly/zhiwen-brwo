@@ -1,5 +1,52 @@
 # CHANGELOG
 
+## 0.8.26 — 2026-11-20
+
+**第一次用真浏览器证明「默认包真的生效」—— 链路最后一环以前没人验过。**
+
+### 用户的原话
+
+> 这样以后创建浏览器时，可以默认就把这些插件的数据都带上。
+
+这条链有四个环节：
+
+```
+① 导入包（代码 + 数据）→ ② 设为默认 → ③ 新建环境挂上 → ④ 启动浏览器真的加载
+```
+
+前三环一直有覆盖。**第四环——浏览器是不是真的加载了——从来没人验**。
+我这次用真 ungoogled-chromium + CDP 走完了：
+
+```
+--load-extension=/tmp/.../extensions/默认测试扩展-1.0   ← 命令行里有
+data-zw-ext = yes                                      ← 页面 DOM 里也有
+```
+
+扩展的 content script 真的注入到了 `browserleaks.com/ip` 页面上。
+数据也确认在环境 udd 里，而且是**双写**两份：
+源环境实测 ID `aaaa…` 与本机路径推算 ID `ieppnmphfgbhfenogjmjchhfjpahbifc`。
+
+### 排查中白折腾两轮：我的测试数据不合法
+
+前两次测都显示"扩展没加载"，我一度怀疑 `--load-extension` 在 headless 下被忽略。
+真相是：**我造的 manifest 缺 `manifest_version`**，Chromium 会**静默忽略**整个扩展 ——
+命令行里参数明明在，`Preferences` 里也找不到它，什么都不报。
+
+补上 `manifest_version: 3` + 一个 content script 后，一次就通。
+
+这条已写进测试文件顶部，并单独留了一条用例钉住"为什么测试数据必须带这个字段"。
+
+### 顺带确认
+
+环境的 `udd/Default/` 下只有 `Local Extension Settings`，**没有 `Extensions/`** ——
+这是设计：扩展代码放共享库 `<数据目录>/extensions/<slug>-<version>/`，
+包删掉不会弄坏正在用它的环境，环境只依赖库里那份。
+
+### 测试
+
+738 → **740 项**（`tests/test_default_pack_chain.py`）。
+九项门槛全绿（740 / 34 / 73 / 13 / 23 / 93 / 45 / 12 / 46）。
+
 ## 0.8.25 — 2026-11-20
 
 **Windows / macOS CI 红了两条 —— 根因是文件系统不区分大小写。**
