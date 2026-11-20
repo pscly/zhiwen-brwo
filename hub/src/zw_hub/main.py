@@ -1292,7 +1292,7 @@ def shell_submit(
 # 这组接口把那一层补上：core 导出 → 上传到这里 → 别的机器下载 → 导入本地。
 
 
-@app.post("/v1/packs", tags=["扩展包"], dependencies=[Auth],
+@app.post("/v1/packs", tags=["扩展包"], dependencies=[AdminAuth],
           summary="管理员：上传一个扩展包（原始 zip 字节流）")
 async def pack_upload(
     request: Request,
@@ -1319,13 +1319,13 @@ async def pack_upload(
     return ok(info)
 
 
-@app.get("/v1/packs", tags=["扩展包"], dependencies=[Auth],
+@app.get("/v1/packs", tags=["扩展包"], dependencies=[AdminAuth],
          summary="管理员：列出控制台里的扩展包")
 def pack_list() -> dict[str, Any]:
     return ok({"packs": packstore.listing(get_settings())})
 
 
-@app.get("/v1/packs/{pack_id}", tags=["扩展包"], dependencies=[Auth],
+@app.get("/v1/packs/{pack_id}", tags=["扩展包"], dependencies=[AdminAuth],
          summary="管理员：单个扩展包的详情")
 def pack_detail(pack_id: str) -> dict[str, Any]:
     try:
@@ -1334,7 +1334,7 @@ def pack_detail(pack_id: str) -> dict[str, Any]:
         raise HubError(exc.status, exc.code, exc.message) from exc
 
 
-@app.get("/v1/packs/{pack_id}/download", tags=["扩展包"], dependencies=[Auth],
+@app.get("/v1/packs/{pack_id}/download", tags=["扩展包"], dependencies=[AdminAuth],
          summary="管理员：下载扩展包（带 sha256 头，供下载方校验）")
 def pack_download(pack_id: str) -> Response:
     try:
@@ -1351,7 +1351,7 @@ def pack_download(pack_id: str) -> Response:
     )
 
 
-@app.delete("/v1/packs/{pack_id}", tags=["扩展包"], dependencies=[Auth],
+@app.delete("/v1/packs/{pack_id}", tags=["扩展包"], dependencies=[AdminAuth],
             summary="管理员：删除扩展包")
 def pack_delete(pack_id: str, request: Request, actor: str = AdminAuth) -> dict[str, Any]:
     try:

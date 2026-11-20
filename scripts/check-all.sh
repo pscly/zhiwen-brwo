@@ -52,7 +52,7 @@ cleanup(){
 }
 trap cleanup EXIT
 
-echo "════════ 1/8 单元测试 ════════"
+echo "════════ 1/9 单元测试 ════════"
 if out=$("$VENV" -m pytest tests -q --timeout=200 2>&1); then
   pass "pytest" "$(echo "$out"|grep -E '^[0-9]+ passed'|tail -1)"
 else
@@ -132,7 +132,7 @@ if [ -n "${ZW_HUB_URL:-}" ] && [ -n "${ZW_PANEL_USER:-}" ]; then
     -o /dev/null -w "  批准设备 → %{http_code}\n" 2>/dev/null || true
 fi
 
-echo "════════ 2/8 安装脚本静态检查（纯 Python，几秒）════════"
+echo "════════ 2/9 安装脚本静态检查（纯 Python，几秒）════════"
 # 这一条必须在推送前跑：CI 的 Windows job 会跑它，但本地从来没跑过 ——
 # 0.7.58 就是因为"改了测试里的白名单、忘了改 check-iss.py 里的同一份白名单"
 # 而让 Windows 构建红的。同一个规则写了两遍，是最容易不同步的地方。
@@ -142,7 +142,7 @@ else
   fail "check-iss" "$(echo "$out"|grep -E '^  FAIL'|head -2|tr '\n' ' ')"
 fi
 
-echo "════════ 3/8 单机全能力（e2e-check，真开浏览器）════════"
+echo "════════ 3/9 单机全能力（e2e-check，真开浏览器）════════"
 if out=$(ZW_CORE="http://$LAN:$PORT" ZW_ADMIN_TOKEN="$TOKEN" ZW_SYNC_PASSWORD="$SYNC_PW" \
         "$VENV" scripts/e2e-check.py 2>&1); then
   pass "e2e-check" "$(echo "$out"|grep -E '^通过'|tail -1)"
@@ -150,7 +150,7 @@ else
   fail "e2e-check" "$(echo "$out"|grep -A6 '失败项'|tr '\n' ' '|head -c 200)"
 fi
 
-echo "════════ 4/8 标签页行为（真浏览器）════════"
+echo "════════ 4/9 标签页行为（真浏览器）════════"
 if [ -x "$CHROME" ]; then
   if out=$(ZW_ROOT="$TMP/tabs" ZW_HOST=127.0.0.1 ZW_PORT=$((PORT+1)) ZW_ADMIN_TOKEN= \
             ZW_SHELL_ENABLED=false ZW_CHROME_BIN="$CHROME" \
@@ -164,7 +164,7 @@ else
   skipn "tabs-check" "没有可用的 Chromium（设 ZW_CHROME）"
 fi
 
-echo "════════ 5/8 网关接管 ════════"
+echo "════════ 5/9 网关接管 ════════"
 if command -v node >/dev/null; then
   # 这一项会被前面的步骤"绊一下"：它每次都要**真起一个环境 + 真开浏览器**，
   # 而前一步（tabs-check）刚跑完浏览器、系统里可能还有在退出的进程。
@@ -193,7 +193,7 @@ else
   skipn "gateway-check" "没有 node"
 fi
 
-echo "════════ 6/8 主控台界面（mock 后端）════════"
+echo "════════ 6/9 主控台界面（mock 后端）════════"
 if command -v node >/dev/null; then
   if out=$(node scripts/console-ui-check.cjs 2>&1); then
     pass "console-ui-check" "$(echo "$out"|grep -E '断言通过'|tail -1)"
@@ -204,7 +204,7 @@ else
   skipn "console-ui-check" "没有 node"
 fi
 
-echo "════════ 7/8 客户端控制台（web）════════"
+echo "════════ 7/9 客户端控制台（web）════════"
 if command -v node >/dev/null; then
   if out=$(ZW_CORE="http://$LAN:$PORT" ZW_ADMIN_TOKEN="$TOKEN" \
             node scripts/ui-check.cjs 2>&1); then
@@ -212,6 +212,7 @@ if command -v node >/dev/null; then
   else
     fail "ui-check" "$(echo "$out"|grep -E '失败项|通过 [0-9]+ 项'|tail -1)"
   fi
+  echo "════════ 8/9 远程凭机器码进控制台 ════════"
   # 远程控制台：**从非回环地址**打开，验证"凭机器码进入"。
   # 这是用户需求里独立的一半（本机免令牌是另一半），而 ui-check 只走 127.0.0.1。
   if out=$(ZW_CORE_IP="$LAN" ZW_CORE="http://127.0.0.1:$PORT" ZW_DEVICE_ID="$DEV" \
@@ -224,7 +225,7 @@ else
   skipn "ui-check" "没有 node"
 fi
 
-echo "════════ 8/8 客户端 GUI（tkinter）════════"
+echo "════════ 9/9 客户端 GUI（tkinter）════════"
 if [ "${SKIP_GUI:-0}" = "1" ]; then
   skipn "gui-check" "SKIP_GUI=1"
 else

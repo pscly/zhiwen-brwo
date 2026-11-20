@@ -508,6 +508,35 @@ def test_delivery_checklist_is_not_stale():
         "交付清单里缺这些门槛的结果行：" + ", ".join(missing)
     )
 
+    # ④ 各门槛的**执行条数**也要对得上（2026-11-20 对抗审查指出的缺口）。
+    #
+    # 以前只校验"条目在不在"，所以清单停着 `console-ui-check 81 通过`
+    # （实际 93）、`gui-check 42 通过`（实际 46）也永远不会被抓到 ——
+    # 而这份文档是用户照着核的验收单，数字错等于骗人。
+    #
+    # 数字来源：脚本自己声明的期望条数写在各脚本里（见下面 _EXPECT）。
+    # 这里不跑那些脚本（太慢），而是校验"清单里写的数字 == 期望表里的数字"，
+    # 期望表由人维护、并被对应脚本的实跑结果印证（门禁每次都跑）。
+    expect = {
+        "console-ui-check": 93,
+        "gui-check": 46,
+        "ui-check": 43,
+        "remote-console": 12,
+        "tabs-check": 13,
+        "gateway-check": 23,
+        "e2e-check": 73,
+    }
+    bad: list[str] = []
+    for name, want in expect.items():
+        m = re.search(rf"^{re.escape(name)}\s+✅\s+(\d+)\s*(?:通过|项)", doc, re.M)
+        if not m:
+            bad.append(f"{name}：清单里找不到结果行")
+            continue
+        got = int(m.group(1))
+        if got != want:
+            bad.append(f"{name}：清单写 {got}，期望 {want}")
+    assert not bad, "交付清单的执行条数过期：\n  " + "\n  ".join(bad)
+
 
 def test_delivery_checklist_covers_every_requirement():
     """交付清单必须覆盖用户的**每一条原始需求**。
@@ -557,8 +586,8 @@ def test_delivery_notes_track_current_version():
     text = latest.read_text(encoding="utf-8")
     assert core_ver in latest.name, f"最新交付说明是 {latest.name}，但当前版本是 {core_ver}"
     assert core_ver in text
-    assert "722 项" in text, "测试总数没更新"
-    assert "720 passed" in text, "passed 数没更新"
+    assert "733 项" in text, "测试总数没更新"
+    assert "731 passed" in text, "passed 数没更新"
     # 顺带确认 12 条需求表还在
     assert "十二条需求" in text
     # 版本号形如 0.8.19 的写法不该出现在别处（防止文件名与内容不一致）

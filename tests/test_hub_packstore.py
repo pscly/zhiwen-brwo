@@ -127,3 +127,37 @@ def test_empty_payload_rejected(tmp_path, monkeypatch):
         assert exc.code == "PACK_EMPTY"
     else:
         raise AssertionError("空包应当被拒")
+
+
+def test_non_zip_is_rejected_at_entry(tmp_path, monkeypatch):
+    """非 zip 内容必须在上传入口就拒，不能入库。
+
+    审计实测（2026-11-20）：`b"not a zip at all"` 以前能 200 入库、
+    在控制台列出一个坏包，直到**下载方导入时**才报错 —— 错误暴露得太晚。
+    """
+    packstore, s = _store(tmp_path, monkeypatch)
+    try:
+        packstore.put(s, b"not a zip at all", name="坏包")
+    except packstore.PackStoreError as exc:
+        assert exc.code == "PACK_NOT_ZIP"
+        assert exc.status == 400
+    else:
+        raise AssertionError("非 zip 应当被拒")
+    assert packstore.listing(s) == [], "被拒后不该留下记录"
+
+
+def test_core_shaped_pack_is_recognised(tmp_path, monkeypatch):
+    """core 真实产出的形状（`extensions/<key>/`）必须被认出来。
+
+    审计实测（2026-11-20）：hub 原来只认 `code/`，而 core 用
+    `CODE_DIR = "extensions"` —— 于是真实包上传后"扩展数"永远是 0。
+    """
+    packstore, s = _store(tmp_path, monkeypatch)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("extensions/aaa/manifest.json", json.dumps({"name": "A", "version": "1"}))
+        z.writestr("extensions/bbb/manifest.json", json.dumps({"name": "B", "version": "1"}))
+        z.writestr("data/aaa/000003.log", b"STATE")
+    info = packstore.put(s, buf.getvalue(), name="core 形状")
+    assert info["extension_count"] == 2, info
+    assert info["has_data"] is True

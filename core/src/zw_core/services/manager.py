@@ -396,6 +396,19 @@ def _tz_valid(tz: str) -> bool:
     return tz in _COMMON_TZ
 
 
+#: 建环境时"默认扩展包没带上"的告警，按 profile_id 暂存。
+#:
+#: ## 为什么要这个（2026-11-20 对抗审查）
+#:
+#: 原来的写法是：`apply_default_packs` 整段 `except Exception: logger.warning(...)`。
+#: 环境建成功了，但**返回体里没有任何字段**说明"包没带上"。用户建完环境、启动、
+#: 发现插件不在，只能翻日志才知道。
+#:
+#: 同一个函数里 `apply_to_profile` 明明有 `warnings` 字段，这里却丢了 ——
+#: 典型的"看起来成功实际没做"。现在补上，`get_profile` 会把它合并进 warnings。
+_DEFAULT_PACK_WARNINGS: dict[str, list[str]] = {}
+
+
 def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> dict[str, Any]:
     """创建环境。`profile_id` 只在"从同步中心导入"时由外部指定（必须与远端一致）。"""
     s = get_settings()
@@ -488,8 +501,10 @@ def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
             from . import packs as packsvc
 
             packsvc.apply_default_packs(pid)
-        except Exception as exc:  # noqa: BLE001 —— 见上
-            logger.warning("应用默认扩展包失败（环境已创建，可稍后手动应用）：%s", exc)
+        except Exception as exc:  # noqa: BLE001 —— 环境已建好，失败不该让它回滚
+            msg = f"默认扩展包没能带上：{type(exc).__name__}: {exc}（环境已创建，可稍后手动应用）"
+            logger.warning("%s", msg)
+            _DEFAULT_PACK_WARNINGS.setdefault(pid, []).append(msg)
         try:
             from . import launcher as launcher_svc
 
@@ -755,6 +770,10 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
     }
     if row.get("_extension_warnings"):
         out["warnings"] = row["_extension_warnings"]
+    # 建环境时"默认包没带上"的告警（见 _DEFAULT_PACK_WARNINGS 的注释）
+    pending = _DEFAULT_PACK_WARNINGS.pop(str(row.get("id") or ""), [])
+    if pending:
+        out.setdefault("warnings", []).extend(pending)
     if row.get("_proxy_relay_port"):
         # 这条文案必须是"实际发生了什么"，不能沿用旧说法。
         # 旧文案说"通过内置认证扩展生效" —— Chrome 137+ 已忽略 --load-extension

@@ -162,3 +162,46 @@ def test_zip_without_data_still_works(tmp_path, monkeypatch):
         assert info["extensions"][0]["has_data"] is False
     finally:
         config.reset_settings()
+
+
+def test_chrome_dir_as_zip_keeps_data(tmp_path, monkeypatch):
+    """把浏览器目录**打成 zip** 导入，数据不能丢。
+
+    ## 为什么（2026-11-20 对抗审查实测）
+
+    用户很自然会这样做：把 `Extensions/` + `Local Extension Settings/`
+    一起压缩上传。而 zip 分支只认 `data/<key>`，于是：
+
+        extension_count=1, data_dir=''   ← 数据没了
+        而且**没有任何 warnings**
+
+    同一个目录直接给路径是好的（`with_data=1`），打成 zip 就丢 ——
+    这种"换个方式就静默失效"最难发现。
+    """
+    import io
+    import zipfile
+
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("Extensions/aaa/manifest.json",
+                       json.dumps({"name": "扩展A", "version": "1"}))
+            z.writestr("Extensions/aaa/sw.js", "void 0;")
+            z.writestr("Local Extension Settings/aaa/000003.log", b"STATE")
+        zp = tmp_path / "chrome.zip"
+        zp.write_bytes(buf.getvalue())
+
+        info = packs.import_pack(str(zp), name="Chrome目录zip")
+        assert info["extension_count"] == 1, info
+        assert info["with_data"] == 1, f"数据丢了：{info}"
+        # 数据文件真的落盘
+        pdir = packs.packs_root() / info["id"]
+        files = [p.name for p in (pdir / "data").rglob("*") if p.is_file()]
+        assert "000003.log" in files, files
+    finally:
+        config.reset_settings()

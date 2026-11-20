@@ -35,13 +35,14 @@ def test_watchdog_exists_and_is_called_in_tick():
     assert "watch_core()" in s, "看护没被 tick 调用（等于没写）"
 
 
-def test_watchdog_needs_two_consecutive_failures():
-    """单次不通不重启 —— 一次抖动就把好的服务杀掉更糟。"""
+def test_watchdog_delegates_to_pure_decision():
+    """闭包只负责调判定函数，"连续两次"的门槛由纯函数保证（见下方行为测试）。"""
     s = _src()
+    assert "def _watchdog_decision" in s, "判定没抽成可测的纯函数"
     seg = s[s.index("def watch_core"):]
     seg = seg[: seg.index("\n    def tick")] if "\n    def tick" in seg else seg
-    assert "core_miss" in seg
-    assert "core_miss\"] < 2" in seg or "core_miss'] < 2" in seg, "没有『连续两次』的门槛"
+    assert "_watchdog_decision(" in seg, "闭包没走判定函数"
+    assert 'if action in ("skip", "ok", "wait")' in seg, "没按动作分支处理"
 
 
 def test_watchdog_restarts_core_and_rebuilds_heartbeat():
@@ -66,3 +67,46 @@ def test_watchdog_does_not_restart_before_first_connect():
     seg = s[s.index("def watch_core"):]
     seg = seg[: seg.index("\n    def tick")] if "\n    def tick" in seg else seg
     assert 'state.get("core_on")' in seg, "没判断是否已连接过"
+
+
+# ── 行为测试（不是读源码字符串，而是喂状态、验决策）────────────
+
+def test_decision_waits_for_one_miss_then_heals():
+    """**核心约束**：单次不通只等，连续两次才重启。
+
+    一次抖动就把好的服务杀掉，比"偶尔恢复得慢"更糟 —— 会把正在
+    正常提供服务的 core 打断。
+    """
+    from zw_core.gui import _watchdog_decision
+
+    a1 = _watchdog_decision(core_on=True, healing=False, alive=False, misses=0)
+    assert a1 == ("wait", 1), a1
+    a2 = _watchdog_decision(core_on=True, healing=False, alive=False, misses=a1[1])
+    assert a2 == ("heal", 2), a2
+
+
+def test_decision_resets_counter_when_core_recovers():
+    """抖一下就恢复 → 计数必须清零，否则两次相隔很远的抖动会累积成"重启"。"""
+    from zw_core.gui import _watchdog_decision
+
+    miss = _watchdog_decision(core_on=True, healing=False, alive=False, misses=0)
+    assert miss[1] == 1
+    ok = _watchdog_decision(core_on=True, healing=False, alive=True, misses=miss[1])
+    assert ok == ("ok", 0), ok
+    # 再过很久又抖一次，仍然只是 wait
+    again = _watchdog_decision(core_on=True, healing=False, alive=False, misses=ok[1])
+    assert again == ("wait", 1), again
+
+
+def test_decision_skips_before_first_connect():
+    """还没连过服务器时 core 本来就没起，不该去"重启"。"""
+    from zw_core.gui import _watchdog_decision
+
+    assert _watchdog_decision(core_on=False, healing=False, alive=False, misses=0) == ("skip", 0)
+
+
+def test_decision_skips_while_healing():
+    """正在重启时不能再叠加一次重启。"""
+    from zw_core.gui import _watchdog_decision
+
+    assert _watchdog_decision(core_on=True, healing=True, alive=False, misses=5) == ("skip", 5)

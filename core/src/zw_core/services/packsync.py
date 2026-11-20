@@ -165,10 +165,19 @@ def pull(*, timeout: float = 60.0, as_default: bool = False) -> dict[str, Any]:
         want = str(item.get("sha256") or "")
         if not pid:
             continue
-        # 已经拉过、且服务器上的 sha 没变 → 跳过（不重复建包）
+        # 已经拉过、且服务器上的 sha 没变 → 跳过（不重复建包）。
+        #
+        # **但必须先确认本机的那个包还在**（2026-11-20 审出来的坑）：
+        # 用户删掉本机包之后再来拉，这里只比对 sha 就会判"已是最新"直接跳过，
+        # 于是**永远拉不回来**，而返回里还是 `ok=True` —— GUI 显示"没有新包"。
+        # 用户以为拉成功，实际一个包都没有。
         if pid in pulled and pulled[pid].get("sha256") == want:
-            skipped.append(f"{name}（已是最新）")
-            continue
+            local_id = str(pulled[pid].get("local_id") or "")
+            if local_id and _local_pack_exists(packs, local_id):
+                skipped.append(f"{name}（已是最新）")
+                continue
+            # 本机那份没了 → 当作没拉过，继续往下重新下载
+            logger.info("本机包 %s 已不存在，重新拉取 %s", local_id or "?", name)
         try:
             dr = httpx.get(f"{hub}/v1/packs/{pid}/download",
                            headers=_headers(dev, token), timeout=max(timeout, 120.0))
@@ -199,6 +208,17 @@ def pull(*, timeout: float = 60.0, as_default: bool = False) -> dict[str, Any]:
     if added:
         logger.info("从控制台拉取扩展包 %s 个：%s", len(added), "、".join(added))
     return {"ok": True, "added": added, "skipped": skipped, "error": ""}
+
+
+def _local_pack_exists(packs, pack_id: str) -> bool:
+    """本机是否还有这个包（按 id 精确查，异常一律当"没有"）。"""
+    try:
+        for p in packs.list_packs():
+            if str(p.get("id")) == str(pack_id):
+                return True
+    except Exception:  # noqa: BLE001 —— 查不到就重新拉，宁可多下一次
+        return False
+    return False
 
 
 def _import_bytes(packs, blob: bytes, name: str) -> dict[str, Any]:

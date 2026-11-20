@@ -351,6 +351,13 @@ def import_pack(src_path: str = "", name: str = "", from_profile: str = "",
                 raise PackError("PACK_INVALID_SOURCE", "只接受解包后的扩展目录，或 .zip 压缩包", 400)
             root = _extract_zip(src, staging)
             source_kind = "zip"
+            # zip 里装的可能是**浏览器用户数据目录**（用户很自然会把
+            # `Extensions/` + `Local Extension Settings/` 一起压缩上传）。
+            # 这种包必须走 chrome 导入，否则数据会被静默丢掉 —— 2026-11-20
+            # 对抗审查实测：`extension_count=1, data_dir=''`，且**没有任何警告**。
+            if _looks_like_browser_userdata(root):
+                logger.info("zip 内容像浏览器用户数据目录，按 chrome 导入（含本地数据）：%s", src)
+                return _import_from_chrome(str(root), name)
         else:
             root = src
             source_kind = "dir"

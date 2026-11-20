@@ -195,6 +195,34 @@ def _build_style(tk: Any, ttk: Any) -> dict[str, Any]:
             "big": big, "mono": MONO_FAMILY}
 
 
+def _watchdog_decision(*, core_on: bool, healing: bool, alive: bool,
+                       misses: int) -> tuple[str, int]:
+    """core 看护的判定（纯函数，好测）。
+
+    返回 `(动作, 新的连续失败次数)`，动作是：
+
+    - `"skip"`：还没连过服务器，或正在重启中 → 什么都不做
+    - `"ok"`：core 活着 → 清零计数
+    - `"wait"`：这次不通，但还没到"连续两次" → 再等一轮
+    - `"heal"`：连续两次不通 → 该重启了
+
+    ## 为什么单独抽出来
+
+    原来这段判定写在 `run_gui()` 的闭包里，**只能靠读源码字符串来"测试"**——
+    那种测试只能防手滑删除，证明不了"连续两次才重启"这个关键约束真的成立。
+
+    抽成纯函数后，可以直接喂各种状态组合去验行为。
+    """
+    if not core_on or healing:
+        return "skip", misses
+    if alive:
+        return "ok", 0
+    misses = int(misses) + 1
+    if misses < 2:
+        return "wait", misses
+    return "heal", misses
+
+
 def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更难读
     """启动图形界面。没有 tkinter 时退回命令行引导，而不是直接崩。"""
     global _default_root
@@ -718,17 +746,19 @@ def run_gui() -> int:  # noqa: C901  界面装配本来就长，硬拆反而更�
     state["core_healing"] = False
 
     def watch_core() -> None:
-        if not state.get("core_on") or state.get("core_healing"):
-            return
         try:
-            if core.is_running():
-                state["core_miss"] = 0
-                return
+            alive = bool(core.is_running())
         except Exception:
-            pass
-        state["core_miss"] = int(state.get("core_miss") or 0) + 1
-        if state["core_miss"] < 2:
-            return          # 单次抖动不重启（避免误判把好的服务干掉）
+            alive = False           # 探测本身抛异常 = 当作不通，但要连续两次才动手
+        action, misses = _watchdog_decision(
+            core_on=bool(state.get("core_on")),
+            healing=bool(state.get("core_healing")),
+            alive=alive,
+            misses=int(state.get("core_miss") or 0),
+        )
+        state["core_miss"] = misses
+        if action in ("skip", "ok", "wait"):
+            return              # 单次抖动不重启（避免误判把好的服务干掉）
         state["core_healing"] = True
         log("本机服务没响应，正在自动重启 …", "warn")
 

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import json
 import shutil
 import time
@@ -154,6 +155,14 @@ def put(
             f"包体积 {_human(len(data))} 超过上限 {_human(MAX_PACK_BYTES)}",
             413,
         )
+    # **入口就拒非 zip**（2026-11-20 对抗审查）：以前只查空/超大，
+    # `b"not a zip at all"` 也能 200 入库、在控制台列出一个坏包，
+    # 直到下载方导入时才报错 —— 错误暴露得太晚，而且是我这边该拦的。
+    import zipfile
+
+    if not zipfile.is_zipfile(io.BytesIO(data)):
+        raise PackStoreError("PACK_NOT_ZIP", "上传的内容不是合法的 zip 包", 400)
+
     pid = _safe_id(pack_id) if pack_id else uuid.uuid4().hex[:12]
     pdir = pack_dir(s, pid)
     zpath = pdir / f"{pid}.zip"
@@ -204,11 +213,24 @@ def _inspect_zip(path: Path) -> tuple[int, bool]:
             names = z.namelist()
     except (OSError, zipfile.BadZipFile):
         return 0, False
-    # 约定：`code/<key>/manifest.json` 是一个扩展；`data/<key>/...` 是它的本地数据
-    exts = {n.split("/")[1] for n in names
-            if n.startswith("code/") and n.count("/") >= 2 and n.endswith("/manifest.json")}
+    # 包内布局：**两种都要认**。
+    #
+    # 本项目 core 导出时用的是 `extensions/<key>/…` + `data/<key>/…`
+    # （`packs.py` 的 `CODE_DIR = "extensions"`），而我第一版这里只认 `code/` ——
+    # 于是 core 真实产出的包上传到控制台后，"扩展数"永远显示 0。
+    # 这种错不会报错，只是数字不对，最容易被忽略。
+    #
+    # 顺便也认 `code/`，因为早期文档和测试数据用的是那个名字。
+    code_prefixes = ("extensions/", "code/")
+    exts = set()
+    for n in names:
+        for pref in code_prefixes:
+            if n.startswith(pref) and n.count("/") >= 2 and n.endswith("/manifest.json"):
+                exts.add(n[len(pref):].split("/")[0])
     datas = {n.split("/")[1] for n in names if n.startswith("data/") and n.count("/") >= 2}
-    return len(exts), bool(datas & exts or datas)
+    # 带数据 = 至少有一个扩展同时有 data 目录（不再用 `or datas` 兜底 ——
+    # 那会把"只有零散 data、没有对应扩展"的包也标成带数据）
+    return len(exts), bool(datas & exts)
 
 
 def listing(s) -> list[dict[str, Any]]:

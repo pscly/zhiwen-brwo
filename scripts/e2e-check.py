@@ -428,7 +428,19 @@ def main() -> int:
     check("工具调用（zw_list_profiles）", "profiles" in payload, str(tc)[:200])
     r_noauth = httpx.post(CORE + "/mcp", json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"}, timeout=30)
     if TOKEN:
-        check("未带令牌被拒", r_noauth.status_code == 401, f"HTTP {r_noauth.status_code}")
+        # **回环免令牌是设计**（本机控制台不该要令牌）。所以这条断言必须区分调用地址：
+        #   从 127.0.0.1 访问 → 放行（200）是**正确**的
+        #   从 LAN 地址访问 → 必须 401
+        # 以前这里写死 401，于是照 AGENTS.md 的"最小验证"命令（ZW_CORE=127.0.0.1）
+        # 跑，这条一定红 —— 数字对地址敏感，不是稳定门槛。
+        # （2026-11-20 对抗审查实测：文档命令下 67 通过 / 1 失败。）
+        loopback = ("127.0.0.1" in CORE) or ("localhost" in CORE)
+        if loopback:
+            check("回环免令牌：不带令牌也放行（设计如此）",
+                  r_noauth.status_code == 200, f"HTTP {r_noauth.status_code}")
+        else:
+            check("非回环：没带令牌必须被拒", r_noauth.status_code == 401,
+                  f"HTTP {r_noauth.status_code}")
     else:
         skip("MCP 鉴权", "本机未配置令牌")
 

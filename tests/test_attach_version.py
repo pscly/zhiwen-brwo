@@ -106,3 +106,57 @@ def test_client_module_uses_absolute_import_for_version():
 
     # 且必须真的能取到 __version__
     assert "from zw_core import __version__" in _src()
+
+
+# ── 行为测试：真的起一个"旧版本服务"，看接管时会不会记下版本 ──────────
+
+def test_attach_detects_version_mismatch_end_to_end(tmp_path, monkeypatch):
+    """真起一个 HTTP 服务假装是"旧版 core"，让 LocalCore 接管它。
+
+    这是 `attached_version` 的实际用途：告诉用户"你接的是旧版本，升级没生效"。
+    字符串测试只能证明代码里写了这行，证明不了它真的读到了版本号。
+    """
+    import json
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    class Fake(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/healthz":
+                body = b'{"ok":true}'
+            elif self.path == "/api/v1/meta":
+                body = json.dumps({"ok": True, "data": {"version": "0.0.1-old"}}).encode()
+            else:
+                body = b"{}"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", port), Fake)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    from zw_core.client import LocalCore
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    from zw_core import config
+    config.reset_settings()
+    try:
+        core = LocalCore(port=port)
+        assert core.start() is True, core.error
+        assert core.attached is True, "应当接管而不是自己起一个"
+        assert core.attached_version == "0.0.1-old", \
+            f"没读到对方版本，实际={core.attached_version!r}"
+    finally:
+        srv.shutdown()
+        config.reset_settings()
