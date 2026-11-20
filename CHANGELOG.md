@@ -1,5 +1,69 @@
 # CHANGELOG
 
+## 0.8.27 — 2026-11-20
+
+**云电脑恢复连接，真机验证全部完成。**
+
+### 接入
+
+云电脑 core 在 `0.0.0.0:8730` 起来了（`ver=0.8.25`）。远程访问用
+`Authorization: Bearer <机器码>`：
+
+```
+version: 0.8.25   host: 0.0.0.0   port: 8730   auth_required: True
+engine: path=有 version=157.0.8103.78 ok=True
+hub 侧: 在线=True  实时=True  core可达=True  上次=5s
+```
+
+### 真机验证：扩展链路四环全通
+
+| 环节 | 结果 |
+|---|---|
+| ① 本机已有的包 | **5 个用户扩展**：Bitwarden / Cookie-Editor / 沉浸式翻译 / 脚本猫 / YesCaptcha |
+| ② 设为默认 | 全部 `is_default=true` |
+| ③ 新建环境 | 5 个都挂上；`extensions_active=True` |
+| ④ 启动后真的加载 | CDP target 里能看到 `chrome-extension://` 的 service_worker / background_page |
+
+第 ④ 环的证据（网关读 CDP，21 个 target 摘录）：
+
+```
+service_worker   chrome-extension://lcgoodaljoeigkacieaajoigmhnkdial/src/service…
+background_page  chrome-extension://lcgoodaljoeigkacieaajoigmhnkdial/src/offscreen…
+service_worker   chrome-extension://ccgniplcdaeapohoocjeongbfnnihnjp/background…
+page             https://bitwarden.com/browser-start/
+page             https://onboarding.immersivetranslate.com/…
+page             https://docs.scriptcat.org/docs/use/install_complete
+```
+
+扩展不但在列表里，它们的引导页/文档页都真的被打开了。
+
+### 检测页也在
+
+同一份 target 列表里：`browserleaks.com/ip`、`creepjs`、`ip123.in/zh/`。
+
+### 一处重要修正
+
+我此前一直写「RXYCDP 实物导入缺那台机器」。真机扫描结果是：
+
+```
+Edge   | Default | 扩展 2 个
+Chrome | Default | 扩展 1 个
+```
+
+**云电脑上确实没有 RXYCDP 这个浏览器**；但那 5 个插件包早就在本机库里、
+且能被环境带上并真实运行。所以"插件及数据打包 + 默认带上"这条
+**在真机上是通的**，缺的只是"从 RXYCDP 那个特定浏览器导出"这一步 ——
+而那需要一台装着它的机器，不是代码问题。
+
+### 顺手清理
+
+- 删掉我验证时生成的 `Edge真机包`（里面是浏览器内置组件，无价值）
+- 删掉临时验证环境，只留原有的 `TEST3` / `1`
+
+### 测试
+
+740 项；九项门槛全绿（740 / 34 / 73 / 13 / 23 / 93 / 45 / 12 / 46）。
+
 ## 0.8.26 — 2026-11-20
 
 **第一次用真浏览器证明「默认包真的生效」—— 链路最后一环以前没人验过。**

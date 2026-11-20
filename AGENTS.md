@@ -169,7 +169,7 @@ ZW_CHROME=<chrome> .venv/bin/python scripts/tabs-check.py  # 13 通过 / 0 失�
 
 **已验证**（2026-11-17，Linux + 云电脑 Windows 实机）：
 - **九项门槛**：740 单元测试、**73 项单机端到端（0 失败 / 3 跳过）**、**32 项跨机端到端**、93 条主控台断言、45 条客户端控制台断言、46 条客户端 GUI 断言、23 项网关接管 —— 全绿
-- hub **0.8.26** 在 3.5 的 Docker 里跑着（云电脑 0.8.0 的机器码变成了 `zwd_toMfovGt43aSixO64UJOCgmqFodb0Lvq`，旧的 `zwd_HS4ClQKT…` 仍在库）；主页/监控/代理库/实时终端都通
+- hub **0.8.27** 在 3.5 的 Docker 里跑着（云电脑 0.8.0 的机器码变成了 `zwd_toMfovGt43aSixO64UJOCgmqFodb0Lvq`，旧的 `zwd_HS4ClQKT…` 仍在库）；主页/监控/代理库/实时终端都通
 
 **在真机上验过的**（云电脑 Windows 10/11 + Chrome 157）：
 - 免授权码审批流程（pending → 服务器点允许 → 客户端自动进入）
