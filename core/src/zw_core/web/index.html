@@ -2349,6 +2349,8 @@ function renderPacks() {
       <div class="grow"></div>
       <button class="btn sm" data-act="reload-view">刷新</button>
       <button class="btn sm primary" data-act="pack-import">＋ 从 Chrome 目录导入</button>
+      <button class="btn sm" data-act="pack-pull">↓ 从控制台拉取</button>
+      <button class="btn sm" data-act="pack-push">↑ 上传到控制台</button>
     </div>
     <div class="table-wrap">
       <table class="tbl"><thead><tr>
@@ -3876,6 +3878,36 @@ function onAct(act, node, ev) {
         .catch((e) => toastErr(e, '下载内核失败'));
       break;
     case 'pack-import': openPackImport(); break;
+    case 'pack-pull': {
+      // 从控制台（hub）拉包。以前网页控制台**没有这个入口** ——
+      // 只有桌面 GUI 有，浏览器里打开就干不了这件事。
+      toast('正在从控制台拉取 …');
+      api('POST', '/api/v1/packs/pull-hub')
+        .then((d) => {
+          const added = (d && d.added) || [];
+          const skipped = (d && d.skipped) || [];
+          if (added.length) toast(`拉下 ${added.length} 个：${added.join('、')}`, 'ok');
+          else if (skipped.length) toast(`没有新包（${skipped[0]}）`);
+          else toast('控制台里还没有扩展包');
+          render();
+        })
+        .catch((e) => toastErr(e, '拉取失败'));
+      break;
+    }
+    case 'pack-push': {
+      // 上传本机包到控制台。控制台要 zip，以前没有任何地方能产出它。
+      toast('正在上传到控制台 …');
+      api('POST', '/api/v1/packs/push-hub')
+        .then((d) => {
+          const pushed = (d && d.pushed) || [];
+          const skipped = (d && d.skipped) || [];
+          if (pushed.length) toast(`已上传 ${pushed.length} 个：${pushed.join('、')}`, 'ok');
+          else if (skipped.length) toast(`没有上传（${skipped[0]}）`);
+          else toast('本机还没有扩展包');
+        })
+        .catch((e) => toastErr(e, '上传失败'));
+      break;
+    }
     case 'pack-default': {
       // `onAct` 是同步函数，这里不能 await —— 用 then 链，跟 file 里其它动作一致。
       const on = node.dataset.on === '1';

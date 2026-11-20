@@ -520,7 +520,7 @@ def test_delivery_checklist_is_not_stale():
     expect = {
         "console-ui-check": 93,
         "gui-check": 46,
-        "ui-check": 43,
+        "ui-check": 45,
         "remote-console": 12,
         "tabs-check": 13,
         "gateway-check": 23,
@@ -586,8 +586,8 @@ def test_delivery_notes_track_current_version():
     text = latest.read_text(encoding="utf-8")
     assert core_ver in latest.name, f"最新交付说明是 {latest.name}，但当前版本是 {core_ver}"
     assert core_ver in text
-    assert "733 项" in text, "测试总数没更新"
-    assert "731 passed" in text, "passed 数没更新"
+    assert "735 项" in text, "测试总数没更新"
+    assert "733 passed" in text, "passed 数没更新"
     # 顺带确认 12 条需求表还在
     assert "十二条需求" in text
     # 版本号形如 0.8.19 的写法不该出现在别处（防止文件名与内容不一致）

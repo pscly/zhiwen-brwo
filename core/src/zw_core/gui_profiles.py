@@ -617,6 +617,17 @@ class CoreApi:
             timeout=600.0,
         ))
 
+    def push_hub_packs(self, pack_id: str = "") -> tuple[bool, Any, dict[str, Any] | None]:
+        """把本机扩展包上传到控制台（不给 pack_id = 全部）。
+
+        以前只有"从控制台拉"，没有"推到控制台" —— 而控制台上传要的是 zip，
+        用户手上根本没有那个文件。这条补上后双向才通。
+        """
+        return _unwrap_business(*self.call(
+            "POST", f"/api/v1/packs/push-hub?pack_id={quote(pack_id, safe='')}",
+            timeout=600.0,
+        ))
+
     def install_extension(self, *, url: str = "", path: str = "",
                           name: str = "", make_pack: bool = True,
                           as_default: bool = False
@@ -1979,6 +1990,38 @@ class PacksOverlay(_Overlay):
                        _pull_done)
 
         hub_btn.configure(command=_pull)
+
+        # 「上传到控制台」：把本机包推上去，别的机器就能拉。
+        # 控制台上传要 zip，而在此之前客户端既没有导出接口也没有按钮 ——
+        # 用户手上有包、控制台要 zip，这一步是断的。
+        push_btn = ttk.Button(hub_row, text="上传到控制台", style="Tiny.TButton")
+        push_btn.pack(side="left", padx=(8, 0))
+
+        def _push_done(res: Any) -> None:
+            try:
+                push_btn.state(["!disabled"])
+            except Exception:
+                pass
+            ok_, data, err = res
+            if not ok_:
+                hub_msg.configure(text=f"上传失败：{(err or {}).get('message', '未知原因')}")
+                return
+            d = data or {}
+            pushed = d.get("pushed") or []
+            skipped = d.get("skipped") or []
+            if pushed:
+                hub_msg.configure(text=f"已上传 {len(pushed)} 个：{'、'.join(pushed)}")
+            elif skipped:
+                hub_msg.configure(text=f"没有上传（{skipped[0]}）")
+            else:
+                hub_msg.configure(text="本机还没有扩展包")
+
+        def _push() -> None:
+            push_btn.state(["disabled"])
+            hub_msg.configure(text="正在上传到控制台 …")
+            call_async(ov, lambda: self.api.push_hub_packs(), _push_done)
+
+        push_btn.configure(command=_push)
         ov.open()
 
     def _import_from_chrome_path(self, values: dict[str, str]) -> None:

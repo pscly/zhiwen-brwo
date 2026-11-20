@@ -98,6 +98,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check('扩展页出现「扩展包」区块', /扩展包/.test(extText), (extText || '').slice(0, 120));
   check('有「从 Chrome 目录导入」入口',
     (await page.locator('[data-act="pack-import"]').count()) >= 1);
+  // 跨机那两个动作：以前**只有桌面 GUI 有**，浏览器里打开控制台做不了。
+  check('有「从控制台拉取」按钮（跨机取包）',
+    (await page.locator('[data-act="pack-pull"]').count()) >= 1);
+  check('有「上传到控制台」按钮（跨机给包）',
+    (await page.locator('[data-act="pack-push"]').count()) >= 1);
   const packRows = await page.locator('[data-act="pack-del"]').count();
   check('应用了扩展包数据（在本地建一个包再验）', true, 'count=' + packRows);
 

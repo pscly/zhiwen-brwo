@@ -841,6 +841,45 @@ def default_pack_ids() -> list[str]:
     return [p["id"] for p in list_packs() if p.get("is_default")]
 
 
+def export_zip(pack_id: str) -> tuple[bytes, str]:
+    """把一个本机包打成 zip 字节，返回 `(字节, 建议文件名)`。
+
+    ## 为什么要它（2026-11-20 审查指出）
+
+    hub 的「上传扩展包」要的是 zip，而**在此之前没有任何地方能产出这个 zip**：
+    包存在 `<数据目录>/packs/<id>/`（`extensions/` + `data/`），既没有导出接口，
+    网页控制台也没有按钮。用户手上有包、控制台要 zip，中间这一步是断的。
+
+    包内布局与导入侧一致（`extensions/<key>/…` + `data/<key>/…`），
+    所以导出的包可以再导入回来 —— 这是往返成立的前提。
+    """
+    d = _pack_dir(pack_id)
+    if not d.is_dir():
+        raise PackError("PACK_NOT_FOUND", f"找不到扩展包：{pack_id}", 404)
+    meta = _load_meta(pack_id)
+
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for sub in (CODE_DIR, DATA_DIR):
+            root = d / sub
+            if not root.is_dir():
+                continue
+            for f in sorted(root.rglob("*")):
+                if f.is_file():
+                    z.write(f, str(f.relative_to(d)).replace("\\", "/"))
+        # manifest 一起带上：换机器导入后还能看到原来的包名与来源
+        mp = d / "meta.json"
+        if mp.is_file():
+            z.writestr("pack-meta.json", mp.read_bytes())
+
+    name = _resolve_pack_name(meta) or pack_id
+    safe = "".join(ch if (ch.isalnum() or ch in "-_") else "_" for ch in name)[:48] or pack_id
+    return buf.getvalue(), f"{safe}-{pack_id}.zip"
+
+
 def set_default(pack_id: str, enabled: bool) -> dict[str, Any]:
     meta = _load_meta(pack_id)
     meta["is_default"] = 1 if enabled else 0

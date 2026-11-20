@@ -673,7 +673,9 @@ def build_app() -> FastAPI:
                         {"method": "GET", "path": f"{API_PREFIX}/extensions/updates", "说明": "查已装扩展有无新版（只查带商店 ID 标记的）"},
                         {"method": "GET", "path": f"{API_PREFIX}/packs/scan-browsers", "说明": "扫描本机已装浏览器（Chrome/Edge 等）的用户数据目录，用来导入插件+数据"},
                         {"method": "POST", "path": f"{API_PREFIX}/packs/pull-hub", "说明": "从控制台（hub）拉取扩展包并导入本机，as_default=1 同时设为默认"},
+                        {"method": "GET", "path": f"{API_PREFIX}/packs/{{pack_id}}/export", "说明": "把本机扩展包导出成 zip（上传到控制台用）"},
                         {"method": "GET", "path": f"{API_PREFIX}/packs/pull-hub/status", "说明": "上一次从控制台拉取扩展包的结果"},
+                        {"method": "POST", "path": f"{API_PREFIX}/packs/push-hub", "说明": "把本机扩展包上传到控制台（不给 pack_id = 全部）"},
                         {"method": "GET", "path": f"{API_PREFIX}/engine", "说明": "内核状态：策略/路径/版本/能否加载扩展/下载进度（能加载扩展＝插件才会生效）"},
                         {"method": "POST", "path": f"{API_PREFIX}/engine/install", "说明": "后台下载安装 ungoogled-chromium（官方 Chrome 137 起不加载命令行扩展）"},
                         {"method": "POST", "path": f"{API_PREFIX}/maintenance/doctor", "说明": "环境自检（内核/数据库/令牌/磁盘/端口）"},
@@ -1167,6 +1169,26 @@ def build_app() -> FastAPI:
                 res["default_warning"] = f"包已导入，但设为默认失败：{type(exc).__name__}: {exc}"
         return ok(res)
 
+    @app.get(f"{API_PREFIX}/packs/{{pack_id}}/export", tags=["扩展"], dependencies=[Auth],
+             summary="把本机扩展包导出成 zip（用来上传到控制台）")
+    def packs_export(pack_id: str) -> Response:
+        """导出本机包为 zip。
+
+        控制台的「上传扩展包」要的是 zip 文件，而以前没有任何地方能生成它 ——
+        用户手上有包、控制台要 zip，中间这一步是断的。
+        """
+        from zw_core.services import packs as packsvc
+
+        try:
+            blob, filename = packsvc.export_zip(pack_id)
+        except packsvc.PackError as exc:
+            raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message}) from exc
+        return Response(
+            content=blob,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.post(f"{API_PREFIX}/packs/pull-hub", tags=["扩展"], dependencies=[Auth],
               summary="从控制台（hub）拉取扩展包并导入本机")
     def packs_pull_hub(as_default: bool = False) -> dict[str, Any]:
@@ -1179,6 +1201,18 @@ def build_app() -> FastAPI:
         from zw_core.services import packsync
 
         return ok(packsync.pull(as_default=as_default))
+
+    @app.post(f"{API_PREFIX}/packs/push-hub", tags=["扩展"], dependencies=[Auth],
+              summary="把本机扩展包上传到控制台（不给 pack_id = 上传全部）")
+    def packs_push_hub(pack_id: str = "") -> dict[str, Any]:
+        """把本机包推到控制台。
+
+        以前只有"从控制台拉"，没有"推到控制台" —— 而控制台上传要的是 zip，
+        用户手上没有那个文件。这里现打 zip 再推。
+        """
+        from zw_core.services import packsync
+
+        return ok(packsync.push(pack_id))
 
     @app.get(f"{API_PREFIX}/packs/pull-hub/status", tags=["扩展"], dependencies=[Auth],
              summary="上一次从控制台拉取扩展包的结果")

@@ -210,6 +210,65 @@ def pull(*, timeout: float = 60.0, as_default: bool = False) -> dict[str, Any]:
     return {"ok": True, "added": added, "skipped": skipped, "error": ""}
 
 
+def push(pack_id: str = "", *, timeout: float = 120.0) -> dict[str, Any]:
+    """把本机包上传到控制台。`pack_id` 为空 = 上传全部本机包。
+
+    ## 为什么要它（2026-11-20 审查指出）
+
+    在此之前只有"拉"没有"推"：控制台的上传接口存在，但**客户端没有入口**，
+    用户手上根本没有那个 zip。这条路是断的。
+
+    这里用 `packs.export_zip()` 现打 zip 再 POST 到 hub，id 沿用本机 id
+    （同 id 在 hub 上已存在会被 CAS 拒，返回里会说明跳过）。
+    """
+    hub, dev, token = _hub()
+    if not hub or not dev:
+        return {"ok": False, "pushed": [], "skipped": ["没有配置服务器或设备号"], "error": ""}
+
+    import httpx
+    from . import packs
+
+    try:
+        from . import shellagent
+
+        shellagent.ensure_registered(hub, dev, token)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("上传前注册设备失败（继续尝试）：%s", exc)
+
+    targets = [p for p in packs.list_packs()
+               if not pack_id or str(p.get("id")) == str(pack_id)]
+    if not targets:
+        return {"ok": False, "pushed": [], "skipped": [f"本机没有包：{pack_id or '（全部）'}"], "error": ""}
+
+    pushed: list[str] = []
+    skipped: list[str] = []
+    for item in targets:
+        pid = str(item.get("id") or "")
+        name = str(item.get("name") or pid)
+        try:
+            blob, _fn = packs.export_zip(pid)
+            r = httpx.post(
+                f"{hub}/v1/packs",
+                params={"name": name, "origin": dev, "id": pid},
+                content=blob,
+                headers={**_headers(dev, token), "Content-Type": "application/zip"},
+                timeout=max(timeout, 180.0),
+            )
+            if r.status_code == 409:
+                skipped.append(f"{name}（服务器上已有同 id 的包）")
+                continue
+            if r.status_code != 200:
+                raise RuntimeError(_err_of(r))
+            pushed.append(name)
+        except Exception as exc:  # noqa: BLE001 —— 单个失败不拖垮其余
+            skipped.append(f"{name}（{type(exc).__name__}: {exc}）")
+            logger.warning("上传扩展包 %s 失败：%s", name, exc)
+
+    if pushed:
+        logger.info("上传扩展包到控制台 %s 个：%s", len(pushed), "、".join(pushed))
+    return {"ok": True, "pushed": pushed, "skipped": skipped, "error": ""}
+
+
 def _local_pack_exists(packs, pack_id: str) -> bool:
     """本机是否还有这个包（按 id 精确查，异常一律当"没有"）。"""
     try:

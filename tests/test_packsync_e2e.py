@@ -58,6 +58,9 @@ def live_hub(tmp_path, monkeypatch):
     monkeypatch.setenv("ZW_HUB_TOKEN", "e2e-token")
     import zw_hub.config as cfg
     cfg._settings = None
+    # `devices()` / `store()` 也是模块级单例，跨用例复用会指向上一个 tmp 目录 ——
+    # 不重置就会出现"enroll 返回 200，但设备不在这个库里"的怪现象。
+    hub_main._devices = None
 
     port = _free_port()
     srv = uvicorn.Server(uvicorn.Config(hub_main.app, host="127.0.0.1", port=port,
@@ -145,5 +148,112 @@ def test_pull_end_to_end_and_repull_after_delete(live_hub, tmp_path, monkeypatch
         assert r2["ok"] is True, r2
         assert r2["added"], f"删了本机包却没重新拉：{r2}"
         assert len(packs.list_packs()) == 1, "本机包没恢复"
+    finally:
+        config.reset_settings()
+
+
+def test_export_roundtrip_keeps_data(tmp_path, monkeypatch):
+    """导出 zip 再导入，扩展与数据都要在。
+
+    ## 为什么（2026-11-20 审查指出）
+
+    hub 的「上传扩展包」要的是 zip，而在此之前**没有任何地方能产出它**：
+    包存在 `<数据目录>/packs/<id>/`，既没有导出接口也没按钮 ——
+    用户手上有包、控制台要 zip，中间这一步是断的。
+    """
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        d = tmp_path / "chrome" / "Default"
+        (d / "Extensions" / "aaa").mkdir(parents=True)
+        (d / "Extensions" / "aaa" / "manifest.json").write_text(
+            json.dumps({"name": "导出扩展", "version": "1"}))
+        les = d / "Local Extension Settings" / "aaa"
+        les.mkdir(parents=True)
+        (les / "000003.log").write_bytes(b"STATE")
+
+        src = packs.import_pack(str(d), name="导出测试")
+        assert src["with_data"] == 1
+
+        blob, fn = packs.export_zip(src["id"])
+        assert blob, "导出的 zip 是空的"
+        assert fn.endswith(".zip")
+
+        zp = tmp_path / "back.zip"
+        zp.write_bytes(blob)
+        back = packs.import_pack(str(zp), name="往返导入")
+        assert back["extension_count"] == 1, back
+        assert back["with_data"] == 1, f"往返后数据丢了：{back}"
+        pdir = packs.packs_root() / back["id"]
+        files = [p.name for p in (pdir / "data").rglob("*") if p.is_file()]
+        assert "000003.log" in files, files
+    finally:
+        config.reset_settings()
+
+
+def test_push_then_delete_then_pull(live_hub, tmp_path, monkeypatch):
+    """推送到控制台 → 删本地 → 再拉回来，全链成立。
+
+    这是"一次打包、多机使用"真正的那条路。以前只有拉没有推，路是断的。
+    """
+    import httpx
+    h = {"Authorization": "Bearer e2e-token"}
+    dev = "zwd_pushpull0001"
+    _er = httpx.post(f"{live_hub}/v1/devices/enroll",
+                 json={"device_id": dev, "label": "pp", "hostname": "pp",
+                       "platform": "Linux", "arch": "x86_64", "app_version": "0.8.21"},
+                 headers={**h, "Content-Type": "application/json"}, timeout=20)
+    assert _er.status_code == 200, f"enroll 失败：{_er.status_code} {_er.text[:200]}"
+    # 设备库路径跟 hub fixture 实际用的那个走。
+    # **必须重读 settings**：`zw_hub.config._settings` 是模块级单例，
+    # 上一个用例把它指到别的 tmp 目录了 —— 不重置就会去错误的库里找设备，
+    # 报 `DeviceError: 设备不存在`（单独跑却通过，典型的测试间污染）。
+    from zw_hub.devices import DeviceStore
+    hub_root = tmp_path / "hub"
+    import zw_hub.config as hcfg
+    from zw_hub import main as _hm
+    _hm._devices = None      # 让下面的查询用当前 settings 的库
+    _real = __import__("pathlib").Path(hcfg.get_settings().data_dir)
+    _st = DeviceStore(_real / "devices.db")
+    _known = [d.get("device_id") for d in _st.listing()]
+    assert dev in _known, f"设备没注册：实际库={_real}，已有={_known}"
+    _st.approve(dev, actor="test")
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "core"))
+    monkeypatch.setenv("ZW_HUB_URL", live_hub)
+    monkeypatch.setenv("ZW_HUB_TOKEN", "e2e-token")
+    monkeypatch.setenv("ZW_DEVICE_ID", dev)
+    monkeypatch.setenv("ZW_PORT", str(_free_port()))
+    monkeypatch.setenv("ZW_HOST", "127.0.0.1")
+    monkeypatch.setenv("ZW_ADMIN_TOKEN", "")
+    from zw_core import config
+    config.reset_settings()
+    from zw_core.services import packs, packsync
+
+    try:
+        d = tmp_path / "chrome" / "Default"
+        (d / "Extensions" / "bbb").mkdir(parents=True)
+        (d / "Extensions" / "bbb" / "manifest.json").write_text(
+            json.dumps({"name": "推送扩展", "version": "1"}))
+        les = d / "Local Extension Settings" / "bbb"
+        les.mkdir(parents=True)
+        (les / "000003.log").write_bytes(b"STATE")
+        pk = packs.import_pack(str(d), name="推送包")
+
+        r = packsync.push()
+        assert r["ok"] is True, r
+        assert r["pushed"] == ["推送包"], r
+
+        packs.delete_pack(pk["id"])
+        assert packs.list_packs() == []
+
+        r2 = packsync.pull()
+        assert r2["ok"] is True, r2
+        got = packs.list_packs()
+        assert len(got) == 1, got
+        assert got[0]["with_data"] == 1, f"拉回来数据丢了：{got[0]}"
     finally:
         config.reset_settings()
