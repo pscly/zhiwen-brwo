@@ -93,11 +93,25 @@ def packs_root() -> Path:
 
 
 def _pack_dir(pack_id: str) -> Path:
-    # pack_id 会进路径，必须挡住 ../ 这类东西
-    safe = "".join(ch for ch in str(pack_id) if ch.isalnum() or ch in "-_")
-    if not safe:
+    """把 pack_id 映射成包目录。
+
+    ## 非法字符必须**拒绝**，不能过滤掉（2026-11-20 审查指出）
+
+    以前是"把非法字符丢掉再拼路径"，后果：
+
+        a/b  →  packs/ab
+        ab   →  packs/ab      ← 两个不同 id 落到同一个目录！
+
+    于是 `DELETE /packs/a%2Fb` 会删掉 `ab` 的包 —— 静默错删别人的数据。
+    路径穿越虽然挡住了，但撞车这一条更隐蔽。
+
+    现在：只接受 `[A-Za-z0-9_-]`，含其它字符一律 404（"包不存在"，
+    对外不区分"非法"与"不存在"，避免探测实现细节）。
+    """
+    raw = str(pack_id)
+    if not raw or len(raw) > 64 or not all(ch.isalnum() or ch in "-_" for ch in raw):
         raise PackError("PACK_NOT_FOUND", f"包标识不合法：{pack_id!r}", 404)
-    return packs_root() / safe
+    return packs_root() / raw
 
 
 def _human(n: int) -> str:
@@ -947,12 +961,22 @@ def remove_extensions_from_profile(profile_ref: str, slugs: list[str]) -> dict[s
     before = [str(x) for x in (p.get("extensions") or [])]
     after = [x for x in before if x not in drop and Path(x).name not in drop]
     # 用 update_profile 走同一条热更新路径（它会把 extensions 写库并置需要重启）
+    removed = sorted(set(before) - set(after))
+    # **一个都没删掉时不能回 ok=true**（2026-11-20 审查指出）。
+    # 以前前端拿到 ok 就弹「已移除 xxx」，而拼错的 slug 其实什么都没删 ——
+    # 用户以为删了，重启后发现插件还在。
+    if not removed:
+        raise PackError(
+            "EXTENSION_NOT_BOUND",
+            f"这个环境里没有这些扩展：{', '.join(sorted(drop)) or '（空）'}",
+            404,
+        )
     res = manager.update_profile(p["id"], {"extensions": after})
     return {
         "ok": True,
         "profile": p["id"],
         "name": p.get("name"),
-        "removed": sorted(set(before) - set(after)),
+        "removed": removed,
         "extensions": after,
         "needs_restart": bool(res.get("needs_restart") or res.get("restart_required")),
     }
@@ -1006,9 +1030,28 @@ def set_default(pack_id: str, enabled: bool) -> dict[str, Any]:
     return _summary(meta)
 
 
-def delete_pack(pack_id: str) -> dict[str, Any]:
+def delete_pack(pack_id: str, *, force: bool = False) -> dict[str, Any]:
     """删包。已经应用过的环境**不受影响**——apply 时扩展代码已经复制进
-    `<数据目录>/extensions/`，包只是"出厂模板"，不是运行时的依赖。"""
+    `<数据目录>/extensions/`，包只是"出厂模板"，不是运行时的依赖。
+
+    ## 有环境在用时要先说一声（2026-11-20 审查指出）
+
+    以前删包前**不查占用**：用户很可能不知道"我这 5 个插件包分别被哪些环境用着"，
+    删掉之后虽然正在跑的环境不受影响，但**以后新建环境就带不上了**，
+    而且没有任何提示。
+
+    现在：有环境在用 → 返回 409 `PACK_IN_USE`，并把占用的环境列出来；
+    确实要删就传 `force=True`（界面上给二次确认）。
+    """
+    if not force:
+        users = pack_usage(pack_id)
+        if users:
+            names = "、".join(str(u.get("name") or u.get("profile_id")) for u in users[:5])
+            raise PackError(
+                "PACK_IN_USE",
+                f"还有 {len(users)} 个环境在用这个包：{names}（确认要删就带 force=1）",
+                409,
+            )
     d = _pack_dir(pack_id)
     if not d.is_dir():
         raise PackError("PACK_NOT_FOUND", f"找不到扩展包：{pack_id}", 404)
@@ -1075,8 +1118,16 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
     applied: list[dict[str, Any]] = []
 
     for pack_id in ids:
-        meta = _load_meta(pack_id)
-        pdir = _pack_dir(pack_id)
+        # **逐个隔离**（2026-11-20 审查指出）：以前一个 id 拼错就整批中止，
+        # 好的包也一个都带不上，而 create_profile 只有一条 warning（还只在
+        # start 时才显示）→ 用户以为建好了带插件的环境，实际是干净的。
+        try:
+            meta = _load_meta(pack_id)
+            pdir = _pack_dir(pack_id)
+        except PackError as exc:
+            warnings.append(f"包 {pack_id} 跳过：{exc.message}")
+            logger.warning("应用扩展包时跳过 %s：%s", pack_id, exc.message)
+            continue
         for ext in meta.get("extensions") or []:
             code_src = pdir / str(ext.get("code_dir") or f"{CODE_DIR}/{ext['key']}")
             if not _read_manifest(code_src):

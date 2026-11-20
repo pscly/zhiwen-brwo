@@ -258,9 +258,14 @@ def test_apply_to_profile_explicit_packs_and_delete():
     slugs = [str(x.get("slug") if isinstance(x, dict) else x) for x in res["profile"]["extensions"]]
     assert "apply-ext" in slugs
 
-    # 删包不影响已经应用过的环境：代码已经复制进扩展库，包只是"出厂模板"
+    # 删包不影响已经应用过的环境：代码已经复制进扩展库，包只是"出厂模板"。
+    #
+    # 注意 `force=True`：2026-11-20 起 `delete_pack` 会在**有环境在用**时抛
+    # `PACK_IN_USE`（免得用户不知道删了以后新建环境带不上插件）。
+    # 这条用例本来就是要验"删完之后已应用的环境不受影响"，所以它必须强删 ——
+    # 不加 force 会先撞上那条保护，测的就不是这里想测的东西了。
     lib = config.get_settings().ext_dir / "apply-ext-1.0"
-    packs.delete_pack(pack["id"])
+    packs.delete_pack(pack["id"], force=True)
     assert not (Path(pack["path"])).exists()
     assert (lib / "manifest.json").is_file()
     with pytest.raises(packs.PackError) as ei:

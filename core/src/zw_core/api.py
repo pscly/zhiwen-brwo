@@ -197,10 +197,19 @@ class ProfileCreate(BaseModel):
     trim_on_stop: bool = False
     sync_enabled: bool = True
     cdp_enabled: bool = True
-    pack_ids: list[str] = Field(
-        default_factory=list,
-        description="只带这几个扩展包（显式选择，优先于 with_default_packs）。"
-                    "留空且 with_default_packs=true 时带所有默认包",
+    # **默认必须是 None，不能是 []**（2026-11-20 审查抓到的回归）。
+    #
+    # 区别很重要：
+    #   None = "调用方没提这件事" → 按 with_default_packs 走（老行为）
+    #   []   = "我明确要一个都不带" → 干净环境
+    #
+    # 如果默认写成 `default_factory=list`，FastAPI 会给**每个**没传该字段的
+    # 请求补上 `[]`，于是"没提"被当成"显式清空" —— 所有走 HTTP 的路径
+    # （网页、GUI、CLI、curl、MCP）的默认包会全部失效，而直调 manager 的
+    # 单元测试看不出来。
+    pack_ids: list[str] | None = Field(
+        default=None,
+        description="只带这几个扩展包。不给=按 with_default_packs；给空数组=一个都不带（干净环境）",
     )
     with_default_packs: bool = Field(
         default=True,
@@ -505,6 +514,50 @@ def build_app() -> FastAPI:
         return ok({"status": "ready", "engine": eng, "root": str(s.root), "schema_version": get_db().schema_version()})
 
     # ── 元信息与 AI 自描述 ────────────────────────────────
+    @app.post(f"{API_PREFIX}/service/takeover", tags=["运维"], dependencies=[Auth, Cidr],
+              summary="让新装的本机服务接管端口（装完新版但版本号没变时用这个）")
+    def service_takeover() -> dict[str, Any]:
+        """自我重启：杀掉占着本端口的旧 zhiwen 进程，让自己（或新装的）重新监听。
+
+        ## 为什么要这个接口（2026-11-20 用户指出）
+
+        > 云电脑运行的版本你应该自己通过后台的东西进行修改才对
+
+        实际情况：`take_over()` 早就实现了（`client.py:672`），但它**只挂在 GUI 按钮上**。
+        远程升级时就只剩一条路——手动杀掉占端口的进程，而那个进程往往就是
+        正在给我提供命令通道的 core，一杀就断线，整机失联（我 0.8.29 那次就这么
+        把云电脑搞离线了）。
+
+        有了这个接口，升级流程变成：
+          1. 下载并静默安装新版（不动老进程，通道一直在）
+          2. `POST /service/takeover` —— 老 core 自己体面退出，新版的守护/客户端接手
+          3. 轮询 `/healthz` 直到版本号变成新版
+
+        安全边界沿用 `take_over()`：只杀**监听本端口**且**可执行文件名含 zhiwen** 的进程。
+        """
+        import threading
+
+        from zw_core import client as client_mod
+
+        result: dict[str, Any] = {"started": False}
+
+        def _do() -> None:
+            try:
+                # 用当前配置构造一个 LocalCore，借用它的 take_over（它知道端口与版本）
+                core = client_mod.LocalCore()
+                ok, note = core.take_over()
+                logger.warning("按请求执行接管：ok=%s note=%s", ok, note)
+            except Exception as exc:  # noqa: BLE001 —— 后台线程里不能抛
+                logger.warning("接管失败：%s: %s", type(exc).__name__, exc)
+
+        # 必须延后执行：响应要先发出去，否则调用方拿到的是"连接被重置"
+        t = threading.Timer(1.0, _do)
+        t.daemon = True
+        t.start()
+        result["started"] = True
+        result["hint"] = "1 秒后开始接管；随后请轮询 /healthz 确认版本"
+        return ok(result)
+
     @app.get(f"{API_PREFIX}/meta", tags=["运维"], dependencies=[Auth, Cidr], summary="服务元信息")
     def meta(request: Request) -> dict[str, Any]:
         s = get_settings()
@@ -630,6 +683,7 @@ def build_app() -> FastAPI:
                         {"method": "GET", "path": "/healthz", "说明": "存活"},
                         {"method": "GET", "path": "/readyz", "说明": "就绪"},
                         {"method": "GET", "path": f"{API_PREFIX}/meta", "说明": "元信息"},
+                        {"method": "POST", "path": f"{API_PREFIX}/service/takeover", "说明": "让新装的本机服务接管端口（远程升级后用）"},
                         {"method": "GET", "path": f"{API_PREFIX}/ai/manifest", "说明": "本清单"},
                         {"method": "GET", "path": f"{API_PREFIX}/stats", "说明": "容量与状态统计"},
                         {"method": "GET", "path": f"{API_PREFIX}/shell/status", "说明": "命令行开关与工作目录"},
@@ -1185,11 +1239,11 @@ def build_app() -> FastAPI:
         """
         from zw_core.services import packs as packsvc
 
-        try:
-            return ok({"profiles": packsvc.pack_usage(pack_id)})
-        except packsvc.PackError as exc:
-            raise HTTPException(status_code=exc.status,
-                                detail={"code": exc.code, "message": exc.message}) from exc
+        # `PackError` 有全局异常处理器（见 `_pack_error`），这里直接让它冒泡 ——
+        # 不要自己 try/except 再包一层 HTTPException：
+        # 一来那样重复了，二来 `HTTPException` 在本模块**没有导入**，
+        # 一抛就是 NameError → 500（2026-11-20 自查实测踩到，本来该是 404）。
+        return ok({"profiles": packsvc.pack_usage(pack_id)})
 
     @app.post(f"{API_PREFIX}/profiles/{{ref}}/extensions/remove", tags=["扩展"], dependencies=[Auth],
               summary="从环境里摘掉指定的扩展（只改环境记录，不动库与包）")
@@ -1209,10 +1263,8 @@ def build_app() -> FastAPI:
         """
         from zw_core.services import packs as packsvc
 
-        try:
-            blob, filename = packsvc.export_zip(pack_id)
-        except packsvc.PackError as exc:
-            raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message}) from exc
+        # 同上：`PackError` 交给全局处理器，别自己包 HTTPException（它没导入）
+        blob, filename = packsvc.export_zip(pack_id)
         return Response(
             content=blob,
             media_type="application/zip",
@@ -1268,11 +1320,18 @@ def build_app() -> FastAPI:
 
         return ok(packs.set_default(pack_id, body.enabled))
 
-    @app.delete(f"{API_PREFIX}/packs/{{pack_id}}", tags=["扩展"], dependencies=[Auth], summary="删除扩展包")
-    def packs_delete(pack_id: str) -> dict[str, Any]:
+    @app.delete(f"{API_PREFIX}/packs/{{pack_id}}", tags=["扩展"], dependencies=[Auth],
+                summary="删除扩展包（有环境在用时返回 409，带 force=1 强删）")
+    def packs_delete(pack_id: str, force: bool = False) -> dict[str, Any]:
+        """删包。
+
+        有环境在用会返回 409 `PACK_IN_USE` 并列出占用的环境 —— 删掉之后
+        正在跑的环境不受影响（代码已复制进扩展库），但**以后新建环境带不上**，
+        而且以前没有任何提示。确实要删就带 `force=1`。
+        """
         from zw_core.services import packs
 
-        return ok(packs.delete_pack(pack_id))
+        return ok(packs.delete_pack(pack_id, force=force))
 
     @app.post(f"{API_PREFIX}/profiles/{{ref}}/packs/apply", tags=["扩展"], dependencies=[Auth], summary="把扩展包应用到某个环境")
     def profile_apply_packs(ref: str, body: ProfilePacksBody) -> dict[str, Any]:

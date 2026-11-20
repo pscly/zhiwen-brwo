@@ -195,9 +195,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 这里做一次端到端确认即可。
   console.log('== 库代理显示 ==');
   {
+    // 标签必须**每次唯一**：以前写死 '界面自检库代理'，同一个 core 上跑第二次
+    // 就 `LABEL_TAKEN` —— 表现是"能建代理库条目"这条直接红，而代码其实没坏。
+    // 更要命的是 gate 里 gateway-check 先跑、也建过同名代理，于是**顺序**一换
+    // ui-check 就红（本次实测复现）。用时间戳后缀，重复跑也不会撞。
+    const pxLabel = `界面自检库代理-${Date.now().toString(36)}`;
     const lib = await fetch(`${B}/api/v1/proxies`, {
       method: 'POST', headers: H,
-      body: JSON.stringify({ label: '界面自检库代理', scheme: 'socks5',
+      body: JSON.stringify({ label: pxLabel, scheme: 'socks5',
                              host: '9.9.9.9', port: 1080 }),
     }).then((r) => r.json());
     const pxId = lib && lib.data && lib.data.id;
@@ -277,6 +282,52 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await page.waitForTimeout(1000);
     const hasForm = await page.evaluate(() => !!document.querySelector('#f-name'));
     check('表单含名称输入', hasForm);
+
+    // ── 插件勾选器（2026-11-20 审查指出这块**零断言**，导致三个真 bug 漏过）──
+    await page.waitForTimeout(1200);            // 等 fillPackPicker 的异步渲染
+    const pickerState = await page.evaluate(() => {
+      const box = document.querySelector('#f-pack-list');
+      if (!box) return { exists: false };
+      const boxes = [...box.querySelectorAll('input[type=checkbox]')];
+      return {
+        exists: true,
+        count: boxes.length,
+        checked: boxes.filter((b) => b.checked).length,
+        text: box.textContent.slice(0, 120),
+      };
+    });
+    check('新建表单有「插件」勾选列表', pickerState.exists, JSON.stringify(pickerState).slice(0, 160));
+    check('勾选列表不是空的（真的有包可选）',
+      pickerState.exists && pickerState.count > 0, 'count=' + (pickerState.count || 0));
+
+    // 勾选器必须在**打开时**填好，而不是每次提交才填 —— 那样首次提交读不到。
+    check('勾选器在打开表单时就已渲染（异步时序正确）',
+      pickerState.exists && pickerState.count > 0, JSON.stringify(pickerState).slice(0, 160));
+
+    // 位置：用户明确说过「创建环境之后才跳出选择插件」是 bug，
+    // 插件选择必须**在创建表单里、且靠前**（不用滚动就能看到）。
+    const pickerPos = await page.evaluate(() => {
+      const box = document.querySelector('#f-pack-list');
+      if (!box) return { ok: false };
+      const sec = box.closest('.form-sec');
+      const heads = [...document.querySelectorAll('.form-sec > h3')].map((h) => h.textContent.trim());
+      const r = sec ? sec.getBoundingClientRect() : null;
+      return {
+        ok: true,
+        titleHere: sec ? (sec.querySelector('h3') || {}).textContent.trim() : null,
+        index: heads.indexOf('插件'),
+        sections: heads,
+        top: r ? Math.round(r.top) : null,
+        visible: !!(r && r.top >= 0 && r.bottom <= window.innerHeight),
+      };
+    });
+    check('插件是独立区块（不是埋在开关里）',
+      pickerPos.ok && pickerPos.titleHere === '插件', JSON.stringify(pickerPos).slice(0, 160));
+    check('插件区块排在表单前部（基本信息之后、指纹之前）',
+      pickerPos.ok && pickerPos.index > 0 && pickerPos.index <= 1, 'index=' + pickerPos.index
+        + ' sections=' + JSON.stringify(pickerPos.sections));
+    check('插件区块打开表单后无需滚动即可见',
+      pickerPos.ok && pickerPos.visible === true, 'top=' + pickerPos.top);
     await page.screenshot({ path: path.join(SHOT, 'zhiwen-ui-form.png') });
     await page.keyboard.press('Escape');
     await page.waitForTimeout(400);

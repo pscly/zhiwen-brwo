@@ -916,10 +916,24 @@ class TextOverlay(_Overlay):
             self.vars["pack_ids"] = tk.StringVar(value="")
             return
 
-        box = tk.Frame(row, bg=self.theme.card2)
-        box.pack(fill="x", pady=(2, 0))
+        # **既要全列出，又不能让浮层被撑破**（2026-11-20 两轮修正）。
+        #
+        # 第一版写死 `packs[:12]`：超过 12 个的包看不到也选不了，界面还不提示。
+        # 第二版全列出：结果 5 个包就把标题和「创建」按钮顶出窗口（浮层是
+        # `place(relx=.5, rely=.5)` 居中的，没有滚动），用户勾完点不到「创建」。
+        #
+        # 现在用 `_ScrollList`：固定高度 + 滚动条，多少个包都不会撑破浮层。
+        # 高度按"浮层在 640×658 的默认窗口里还放得下「创建」按钮"来定。
+        # 实测：120 超 57px、96 超 13px —— 新建浮层本身已经很满，
+        # 所以这里只给 64px（约两行半）；包再多靠滚轮，不再撑高浮层。
+        _sc = _ScrollList(row, self.theme, height=64)
+        _sc.wrap.pack(fill="x", pady=(2, 0))
+        # 打个可识别的名字：自检脚本要能只量"插件勾选器"那个 Canvas，
+        # 而不是随便抓一个（面板里还有环境列表等其它滚动区）。
+        _sc.canvas.configure(name="zw_pack_picker_canvas")
+        box = _sc.inner
         picked: list[tuple[tk.StringVar, str]] = []
-        for p in packs[:12]:
+        for p in packs:
             pid = str(p.get("id") or "")
             label = f"{p.get('name') or pid}（{p.get('extension_count', 0)} 个扩展" \
                     + ("，带数据" if p.get("with_data") else "") + "）"
@@ -927,8 +941,7 @@ class TextOverlay(_Overlay):
             ttk.Checkbutton(box, text=label, style="Card.TCheckbutton",
                             variable=var, onvalue="1", offvalue="").pack(anchor="w")
             picked.append((var, pid))
-        tk.Label(row, text="勾了就只带这些（覆盖上面的「带上默认扩展包」）；"
-                           "一个都不勾 = 干净环境。",
+        tk.Label(row, text="勾了就只带这些；都不勾 = 干净环境。",
                  bg=self.theme.card2, fg=self.theme.faint, font=self.fonts["tiny"],
                  anchor="w", justify="left", wraplength=320).pack(fill="x", pady=(2, 0))
 
@@ -1221,9 +1234,20 @@ class CreateProfileOverlay(TextOverlay):
                  "取消勾选则建一个干净的。",
         )
         try:
-            self.add_pack_picker(self.api.list_packs()[1] or [])
-        except Exception:  # noqa: BLE001 —— 拉不到包列表就退化成"全带/全不带"
-            pass
+            # `list_packs()` 返回的 data 是 `{"packs": [...]}`（**不是**列表）。
+            # 第一版直接 `[1] or []` 当列表传，`for p in packs` 迭代出字符串
+            # `"packs"` → `p.get(...)` AttributeError，被外面的 except 吞成
+            # "降级成全带/全不带" —— 用户根本看不到勾选器。
+            _ok, _d, _e = self.api.list_packs()
+            _packs = (_d or {}).get("packs") if isinstance(_d, dict) else (_d or [])
+            self.add_pack_picker(list(_packs or []))
+        except Exception as exc:  # noqa: BLE001
+            # **不要静默**：拉不到包列表时至少留一条日志，否则"界面没勾选器"
+            # 会被当成设计如此，而不是故障。
+            try:
+                self.on_log(f"读取扩展包列表失败（新建时无法勾选插件）：{exc}", "warn")
+            except Exception:
+                pass
         self.add_action_row("测试这个代理", self._test)
 
     def _test(self) -> None:
@@ -2559,9 +2583,12 @@ class ProfilePanel(tk.Frame):
         with_defaults = (values.get("with_default_packs") or "") == "1"
         # 勾了具体包就只带那些（后端 pack_ids 优先于 with_default_packs）
         picked = [x for x in (values.get("pack_ids") or "").split(",") if x.strip()]
+        # **只有界面真的提供了勾选器时才传 pack_ids**（空列表=干净环境）；
+        # 没勾选器时传 None，保持"按 with_default_packs"的老语义。
+        has_picker = "pack_ids" in (values or {})
         call_async(self, lambda: self.api.create_profile(
             name, group, with_default_packs=with_defaults,
-            pack_ids=picked or None),
+            pack_ids=picked if has_picker else None),
             lambda res: self._after_create(res, name, ov, proxy_text))
         return True
 
@@ -2837,8 +2864,12 @@ class ProfilePanel(tk.Frame):
             d = data or {}
             exts = [str(x) for x in (d.get("extensions") or [])]
             running = bool(d.get("running"))
-            ov = _Overlay(self, self.theme, self.fonts)
-            card = self._make_card(ov, f"「{name}」的插件（{len(exts)} 个）")
+            # `_Overlay` 要 5 个参数（master/theme/fonts/title/subtitle），
+            # 控件往 `ov.body` 里塞 —— 别再自造 `_make_card`（那函数根本不存在，
+            # 第一版调用它，按钮一点就 AttributeError，被 call_async 吞成"没反应"）。
+            ov = _Overlay(self, self.theme, self.fonts,
+                          f"「{name}」的插件（{len(exts)} 个）")
+            card = ov.body
             if not exts:
                 tk.Label(card, text="这个环境还没有装插件。点「应用扩展包」给它装。",
                          bg=self.theme.card2, fg=self.theme.faint, font=self.fonts["tiny"],

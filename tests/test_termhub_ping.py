@@ -96,3 +96,45 @@ def test_hub_main_imports_asyncio():
     tree = ast.parse((ROOT / "hub/src/zw_hub/main.py").read_text(encoding="utf-8"))
     imported = {a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names}
     assert "asyncio" in imported, "hub/main.py 没导入 asyncio"
+
+
+def test_ping_loop_actually_sends_pings(monkeypatch):
+    """**真跑** `_ping_loop`，验证它真的每隔一段时间发一次 ping。
+
+    上面那条只看源码字符串（"`create_task(self._ping_loop())` 在不在"），
+    能防手滑删除，但证明不了循环体真的在工作。
+
+    这里把 `_PING_EVERY` 调到 10 毫秒，让它跑几轮，看 `_send` 收到了什么。
+    """
+    import asyncio
+
+    from zw_core.services import termhub
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self.connected = True
+
+        async def _send(self, msg):
+            self.sent.append(msg)
+
+    monkeypatch.setattr(termhub, "_PING_EVERY", 0.01)
+
+    async def run() -> list[dict]:
+        c = FakeClient()
+        # 绑定真实方法
+        task = asyncio.create_task(termhub.TermClient._ping_loop(c))  # type: ignore[arg-type]
+        await asyncio.sleep(0.08)          # 约 8 轮
+        c.connected = False
+        await asyncio.sleep(0.03)          # 让它看到 connected=False 后退出
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        return c.sent
+
+    sent = asyncio.run(run())
+    assert sent, "ping 循环跑了但一条都没发"
+    assert all(m.get("t") == "ping" for m in sent), sent[:3]
+    assert len(sent) >= 2, f"只发了 {len(sent)} 条，循环可能没真的在跑"

@@ -1504,6 +1504,33 @@ function field(label, inner, hint, tip) {
   </div>`;
 }
 
+/* 只读信息弹层（替代原生 alert）。返回 Promise，关掉即 resolve。 */
+function showUsageDialog(title, bodyText) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+    const card = document.createElement('div');
+    card.style.cssText = 'background:#1b1e24;color:#e6e8ec;border:1px solid #2c313a;border-radius:10px;padding:16px 18px;max-width:420px;min-width:280px;box-shadow:0 12px 40px rgba(0,0,0,.5)';
+    const h = document.createElement('div');
+    h.textContent = title;
+    h.style.cssText = 'font-weight:600;margin-bottom:10px';
+    const b = document.createElement('pre');
+    b.textContent = bodyText;
+    b.style.cssText = 'margin:0;white-space:pre-wrap;font-size:12px;color:#b9c0cc;font-family:inherit';
+    const btn = document.createElement('button');
+    btn.textContent = '知道了';
+    btn.className = 'btn sm primary';
+    btn.style.cssText = 'margin-top:12px';
+    card.appendChild(h); card.appendChild(b); card.appendChild(btn);
+    wrap.appendChild(card);
+    document.body.appendChild(wrap);
+    const close = () => { wrap.remove(); resolve(); };
+    btn.addEventListener('click', close);
+    wrap.addEventListener('click', (e) => { if (e.target === wrap) close(); });
+    btn.focus();
+  });
+}
+
 function openProfileForm(profile) {
   const p = profile || {};
   const isEdit = !!profile;
@@ -1523,6 +1550,17 @@ function openProfileForm(profile) {
       </div>
     </div>
 
+    ${isEdit ? '' : `<div class="form-sec">
+      <h3>插件</h3>
+      <div class="form-grid">
+        <div class="field" style="grid-column:1/-1">
+          <label>要带哪些扩展包 <span class="badge">创建时选择</span></label>
+          <div id="f-pack-list" class="mt2" style="display:flex;flex-direction:column;gap:6px;max-height:190px;overflow:auto"></div>
+          <div class="hint mt1">勾了就只带这些；<b>一个都不勾 = 干净环境</b>（不带任何插件）。
+            想改已有环境的插件，去环境详情里逐个增减。</div>
+        </div>
+      </div>
+    </div>`}
     <div class="form-sec">
       <h3>指纹</h3>
       <div class="form-grid">
@@ -1575,10 +1613,6 @@ function openProfileForm(profile) {
           <label class="switch"><input type="checkbox" id="f-ephemeral" ${p.ephemeral ? 'checked' : ''} ${isEdit ? 'disabled' : ''}> 临时环境（不可导出）</label>
           ${isEdit ? '' : `<label class="switch" title="默认带上「默认扩展包」（插件+数据）；取消勾选建一个干净的，适合对照测试或排查是不是插件导致的问题"><input type="checkbox" id="f-with_default_packs" ${p.with_default_packs !== false ? 'checked' : ''}> 带上默认扩展包</label>`}
         </div></div>
-        ${isEdit ? '' : `<div class="field" style="grid-column:1/-1"><label>插件（勾选要带的包）</label>
-          <div id="f-pack-list" class="mt2" style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow:auto"></div>
-          <div class="hint mt1">勾了就只带这些（覆盖上面的「带上默认扩展包」）；一个都不勾 = 干净环境。</div>
-        </div>`}
         <div style="display:none">
         </div></div>
       </div>
@@ -1605,11 +1639,38 @@ function openProfileForm(profile) {
       // root 现在是整个抽屉（含 #drawer-foot），底栏的提交按钮能正常取到
       const submitBtn = $('#f-submit', root);
       if (submitBtn) submitBtn.addEventListener('click', () => submitProfileForm(profile));
+      // 插件勾选列表：**只在这里填一次**（不是每次提交都填）
+      if (!isEdit) fillPackPicker();
       root.addEventListener('keydown', (ev) => {
         if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) submitProfileForm(profile);
       });
     },
   });
+}
+
+/* 填「插件」勾选列表。
+   **必须在"打开表单"时调一次，不能放在 collectProfileForm 里** ——
+   后者每次提交都会跑，会把用户勾好的 checkbox 用 is_default 重新渲染，
+   手选结果被冲掉（看起来像"界面不记我的选择"）。
+   而且异步 .then 晚于同步读取，首次提交时 DOM 还是空的，picked 恒为 []。 */
+function fillPackPicker(){
+  const box = $('#f-pack-list');
+  if (!box) return;
+  api('GET', '/api/v1/packs').then((d) => {
+    const packs = (d && (d.packs || d.items)) || [];
+    if (!packs.length) {
+      // 空的时候**不能只留一片空白**：用户会以为"这功能不存在"或"界面坏了"，
+      // 也找不到去哪里补包。给一句能动手的话 + 一个直达按钮。
+      box.innerHTML = '<div class="pending-note"><span>◷</span>还没有扩展包。先去「扩展包」页导入'
+        + '（或从控制台拉取），之后新建环境就能在这里勾选要带哪些插件。'
+        + '<button class="btn xs ghost" data-act="goto-packs" style="margin-left:6px">去扩展包页</button></div>';
+      return;
+    }
+    box.innerHTML = packs.map(p =>
+      `<label class="switch"><input type="checkbox" value="${escAttr(p.id)}" ${p.is_default ? 'checked' : ''}> ` +
+      `${esc(p.name)} <span class="muted">（${p.extension_count || 0} 个扩展${p.with_data ? '，带数据' : ''}）</span></label>`
+    ).join('');
+  }).catch(() => { box.innerHTML = '<span class="muted">读取扩展包失败</span>'; });
 }
 
 function collectProfileForm() {
@@ -1645,25 +1706,17 @@ function collectProfileForm() {
   };
   // 只在**新建**时有这个勾选（改环境时不动已绑定的扩展集合）
   // 填「插件」勾选列表：列出所有扩展包，默认包预勾上
-  (function fillPacks(){
-    const box = $('#f-pack-list');
-    if (!box) return;
-    api('GET', '/api/v1/packs').then((d) => {
-      const packs = (d && (d.packs || d.items)) || [];
-      if (!packs.length){ box.innerHTML = '<span class="muted">还没有扩展包。先去「扩展包」页导入。</span>'; return; }
-      box.innerHTML = packs.map(p =>
-        `<label class="switch"><input type="checkbox" value="${escAttr(p.id)}" ${p.is_default ? 'checked' : ''}> ` +
-        `${esc(p.name)} <span class="muted">（${p.extension_count || 0} 个扩展${p.with_data ? '，带数据' : ''}）</span></label>`
-      ).join('');
-    }).catch(() => { box.innerHTML = '<span class="muted">读取扩展包失败</span>'; });
-  })();
-
   const wdp = $('#f-with_default_packs');
   if (wdp) payload.with_default_packs = !!wdp.checked;
   // 勾选的包（给了就以它为准，忽略 with_default_packs）
-  const picked = [...document.querySelectorAll('#f-pack-list input[type=checkbox]:checked')]
-    .map(i => i.value).filter(Boolean);
-  if (picked.length) payload.pack_ids = picked;
+  // **无条件传**：空数组表示"一个都不带"（干净环境）。
+  // 以前 `if (picked.length)` —— 空勾选就不传，后端于是按默认包带全套，
+  // 与界面文案「一个都不勾 = 干净环境」正好相反。
+  const picker = document.querySelector('#f-pack-list');
+  if (picker) {
+    payload.pack_ids = [...picker.querySelectorAll('input[type=checkbox]:checked')]
+      .map(i => i.value).filter(Boolean);
+  }
   const pidNode = $('#f-proxy-id');
   if (pidNode && pidNode.value) payload.proxy_id = pidNode.value;
   return payload;
@@ -2364,6 +2417,7 @@ function renderPacks() {
       <td class="mono faint">${esc(p.size_human || '—')}</td>
       <td><div class="acts">
         <button class="btn xs" data-act="pack-default" data-id="${escAttr(p.id)}" data-on="${p.is_default ? '0' : '1'}">${p.is_default ? '取消默认' : '设为默认'}</button>
+        <button class="btn xs ghost" data-act="pack-usage" data-id="${escAttr(p.id)}" data-name="${escAttr(p.name)}">用在哪些浏览器</button>
         <button class="btn xs danger" data-act="pack-del" data-id="${escAttr(p.id)}">删除</button>
       </div></td>
     </tr>`).join('') : `<tr><td colspan="6"><div class="empty"><b>还没有扩展包</b>
@@ -3947,16 +4001,62 @@ function onAct(act, node, ev) {
         .catch((e) => toastErr(e, '设置失败'));
       break;
     }
+    case 'goto-packs': {
+      // 空状态里的"去扩展包页"：关掉抽屉再切视图，否则抽屉会盖住目标页
+      const closeBtn = document.querySelector('[data-act="drawer-close"]');
+      if (closeBtn) closeBtn.click();
+      const nav = document.querySelector('#nav .nav-item[data-view="packs"]');
+      if (nav) nav.click();
+      break;
+    }
+    case 'pack-usage': {
+      api('GET', `/api/v1/packs/${encodeURIComponent(node.dataset.id)}/usage`)
+        .then((d) => {
+          const rows = (d && (d.profiles || d.items)) || [];
+          const name = node.dataset.name || node.dataset.id;
+          if (!rows.length) { toast(`「${name}」目前没有任何环境在用`, 'ok'); return; }
+          // **不用原生 alert**（会阻塞、样式不统一，项目里已有自定义弹层）
+          const list = rows.map((x) => `· ${x.name}${x.running ? '（运行中）' : ''}`).join('\n');
+          showUsageDialog(`「${name}」被 ${rows.length} 个环境用着`, list);
+        })
+        .catch((e) => toastErr(e, '查询失败'));
+      break;
+    }
     case 'pack-del': {
-      confirmDanger({
-        title: '删除扩展包', tone: 'bad',
-        body: '删除后不能恢复；已经绑定了它的环境会保留现有文件。',
-        confirmText: 'DELETE', okLabel: '删除',
-        async action() {
-          await api('DELETE', `/api/v1/packs/${encodeURIComponent(node.dataset.id)}`);
-          toast('已删除扩展包', 'ok');
-          await loadPacks(true); render();
-        },
+      const pkId = node.dataset.id;
+      // 先查占用，把"会影响谁"摆在确认框里 —— 以前直接删，用户根本不知道
+      // 这个包被哪些环境用着，删完才发现新建环境带不上插件了。
+      api('GET', `/api/v1/packs/${encodeURIComponent(pkId)}/usage`).then((d) => {
+        const users = (d && (d.profiles || d.items)) || [];
+        const extra = users.length
+          ? `<p class="mt2">还有 <b>${users.length}</b> 个环境在用：`
+            + users.slice(0, 6).map((x) => `<br><span class="mono">· ${esc(x.name)}</span>`).join('')
+            + (users.length > 6 ? `<br><span class="muted">…等 ${users.length} 个</span>` : '')
+            + `</p><p class="mt2 faint">正在运行的不受影响（插件文件已在扩展库里），但以后新建环境就带不上了。</p>`
+          : '';
+        confirmDanger({
+          title: '删除扩展包', tone: 'bad',
+          body: '删除后不能恢复；已经绑定了它的环境会保留现有文件。' + extra,
+          confirmText: 'DELETE', okLabel: users.length ? '仍然删除' : '删除',
+          async action() {
+            // 有环境在用就带 force，让后端知道这是用户明确确认过的
+            await api('DELETE', `/api/v1/packs/${encodeURIComponent(pkId)}${users.length ? '?force=1' : ''}`);
+            toast('已删除扩展包', 'ok');
+            await loadPacks(true); render();
+          },
+        });
+      }).catch(() => {
+        // 查占用失败也别把删包这条路堵死
+        confirmDanger({
+          title: '删除扩展包', tone: 'bad',
+          body: '删除后不能恢复；已经绑定了它的环境会保留现有文件。',
+          confirmText: 'DELETE', okLabel: '删除',
+          async action() {
+            await api('DELETE', `/api/v1/packs/${encodeURIComponent(pkId)}`);
+            toast('已删除扩展包', 'ok');
+            await loadPacks(true); render();
+          },
+        });
       });
       break;
     }

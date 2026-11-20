@@ -512,10 +512,23 @@ def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
         try:
             from . import packs as packsvc
 
-            if want_pack_ids:
-                packsvc.apply_to_profile(pid, [str(x) for x in want_pack_ids])
+            # **`pack_ids` 存在就以它为准，哪怕是空列表**（2026-11-20 审查指出）。
+            #
+            # 以前写 `if want_pack_ids:` —— 空列表是 falsy，于是"用户一个都不勾"
+            # 会掉到 elif 分支带默认包。而界面文案明写「一个都不勾 = 干净环境」，
+            # **行为和文案是相反的**：用户以为建了干净环境，实际被插件污染，
+            # 而且没有任何提示。干净的对照环境因此永远做不出来。
+            if want_pack_ids is not None:
+                res = packsvc.apply_to_profile(pid, [str(x) for x in (want_pack_ids or [])])
             elif want_defaults:
-                packsvc.apply_default_packs(pid)
+                res = packsvc.apply_default_packs(pid)
+            else:
+                res = None
+            # 把"哪些包被跳过了"直接挂到环境上，**建完就能看到**。
+            # 以前只进 _DEFAULT_PACK_WARNINGS，而它要到 start() 才被读出来 ——
+            # 用户建完环境看返回体是干净的，以为一切正常。
+            for w in ((res or {}).get("warnings") or []):
+                _DEFAULT_PACK_WARNINGS.setdefault(pid, []).append(str(w))
         except Exception as exc:  # noqa: BLE001 —— 环境已建好，失败不该让它回滚
             msg = f"扩展包没能带上：{type(exc).__name__}: {exc}（环境已创建，可稍后手动应用）"
             logger.warning("%s", msg)

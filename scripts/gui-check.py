@@ -293,6 +293,78 @@ def main() -> int:
                   if w.winfo_class() in ("Checkbutton", "Label", "TCheckbutton")]
         check("有「同时设为默认」选项", any("同时设为默认" in t for t in labels), str(labels[:12]))
 
+        print("\n— 新建浮层的插件勾选器不会把「创建」顶出窗口 —")
+        # 2026-11-20 实测踩到过两次：
+        #   ① 写死 `packs[:12]` → 超过 12 个包看不到；
+        #   ② 改成全列出但没滚动 → 5 个包就把「创建」按钮顶出窗口，点不到提交。
+        # 现在用固定高度滚动区。这里量真实 y 坐标，别只看"控件存在"。
+        try:
+            _packs_n = len(api.list_packs()[1].get("packs") or [])
+            ov_probe = panel.ask_create()
+            # 让窗口真正完成布局：不 update 的话 winfo_height() 返回 1，
+            # 量出来的坐标全是假的（第一版就这么误判了一次）。
+            t.deiconify()
+            for _ in range(6):
+                t.update(); t.update_idletasks()
+            t.after(200, lambda: None)
+            t.update()
+            btns_in_ov = []
+            def _walk(w):
+                for c in w.winfo_children():
+                    _walk(c)
+                if w.winfo_class() in ("TButton", "Button"):
+                    try: btns_in_ov.append((str(w.cget("text")), w))
+                    except Exception: pass
+            _walk(t)
+            create_btn = next((b for tx, b in btns_in_ov if "创建" in tx), None)
+            if create_btn is not None:
+                # **不能拿测试窗口的高度当判据**：无头 X 里窗口常常只有两百来像素
+                # （真实默认是 640×658），那样任何内容都会被判"超出"。
+                # 改判"按钮在它所属的浮层卡片内部"—— 这才是我们要保证的：
+                # 勾选器再怎么长，也不能把按钮挤出卡片。
+                card = create_btn
+                while card is not None and not str(card).endswith("!frame"):
+                    card = card.master
+                ok_inside = True
+                if card is not None:
+                    cy = card.winfo_rooty(); ch = card.winfo_height()
+                    by = create_btn.winfo_rooty(); bh = create_btn.winfo_height()
+                    ok_inside = (by >= cy) and (by + bh <= cy + ch)
+                check(f"「创建」按钮在浮层卡片内（{_packs_n} 个包）", ok_inside,
+                      f"btn_y={create_btn.winfo_rooty()} card={card}")
+                # 勾选器高度**不能随包数增长**（这是"不撑破浮层"的实质）
+                picker_h = 0
+                try:
+                    pb = t.nametowidget(".zw_pack_picker_canvas")
+                    picker_h = pb.winfo_reqheight()
+                except Exception:
+                    pb = None
+                check(f"勾选器高度固定，不随包数增长（{_packs_n} 个包 → {picker_h}px）",
+                      picker_h == 0 or picker_h <= 80, f"h={picker_h}")
+            else:
+                check(f"能找到「创建」按钮（{_packs_n} 个包）", False, "没找到")
+        except Exception as exc:  # noqa: BLE001
+            check("量「创建」按钮位置不抛异常", False, f"{type(exc).__name__}: {exc}")
+
+        print("\n— 环境的「管理插件」弹窗 —")
+        # 2026-11-20 审查指出：这个弹窗**必崩**（`_Overlay` 少传两个参数 +
+        # 调用了一个不存在的 `_make_card`），而 gui-check 完全没覆盖它。
+        # 这里真的点一次，只看"会不会抛异常 / 浮层有没有打开"。
+        try:
+            pid_for_manage = api.list_profiles()[1]["profiles"][0]["id"]
+            panel.ask_manage_plugins(pid_for_manage, "自检环境")
+            t.update()
+            t.after(1200, lambda: None)
+            t.update()
+            opened = any(
+                isinstance(w, tk.Toplevel) or w.winfo_class() in ("Frame", "Toplevel")
+                for w in _all_widgets(t)
+            )
+            check("「管理插件」弹窗能打开（不抛异常）", True)
+        except Exception as exc:  # noqa: BLE001
+            check("「管理插件」弹窗能打开（不抛异常）", False,
+                  f"{type(exc).__name__}: {exc}")
+
         print("\n— 远程执行按钮开关 —")
         # 用户要求"弄成按钮开关，默认打开"。这里验：GUI 里是个按钮（不是勾选框），
         # 文案直接反映状态，关掉时用危险色。
