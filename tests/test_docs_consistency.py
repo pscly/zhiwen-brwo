@@ -535,3 +535,32 @@ def test_delivery_checklist_covers_every_requirement():
     }
     missing = [k for k, kws in need.items() if not any(w in doc for w in kws)]
     assert not missing, "交付清单里找不到这些需求的落点：\n  " + "\n  ".join(missing)
+
+
+def test_delivery_notes_track_current_version():
+    """交付说明里的版本号与测试总数必须跟当前代码一致。
+
+    ## 为什么
+
+    `docs/交付说明-v0.8.19.md` 是给人看的验收单：它说"721 项测试、719 passed"，
+    用户就会照着核。如果发版时忘了同步，这份文件会变成**误导**——
+    比没有更糟。
+    """
+    import re
+
+    notes = list((ROOT / "docs").glob("交付说明-v*.md"))
+    assert notes, "没有交付说明文件"
+    latest = sorted(notes)[-1]
+
+    from zw_core import __version__ as core_ver
+
+    text = latest.read_text(encoding="utf-8")
+    assert core_ver in latest.name, f"最新交付说明是 {latest.name}，但当前版本是 {core_ver}"
+    assert core_ver in text
+    assert "722 项" in text, "测试总数没更新"
+    assert "720 passed" in text, "passed 数没更新"
+    # 顺带确认 12 条需求表还在
+    assert "十二条需求" in text
+    # 版本号形如 0.8.19 的写法不该出现在别处（防止文件名与内容不一致）
+    m = re.search(r"交付说明 · v([0-9.]+)", text)
+    assert m and m.group(1) == core_ver, f"标题版本 {m.group(1) if m else None} != {core_ver}"
