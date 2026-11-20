@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -288,6 +289,40 @@ def run() -> None:
     # 我们自己已经有一套显式的转发头策略（`ZW_TRUST_PROXY_HEADERS` +
     # `api._client_ip()`），默认关闭、由运维按实际拓扑打开。所以这里必须让
     # uvicorn 别插手，否则那套开关形同虚设。
+    # 自我重启时（见 api.py 的 `/service/takeover`），旧进程可能还没完全放掉端口。
+    # 这里按 `ZW_WAIT_PORT_MS` 等一下，避免 `[Errno 98] address already in use`。
+    _wait_ms = int(os.environ.pop("ZW_WAIT_PORT_MS", "0") or 0)
+    if _wait_ms > 0:
+        import socket as _sk
+        import time as _t
+
+        # ## 探测端口时**绝对不能设 SO_REUSEADDR**（2026-11-20 审查实测）
+        #
+        # 第一版设了它，结果：旧进程还 LISTEN 着，`bind` 在 Linux 上**照样成功**
+        # → 探测判"端口空了" → 退出循环 → uvicorn 真去绑 → `[Errno 98]`
+        # → 新实例秒退，而旧进程已经 `os._exit` 了 → **服务彻底消失**。
+        #
+        # 这正是仓库自己在 `client.py:_port_bindable` 注释里写过的坑
+        # （Windows 上 SO_REUSEADDR 允许抢占），POSIX 上它同样会让"占用中"
+        # 探测不出来。不设它，bind 才会因端口被占而抛 OSError。
+        #
+        # 另外：探测成功后要连做两次采样（间隔 120ms），避免刚好撞上
+        # "旧进程正在关闭、还没完全释放"的瞬间。
+        _deadline = _t.time() + _wait_ms / 1000.0
+        _ok_streak = 0
+        while _t.time() < _deadline:
+            _free = False
+            with _sk.socket(_sk.AF_INET, _sk.SOCK_STREAM) as _probe:
+                try:
+                    _probe.bind((s.host, s.port))
+                    _free = True
+                except OSError:
+                    _free = False
+            _ok_streak = _ok_streak + 1 if _free else 0
+            if _ok_streak >= 2:            # 连续两次都空，才认为真的空了
+                break
+            _t.sleep(0.12)
+
     uvicorn.run(app, host=s.host, port=s.port, log_level=s.log_level.lower(),
                 access_log=False, log_config=None,
                 proxy_headers=False, forwarded_allow_ips="")

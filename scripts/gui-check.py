@@ -299,7 +299,37 @@ def main() -> int:
         #   ② 改成全列出但没滚动 → 5 个包就把「创建」按钮顶出窗口，点不到提交。
         # 现在用固定高度滚动区。这里量真实 y 坐标，别只看"控件存在"。
         try:
-            _packs_n = len(api.list_packs()[1].get("packs") or [])
+            # 自检 core 是全新 ZW_ROOT，库里本来没有包 —— 先造一个，
+            # 否则"勾选器真的渲染出勾选框"这条永远被"0 个包"空过。
+            if not ((api.list_packs()[1] or {}).get("packs") or []):
+                _pk_tmp = Path(tempfile.mkdtemp(prefix="zw-guipick-")) / "Default"
+                _pk_eid = "y" * 32
+                (_pk_tmp / "Extensions" / _pk_eid).mkdir(parents=True)
+                (_pk_tmp / "Extensions" / _pk_eid / "manifest.json").write_text(
+                    json.dumps({"name": "自检勾选包", "version": "1", "manifest_version": 3}))
+                api.call("POST", "/api/v1/packs/import",
+                         json_body={"path": str(_pk_tmp), "name": "自检勾选包"})
+            def _find_picker_canvas(root_w):
+                """按 Canvas 的 name 找插件勾选器。
+
+                不能用 `nametowidget(".zw_pack_picker_canvas")` —— `name=` 设的是
+                **相对名**，不是绝对路径，那样查会 KeyError（第一版就这么错的）。
+                """
+                found = []
+                def walk(w):
+                    try:
+                        if (w.winfo_class() == "Canvas"
+                                and getattr(w, "zw_is_pack_picker", False)):
+                            found.append(w); return
+                    except Exception:
+                        pass
+                    for c in w.winfo_children():
+                        walk(c)
+                walk(root_w)
+                return found[0] if found else None
+
+            _packs_now = (api.list_packs()[1] or {}).get("packs") or []
+            _packs_n = len(_packs_now)
             ov_probe = panel.ask_create()
             # 让窗口真正完成布局：不 update 的话 winfo_height() 返回 1，
             # 量出来的坐标全是假的（第一版就这么误判了一次）。
@@ -335,16 +365,70 @@ def main() -> int:
                 # 勾选器高度**不能随包数增长**（这是"不撑破浮层"的实质）
                 picker_h = 0
                 try:
-                    pb = t.nametowidget(".zw_pack_picker_canvas")
-                    picker_h = pb.winfo_reqheight()
+                    pb = _find_picker_canvas(t)
+                    picker_h = pb.winfo_reqheight() if pb is not None else 0
                 except Exception:
                     pb = None
+                # **0 个包时这条会空过**（2026-11-20 审查指出：
+                # 输出 `0 个包 → 0px` 也判 ✅，等于 `add_pack_picker`
+                # 真正渲染 checkbox 的路径完全没被覆盖）。
+                # 所以要求"至少有 1 个包"，并且真的渲染出了勾选框。
+                _cb = []
+                try:
+                    _cbw = _find_picker_canvas(t)
+                    if _cbw is None:
+                        raise RuntimeError("找不到插件勾选器 Canvas")
+                    def _collect(w):
+                        for c in w.winfo_children():
+                            if c.winfo_class() == "TCheckbutton":
+                                _cb.append(c)
+                            _collect(c)
+                    _collect(_cbw)
+                except Exception:
+                    pass
+                check(f"勾选器真的渲染出勾选框（{_packs_n} 个包 → {len(_cb)} 个）",
+                      _packs_n > 0 and len(_cb) >= 1, f"packs={_packs_n} checks={len(_cb)}")
                 check(f"勾选器高度固定，不随包数增长（{_packs_n} 个包 → {picker_h}px）",
-                      picker_h == 0 or picker_h <= 80, f"h={picker_h}")
+                      picker_h > 0 and picker_h <= 80, f"h={picker_h}")
             else:
                 check(f"能找到「创建」按钮（{_packs_n} 个包）", False, "没找到")
         except Exception as exc:  # noqa: BLE001
             check("量「创建」按钮位置不抛异常", False, f"{type(exc).__name__}: {exc}")
+
+        print("\n— 扩展包的「用在哪些浏览器」与删除前查占用 —")
+        # 2026-11-20 审查指出：`pack_usage` 接口齐了，但桌面端零入口。
+        # 用户日常用桌面端，想删包时看不到"会影响谁"。
+        try:
+            _packs_list = (api.list_packs()[1] or {}).get("packs") or []
+            if not _packs_list:
+                # 自检 core 是全新 ZW_ROOT，库里本来没有包 —— 自己造一个，
+                # 否则这两条断言永远被"跳过"，等于没测。
+                import json as _json
+                _tmp = Path(tempfile.mkdtemp(prefix="zw-guipack-")) / "Default"
+                _eid = "z" * 32
+                (_tmp / "Extensions" / _eid).mkdir(parents=True)
+                (_tmp / "Extensions" / _eid / "manifest.json").write_text(
+                    _json.dumps({"name": "自检GUI包", "version": "1", "manifest_version": 3}))
+                _r = api.call("POST", "/api/v1/packs/import",
+                              json_body={"path": str(_tmp), "name": "自检GUI包"})
+                if _r[0]:
+                    _packs_list = (api.list_packs()[1] or {}).get("packs") or []
+            if _packs_list:
+                _pid = _packs_list[0]["id"]
+                _ok, _usage, _err = api.pack_usage(_pid)
+                check("api.pack_usage 能取到占用列表", _ok, str(_usage)[:120])
+                packs.ask_usage(_packs_list[0])
+                t.update(); t.after(150, lambda: None); t.update()
+                check("「用在哪些浏览器」弹层能打开（不抛异常）", True)
+                # 删包前必须先查占用再弹确认（以前直接删，用户不知道影响谁）
+                packs.ask_delete(_packs_list[0])
+                for _ in range(20):
+                    t.update()
+                check("删包确认前会先查占用（不抛异常）", True)
+            else:
+                print("    （库里没有扩展包，跳过这两条）")
+        except Exception as exc:  # noqa: BLE001
+            check("扩展包占用入口可用", False, f"{type(exc).__name__}: {exc}")
 
         print("\n— 环境的「管理插件」弹窗 —")
         # 2026-11-20 审查指出：这个弹窗**必崩**（`_Overlay` 少传两个参数 +

@@ -942,7 +942,11 @@ def pack_usage(pack_id: str) -> list[dict[str, Any]]:
             hits.append({
                 "profile_id": prof.get("id"),
                 "name": prof.get("name"),
-                "running": bool(prof.get("running")),
+                # **不能用 prof["running"]**（2026-11-20 审查实测）：
+                #  表没有这一列，实际状态在 （"running"/"stopped"）。
+                # 用错字段的结果是这里恒为 false —— 界面上的「（运行中）」
+                # 永远不显示，删包时也说不出"正被一个跑着的浏览器用着"。
+                "running": (prof.get("state") == "running") or bool(prof.get("running")),
                 "matched": sorted(common),
             })
     return hits
@@ -1096,13 +1100,19 @@ def apply_to_profile(profile_ref: str, pack_ids: list[str] | None = None) -> dic
     from . import manager
 
     p = manager.get_profile(profile_ref)
-    ids = list(pack_ids) if pack_ids is not None else default_pack_ids()
+    explicit = pack_ids is not None
+    ids = list(pack_ids) if explicit else default_pack_ids()
     if not ids:
+        # **两种空要分开**（2026-11-20 审查指出）：
+        #   · 调用方显式传 [] —— 用户勾了"一个都不带"，这是正常结果，**不该告警**
+        #   · 调用方没传 —— 想带默认包，但库里没有任何默认包，这才要提示
+        # 以前两种情况共用一句"没有指定包，而且库里也没有标记为默认的包"，
+        # 于是用户明明库里有默认包、只是选择了干净环境，也会看到这句**与事实相反**的提示。
         return {
             "profile": p,
             "applied": [],
             "packs": [],
-            "warnings": ["没有指定包，而且库里也没有标记为默认的包"],
+            "warnings": ([] if explicit else ["库里没有标记为默认的包，所以没自动带插件"]),
             "needs_restart": [],
         }
 

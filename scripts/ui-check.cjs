@@ -57,7 +57,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
   // 先准备一个干净环境
   await fetch(`${B}/api/v1/profiles/${NAME}?purge=true`, { method: 'DELETE', headers: H }).catch(() => {});
-  await fetch(`${B}/api/v1/profiles`, { method: 'POST', headers: H, body: JSON.stringify({ name: NAME, note: '控制台自检' }) });
+  // **必须检查创建结果**（2026-11-21 实测）：以前不检查，创建失败（端口池被
+  // 上一项占着、磁盘临时目录满…）时脚本照常往下跑，最后在"列表里能看到刚建的
+  // 环境"那条上超时，报出来的却是 `locator.click: Timeout` —— 完全看不出真因。
+  const mk = await fetch(`${B}/api/v1/profiles`, {
+    method: 'POST', headers: H, body: JSON.stringify({ name: NAME, note: '控制台自检' }),
+  }).then((r) => r.json()).catch((e) => ({ ok: false, message: String(e) }));
+  if (!mk || !mk.ok) {
+    console.error('前置环境创建失败：' + JSON.stringify(mk).slice(0, 300));
+    process.exit(2);
+  }
 
   const browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -233,10 +242,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   console.log('== 环境列表操作 ==');
   await page.click('#nav .nav-item[data-view="profiles"]');
-  await page.waitForTimeout(1200);
+  // **必须显式等渲染，不能靠固定 sleep**（2026-11-21 实测）：
+  // 列表是异步拉的，固定 1200ms 在机器忙的时候不够，于是这条偶发红
+  // （同代码两次跑出两种总表）。用 waitFor 等元素真的出现，最多 15 秒。
   const row = page.locator('#view tr', { hasText: NAME }).first();
-  check('列表里能看到刚建的环境', (await row.count()) > 0);
+  let rowVisible = false;
+  try {
+    await row.waitFor({ state: 'visible', timeout: 15000 });
+    rowVisible = true;
+  } catch (_) {
+    rowVisible = false;
+  }
+  check('列表里能看到刚建的环境', rowVisible);
 
+  // **找不到行就跳过后面依赖它的步骤**（2026-11-21 实测）：
+  // 以前无论 rowVisible 真假都继续 `row.locator(...).click()`，
+  // 行不存在时那个 click 会等 30 秒再抛 `locator.click: Timeout`，
+  // 整条 check 变成"异常"，掩盖了真正的原因（列表没渲染出来）。
+  if (!rowVisible) {
+    console.log('    （环境列表没出现目标行，跳过后续列表操作断言）');
+  } else {
   await row.locator('button', { hasText: '启动' }).first().click();
   await page.waitForFunction(
     (n) => [...document.querySelectorAll('#view tr')].some((tr) => tr.innerText.includes(n) && tr.innerText.includes('运行中')),
@@ -273,6 +298,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await page.keyboard.press('Escape');
     await page.waitForTimeout(400);
   }
+
+  }   // ← 闭合上面 `if (!rowVisible) { ... } else {`
 
   console.log('== 新建表单 ==');
   const newBtn = await page.$('#btn-quick-new');

@@ -514,6 +514,106 @@ def build_app() -> FastAPI:
         return ok({"status": "ready", "engine": eng, "root": str(s.root), "schema_version": get_db().schema_version()})
 
     # ── 元信息与 AI 自描述 ────────────────────────────────
+    def _respawn_and_exit() -> None:
+        """脱离父进程重新拉起自己，然后退出当前进程。
+
+        ## 为什么不能只 `os._exit(0)`（2026-11-20 审查实测）
+
+        只在 systemd `Restart=always` 下能自愈；裸跑和 Windows 客户端都会
+        **永久失联**。远程升级后点一下就把服务关掉，比不修更糟。
+        """
+        import os
+        import subprocess      # 只用 DEVNULL / DETACHED_PROCESS 这些常量
+        import sys
+
+        # PyInstaller 打包后 `sys.argv[0]` 就是 exe；源码运行时要用
+        # `-m zw_core.main` 才能起来。
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable] + list(sys.argv[1:])
+        else:
+            cmd = [sys.executable, "-m", "zw_core.main"] + list(sys.argv[1:])
+
+        logger.warning("重新拉起本机服务：%s", " ".join(cmd[:3]))
+        # **环境必须继承**（2026-11-20 实测）：ZW_ROOT / ZW_PORT / ZW_ADMIN_TOKEN
+        # 这些全靠环境变量传，不继承的话新实例会用另一套配置甚至起不来。
+        # 输出也接到同一个日志文件，否则新实例的报错彻底看不见。
+        log_path = ""
+        try:
+            s = get_settings()
+            log_path = str(getattr(s, "log_dir", "") or "")
+        except Exception:  # noqa: BLE001
+            log_path = ""
+        out = subprocess.DEVNULL
+        if log_path:
+            try:
+                import pathlib as _pl
+                _pl.Path(log_path).mkdir(parents=True, exist_ok=True)
+                out = open(_pl.Path(log_path) / "respawn.log", "a", encoding="utf-8")  # noqa: SIM115
+            except Exception:  # noqa: BLE001
+                out = subprocess.DEVNULL
+        kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": out,
+            "stderr": out,
+            "close_fds": True,
+            "env": dict(os.environ),      # ← 关键：继承全部环境变量
+            "cwd": os.getcwd(),
+        }
+        if os.name == "nt":
+            # Windows：彻底脱离当前进程树，否则父进程一退子进程跟着没了
+            kwargs["creationflags"] = (
+                subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            kwargs["start_new_session"] = True
+        # **顺序不能反**（2026-11-20 实测踩到）：
+        # 先 Popen 再 exit 的话，新实例启动时旧进程还占着端口 →
+        # `[Errno 98] address already in use` → 新实例立刻退出 → 服务彻底没了。
+        # 正确做法是：先放掉端口，再拉起新的。
+        #
+        # `os._exit` 不跑 uvicorn 的优雅关闭，所以这里先手动关掉 server
+        # 让端口真的释放，再用 timer 拉起。
+        # 先拉起新进程，但让它**在绑端口前等旧进程退出**（用环境变量告知等待秒数）。
+        # 这比"自己先释放端口再拉起"更稳：`uvicorn.run()` 是阻塞调用，
+        # 这里拿不到它的 server 对象，没法主动优雅停机；而 `os._exit` 不能
+        # 让端口立刻释放（内核回收要时间）。让子进程等是最简单可靠的。
+        # **退出前必须优雅收尾**（2026-11-20 审查指出）：
+        # `os._exit` 跳过 lifespan 的 finally，于是
+        #   · hub 上留一条僵尸终端通道（设备以为还连着）
+        #   · 设备心跳不干净
+        #   · 每个 Popen 出去的 chrome 都不会被清理 → 孤儿进程
+        # 这里手动把这几件事做掉再退出。
+        try:
+            from zw_core.services import shellagent as _shell
+            from zw_core.services import termhub as _term
+
+            _term.stop_client()
+            _shell.stop_agent()
+            logger.warning("接管前已停止终端隧道与远程执行通道")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("接管前收尾失败（继续退出）：%s", exc)
+
+        # 先把正在跑的环境停掉，避免留下孤儿 chrome
+        try:
+            from zw_core.services import manager as _mgr
+
+            for _p in _mgr.list_profiles():
+                if _p.get("state") == "running":
+                    try:
+                        _mgr.stop(_p["id"])
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("接管前停止环境失败（继续退出）：%s", exc)
+
+        kwargs["env"] = dict(os.environ, ZW_WAIT_PORT_MS="2500")
+        # **必须走 proc.popen_hidden**（项目约定，tests/test_proc_hidden.py 会拦）：
+        # 直接 `subprocess.Popen` 在 Windows 上会闪一个控制台黑框，
+        # 而用户明确要求"后台窗口全部隐藏"。
+        from zw_core.services import proc as _proc
+
+        _proc.popen_hidden(cmd, **kwargs)
+        os._exit(0)
+
     @app.post(f"{API_PREFIX}/service/takeover", tags=["运维"], dependencies=[Auth, Cidr],
               summary="让新装的本机服务接管端口（装完新版但版本号没变时用这个）")
     def service_takeover() -> dict[str, Any]:
@@ -535,27 +635,51 @@ def build_app() -> FastAPI:
 
         安全边界沿用 `take_over()`：只杀**监听本端口**且**可执行文件名含 zhiwen** 的进程。
         """
+        import os
         import threading
 
-        from zw_core import client as client_mod
+        s = get_settings()
+        port = int(getattr(s, "port", 0) or 0)
+        result: dict[str, Any] = {"started": False, "port": port, "pid": os.getpid()}
 
-        result: dict[str, Any] = {"started": False}
-
+        # ## 为什么不是调 `LocalCore().take_over()`（2026-11-20 审查指出）
+        #
+        # 那个方法是给**客户端**用的：它判断 `self.attached`（"我接管了别人"）才动手。
+        # 而这里新建的 `LocalCore()` 的 `attached` 恒为 False —— 实测每次都是
+        # `ok=False note=当前没有接管别的实例`，接口回 200 却什么都没做，
+        # 前端还弹"已安排接管"，属于**假成功**。
+        #
+        # 这个接口要的语义其实更简单：**让我自己退出**，把端口让给已经装好的新版 ——
+        # 新版是由客户端/守护进程拉起的，只要端口空出来它就会绑上。
+        #
+        # 所以我只做一件事：确认"要退出的这个进程确实是我自己"，然后体面退出。
+        # 不碰任何别的进程（比 take_over 的杀进程更安全）。
         def _do() -> None:
             try:
-                # 用当前配置构造一个 LocalCore，借用它的 take_over（它知道端口与版本）
-                core = client_mod.LocalCore()
-                ok, note = core.take_over()
-                logger.warning("按请求执行接管：ok=%s note=%s", ok, note)
+                logger.warning("按请求让出端口 %s（pid %s）并自我重启", port, os.getpid())
+                time.sleep(0.5)      # 给响应留出送达时间
+                # **必须自己把自己拉起来**（2026-11-20 审查指出）。
+                #
+                # 上一版直接 `os._exit(0)`，注释里假设"新版由客户端/守护进程拉起" ——
+                # 但实测三类环境里有两类没有守护：
+                #   · `python -m zw_core.main` / run-dev.sh：裸跑，退出即永久失联
+                #   · Windows + PyInstaller 客户端：退出路径里没有 re-exec
+                #   · 只有 systemd 的 `Restart=always` 能自愈
+                # 而云电脑正是"没人重启"那一类 —— 点一下就等于远程把知纹关掉。
+                #
+                # 所以这里改成 re-exec：同一个可执行文件、同样的参数重新起一个
+                # 脱离父进程的新实例，然后自己退出。端口释放后新实例立刻绑上，
+                # 新版二进制（如果刚装过）就在这一步生效。
+                _respawn_and_exit()
             except Exception as exc:  # noqa: BLE001 —— 后台线程里不能抛
-                logger.warning("接管失败：%s: %s", type(exc).__name__, exc)
+                logger.warning("让出端口失败：%s: %s", type(exc).__name__, exc)
 
-        # 必须延后执行：响应要先发出去，否则调用方拿到的是"连接被重置"
         t = threading.Timer(1.0, _do)
         t.daemon = True
         t.start()
         result["started"] = True
-        result["hint"] = "1 秒后开始接管；随后请轮询 /healthz 确认版本"
+        result["hint"] = ("本进程将在约 1 秒后退出，把端口让给已安装的新版；"
+                          "随后请轮询 /healthz 确认版本")
         return ok(result)
 
     @app.get(f"{API_PREFIX}/meta", tags=["运维"], dependencies=[Auth, Cidr], summary="服务元信息")

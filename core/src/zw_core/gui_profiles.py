@@ -656,9 +656,18 @@ class CoreApi:
             json_body={"enabled": bool(enabled)}, timeout=30.0,
         ))
 
-    def delete_pack(self, pack_id: str) -> tuple[bool, Any, dict[str, Any] | None]:
+    def delete_pack(self, pack_id: str,
+                    force: bool = False) -> tuple[bool, Any, dict[str, Any] | None]:
+        """删包。有环境在用会返回 `PACK_IN_USE`，确认要删就传 `force=True`。"""
+        q = "?force=1" if force else ""
         return _unwrap_business(*self.call(
-            "DELETE", f"/api/v1/packs/{quote(pack_id, safe='')}", timeout=60.0,
+            "DELETE", f"/api/v1/packs/{quote(pack_id, safe='')}{q}", timeout=60.0,
+        ))
+
+    def pack_usage(self, pack_id: str) -> tuple[bool, Any, dict[str, Any] | None]:
+        """这个包里的扩展被哪些环境用着（删包前判断影响）。"""
+        return _unwrap_business(*self.call(
+            "GET", f"/api/v1/packs/{quote(pack_id, safe='')}/usage", timeout=30.0,
         ))
 
     def remove_extensions(self, ref: str,
@@ -928,9 +937,13 @@ class TextOverlay(_Overlay):
         # 所以这里只给 64px（约两行半）；包再多靠滚轮，不再撑高浮层。
         _sc = _ScrollList(row, self.theme, height=64)
         _sc.wrap.pack(fill="x", pady=(2, 0))
-        # 打个可识别的名字：自检脚本要能只量"插件勾选器"那个 Canvas，
-        # 而不是随便抓一个（面板里还有环境列表等其它滚动区）。
-        _sc.canvas.configure(name="zw_pack_picker_canvas")
+        # **不要用 `canvas.configure(name=...)`**（2026-11-20 实测踩到）：
+        # Tk 的 Canvas 根本没有 `-name` 这个选项，会抛
+        #   `_tkinter.TclError: unknown option "-name"`
+        # 而这一行在 `add_pack_picker` 里、外层又被 `try/except` 包着 ——
+        # 结果是**整个插件勾选器都渲染不出来**，界面静默降级成"只有默认包开关"，
+        # 而且一个错都不报。给自检脚本的标识改用属性挂载（不碰 Tk 选项）。
+        _sc.canvas.zw_is_pack_picker = True  # type: ignore[attr-defined]
         box = _sc.inner
         picked: list[tuple[tk.StringVar, str]] = []
         for p in packs:
@@ -1739,6 +1752,8 @@ class PacksOverlay(_Overlay):
                  anchor="w").pack(side="left", padx=(8, 0))
         ttk.Button(line, text="删除", style="Danger.TButton",
                    command=lambda p=pack: self.ask_delete(p)).pack(side="right")
+        ttk.Button(line, text="用在哪些浏览器", style="Tiny.TButton",
+                   command=lambda p=pack: self.ask_usage(p)).pack(side="right", padx=(0, 6))
         var = tk.BooleanVar(value=bool(pack.get("is_default")))
         self._default_vars[pack_id] = var
         ttk.Checkbutton(line, text="默认", variable=var, style="Card.TCheckbutton",
@@ -2170,21 +2185,73 @@ class PacksOverlay(_Overlay):
         self.on_changed()
         self.reload(force=True)
 
-    def ask_delete(self, pack: dict[str, Any]) -> None:
+    def ask_usage(self, pack: dict[str, Any]) -> None:
+        """这个包里的插件被哪些浏览器用着。
+
+        网页控制台有这个入口，桌面端以前没有 —— 用户日常用桌面端，
+        想删包时看不到"会影响谁"。
+        """
         pack_id = str(pack.get("id") or "")
         name = str(pack.get("name") or pack_id)
-        ov = ConfirmOverlay(
-            self.card, self.theme, self.fonts, "删除扩展包",
-            (f"确定删除「{name}」吗？\n\n"
-             "已经应用到环境里的扩展不会被删掉（包只是出厂模板），"
-             "但这份包本身会从库里消失。"),
-            "删除", on_confirm=lambda: self._delete(pack_id, name),
-        )
-        ov.open()
 
-    def _delete(self, pack_id: str, name: str) -> None:
+        def show(res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+            ok, data, err = res
+            if not ok:
+                self.set_status(f"查询失败：{(err or {}).get('message', '')}", bad=True)
+                return
+            rows = (data or {}).get("profiles") or []
+            if not rows:
+                self.set_status(f"「{name}」目前没有任何环境在用")
+                self.on_log(f"扩展包「{name}」无环境占用", "info")
+                return
+            lines = [f"{i+1}. {r.get('name')}{'（运行中）' if r.get('running') else ''}"
+                     for i, r in enumerate(rows[:20])]
+            body = (f"「{name}」被 {len(rows)} 个环境用着：\n\n" + "\n".join(lines)
+                    + (f"\n…等 {len(rows)} 个" if len(rows) > 20 else ""))
+            NoticeOverlay(self.card, self.theme, self.fonts,
+                          title="用在哪些浏览器", message=body).open()
+
+        call_async(self.card, lambda: self.api.pack_usage(pack_id), show)
+
+    def ask_delete(self, pack: dict[str, Any]) -> None:
+        """删包前**先查占用**：把"会影响哪些环境"摆在确认框里。
+
+        ## 为什么（2026-11-20 审查指出）
+
+        以前直接删，用户根本不知道这个包被哪些环境用着。删完正在跑的环境不受影响
+        （插件已复制进扩展库），但**以后新建环境就带不上了**，而且没有任何提示。
+        """
+        pack_id = str(pack.get("id") or "")
+        name = str(pack.get("name") or pack_id)
+
+        def open_confirm(users: list[dict[str, Any]]) -> None:
+            extra = ""
+            if users:
+                names = "、".join(str(u.get("name") or u.get("profile_id")) for u in users[:6])
+                more = f" 等 {len(users)} 个" if len(users) > 6 else ""
+                extra = (f"\n\n还有 {len(users)} 个环境在用：{names}{more}。"
+                         "\n正在运行的不受影响，但以后新建环境就带不上这个包了。")
+            ov = ConfirmOverlay(
+                self.card, self.theme, self.fonts, "删除扩展包",
+                (f"确定删除「{name}」吗？\n\n"
+                 "已经应用到环境里的扩展不会被删掉（包只是出厂模板），"
+                 "但这份包本身会从库里消失。" + extra),
+                "仍然删除" if users else "删除",
+                on_confirm=lambda: self._delete(pack_id, name, force=bool(users)),
+            )
+            ov.open()
+
+        def got_usage(res: tuple[bool, Any, dict[str, Any] | None]) -> None:
+            ok, data, _err = res
+            # 查占用失败也别把删包这条路堵死，只是少了提示
+            users = ((data or {}).get("profiles") if ok else None) or []
+            open_confirm(list(users))
+
+        call_async(self.card, lambda: self.api.pack_usage(pack_id), got_usage)
+
+    def _delete(self, pack_id: str, name: str, *, force: bool = False) -> None:
         self.set_status(f"正在删除扩展包「{name}」…")
-        call_async(self.card, lambda: self.api.delete_pack(pack_id),
+        call_async(self.card, lambda: self.api.delete_pack(pack_id, force=force),
                    lambda res: self._after_delete(res, name))
 
     def _after_delete(self, res: tuple[bool, Any, dict[str, Any] | None], name: str) -> None:
@@ -2610,8 +2677,24 @@ class ProfilePanel(tk.Frame):
             self._busy = max(0, self._busy - 1)
             self.on_log(f"已创建环境「{name}」", "ok")
             self.set_status(f"已创建「{name}」")
+            # **插件没带上必须让用户看见**（2026-11-20 审查指出）：
+            # 后端 `warnings` 字段早就有，但 GUI 从没读过它 —— 用户在桌面端
+            # 建完环境看到的是绿色成功，直到启动才发现插件没带上。
+            _warns = list((data or {}).get("warnings") or [])
+            for _w in _warns:
+                self.on_log(f"「{name}」的插件告警：{_w}", "warn")
+            if _warns:
+                self.set_status(f"已创建「{name}」，但插件没完全带上（{len(_warns)} 条告警）",
+                                bad=True)
             if isinstance(ov, TextOverlay) and ov.is_open():
                 ov.close()          # 只有成功了才收起浮层
+            if _warns:
+                NoticeOverlay(
+                    self, self.theme, self.fonts,
+                    title="环境已创建，但插件没完全带上",
+                    message="\n".join(f"· {w}" for w in _warns)
+                            + "\n\n环境本身可以正常用；去「管理插件」里可以补装。",
+                ).open()
         else:
             self._busy = max(0, self._busy - 1)
             code = str((err or {}).get("code") or "")

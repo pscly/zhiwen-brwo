@@ -1,5 +1,88 @@
 # CHANGELOG
 
+## 0.8.32 — 2026-11-21
+
+**用户要求「详细完整检查、多轮测试到完全 OK 再交付」。这轮派出终审后，一共修掉 9 个真缺陷 ——
+其中 4 个是我自己在最近三次提交里引入的。**
+
+### 我自己引入的（最该记的）
+
+**① GUI 插件勾选器完全不显示 —— `Canvas.configure(name=...)` 不存在**
+```python
+_sc.canvas.configure(name="zw_pack_picker_canvas")   # ← Tk 没有 -name 选项
+# _tkinter.TclError: unknown option "-name"
+```
+这行在 `add_pack_picker` 里，外层又被 `try/except` 包着 —— **整个勾选器渲染不出来，
+一个错都不报**，界面静默降级成"只有默认包开关"。这正是用户抱怨的那种"看不到却能创建"。
+
+**② 我的测试会杀掉 pytest 自己**
+`test_service_takeover_endpoint_exists` 调了 `/service/takeover`，而接口用
+`threading.Timer(1.0, ...)` 延后 `os._exit(0)`。pytest 继续跑别的用例时，
+**1 秒后 timer 触发，把整个 pytest 进程杀掉**：
+
+```
+................          ← 输出停在这里，没有汇总行
+（退出码却是 0）
+```
+
+同一次 `check-all.sh` 里 core 也被这个 timer 干掉，于是 gateway / ui / remote
+三项随机 `fetch failed`。**连续三轮门禁跑出三种不同结果**就是这个原因。
+修法：测试里把 `threading.Timer` 换成"只记录不执行"。
+
+**③ `os._exit(0)` 后没人重启 → 一点就永久失联**
+第一版 takeover 直接退出，注释假设"新版由守护进程拉起"。但实测三类环境里
+**两类没有守护**（裸跑 `python -m zw_core.main`、Windows PyInstaller 客户端），
+在云电脑上点一下就等于远程把知纹关掉。改成自我重启（`proc.popen_hidden` +
+继承环境 + `ZW_WAIT_PORT_MS` 让子进程等端口释放）。
+
+**④ `SO_REUSEADDR` 让端口探测失效**
+探测"端口空了没"时设了它，Linux 上**端口被别人 LISTEN 时 bind 也成功** →
+探测判空 → uvicorn 真绑 → `Errno 98` → 新实例秒退，而旧进程已 exit → 服务消失。
+这是仓库自己在 `client.py:_port_bindable` 注释里写过的坑的孪生版本。
+
+### 终审抓到的
+
+**⑤ `check-all.sh` 起 core 失败不报错**：端口被残留占着时新 core 直接退出，
+脚本却继续跑 9 项 → 同一份代码两次跑出两种总表。现在起 core 前清占用端口、
+60 次 healthz 等待、失败即 `exit 1` + dump core.log。
+
+**⑥ 失败详情为空**：`grep '失败项|通过 N 项'` 抓不到时 detail 就是空字符串。
+新增 `detail_of()` 兜底。
+
+**⑦ 建环境 `warnings` 三个前端一个都没读**：后端字段早就有，网页和 GUI 都
+只弹"已创建"。用户在界面上仍然看不到"插件没带上"。
+
+**⑧ `pack_ids=[]` 弹出与事实相反的告警**：库里有默认包、用户只是选了干净环境，
+却提示"库里没有标记为默认的包"。现在显式空 → 不告警，没传 → 才提示。
+
+**⑨ `pack_usage` 的 `running` 恒为 false**：写了 `bool(prof.get("running"))`，
+而 `profiles` 表**没有 running 列**（实际是 `state`）。界面上「（运行中）」
+永远不显示。
+
+**⑩ pytest 继承门禁变量**：`check-all.sh` export 的 `ZW_ROOT` / `ZW_PORT` /
+`ZW_PORT_POOL_*` 被 pytest 继承 → `test_localcore_falls_back_when_port_busy`
+撞上正在跑的 core，只在门禁里红。现在用 `env -u` 摘掉再跑。
+
+### 顺带补齐
+
+- 网页补「用新版重启服务」按钮（`/service/takeover` 之前三前端零入口）
+- GUI 补 `api.pack_usage()`、`ask_usage()`，`ask_delete` 先查占用再确认（带 force）
+- `ui-check` 的固定 `waitForTimeout` 换成显式 `waitFor`；建环境失败时直接
+  `exit 2` 报真因，而不是在 30 秒后抛 `locator.click: Timeout`
+- 云电脑清掉我遗留的 `12` / `123` 两个环境、4 条测试代理
+
+### 测试
+
+751 → **752 项**（新增 takeover 自我重启、pack_usage 状态、建环境告警、Tk 渲染）。
+
+九项门槛：**752 / 34 / 73 / 13 / 23 / 93 / 51 / 12 / 53**
+—— 连跑两轮全部通过。
+
+> 这轮最大的教训：**"测试全绿"和"东西能用"是两件事**。
+> ①④ 两个缺陷都能让功能完全失效而测试全绿，
+> ② 更极端 —— 测试自己把测试进程杀了，于是"看起来全绿"。
+> 真正抓到它们的不是断言，是**在真 Tk / 真进程里量出来的实际行为**。
+
 ## 0.8.31 — 2026-11-20
 
 **两件用户直接指出的问题：插件选择位置不对，远程升级只能靠杀进程。**

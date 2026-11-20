@@ -1744,6 +1744,14 @@ async function submitProfileForm(profile) {
     } else {
       const created = await api('POST', '/api/v1/profiles', payload);
       toast(`已创建 ${payload.name}`, 'ok', { detail: `种子 ${created.fp_seed} · id ${created.id}` });
+      // **插件没带上时必须让用户看见**（2026-11-20 审查指出）：
+      // 后端 `warnings` 字段早就有，但两个前端都没读，等于白加。
+      // 典型场景：勾的包 id 拼错、包被删了、包里的扩展缺 manifest。
+      if (created.warnings && created.warnings.length) {
+        showUsageDialog('环境已创建，但插件没完全带上',
+          created.warnings.map((w) => '· ' + w).join('\n')
+          + '\n\n环境本身可以正常用，去「环境详情 → 扩展」里可以补装。');
+      }
     }
     closeDrawer();
     await refreshView(true);
@@ -3066,7 +3074,8 @@ function renderEngineCard() {
   return `<div class="glass card mb4">
     <div class="card-h"><h3 class="card-title">内核</h3><div class="grow"></div>
       ${badge}
-      <button class="btn xs" data-act="engine-install">${e.path ? '重新下载' : '下载内核'}</button></div>
+      <button class="btn xs" data-act="engine-install">${e.path ? '重新下载' : '下载内核'}</button>
+      <button class="btn xs ghost" data-act="svc-takeover" title="装完新版但版本号没变时点这个：让新版接管端口，不用手动杀进程">用新版重启服务</button></div>
     <div class="kv">
       <span class="kv-k">策略</span><span class="kv-v mono">${esc(e.policy || '—')}</span>
       <span class="kv-k">当前内核</span><span class="kv-v mono ellip" title="${escAttr(e.path || '')}">${esc(e.path || '（没有）')}</span>
@@ -3999,6 +4008,17 @@ function onAct(act, node, ev) {
         })
         .then(() => render())
         .catch((e) => toastErr(e, '设置失败'));
+      break;
+    }
+    case 'svc-takeover': {
+      // 远程升级后"版本号没变"的正解：让新装的那份接管端口，
+      // 而不是手动杀进程（杀的那个往往正是提供命令通道的 core，一杀就断线）。
+      api('POST', '/api/v1/service/takeover', {})
+        .then(() => {
+          toast('已安排接管，2 秒后本页会自动重连', 'ok');
+          setTimeout(() => window.location.reload(), 2500);
+        })
+        .catch((e) => toastErr(e, '接管失败'));
       break;
     }
     case 'goto-packs': {

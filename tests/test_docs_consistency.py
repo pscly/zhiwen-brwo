@@ -519,7 +519,7 @@ def test_delivery_checklist_is_not_stale():
     # 期望表由人维护、并被对应脚本的实跑结果印证（门禁每次都跑）。
     expect = {
         "console-ui-check": 93,
-        "gui-check": 49,
+        "gui-check": 53,
         "ui-check": 51,
         "remote-console": 12,
         "tabs-check": 13,
@@ -586,8 +586,8 @@ def test_delivery_notes_track_current_version():
     text = latest.read_text(encoding="utf-8")
     assert core_ver in latest.name, f"最新交付说明是 {latest.name}，但当前版本是 {core_ver}"
     assert core_ver in text
-    assert "750 项" in text, "测试总数没更新"
-    assert "748 passed" in text, "passed 数没更新"
+    assert "752 项" in text, "测试总数没更新"
+    assert "750 passed" in text, "passed 数没更新"
     # 顺带确认 12 条需求表还在
     assert "十二条需求" in text
     # 版本号形如 0.8.19 的写法不该出现在别处（防止文件名与内容不一致）
@@ -624,3 +624,44 @@ def test_delivery_notes_counts_match_code():
     assert m, f"交付说明里找不到接口数（期望 'core {core_n} 条路由' / 'hub {hub_n} 条路由'）"
     assert int(m.group(1)) == core_n, f"文档写 core {m.group(1)}，实际 {core_n}"
     assert int(m.group(2)) == hub_n, f"文档写 hub {m.group(2)}，实际 {hub_n}"
+
+    # ── 九项总表也要盯住（2026-11-20 审查指出）────────────────────────
+    # 以前只校验了 `docs/交付验收清单.md`，交付说明里那张总表**完全没人管** ——
+    # 实测已漂移：pytest 写 738（实为 749）、ui-check 写 45（实为 51）、
+    # gui-check 写 46（实为 52）。守卫绿着，数字全是错的。
+    #
+    # 这里用"读脚本里声明的断言数"太脆，所以校验**文档内部自洽 + 与验收清单一致**：
+    # 两份文档必须给出同一组数字，任何一份单边改动都会红。
+    checklist = (ROOT / "docs" / "交付验收清单.md").read_text(encoding="utf-8")
+
+    def grab(txt: str, label: str) -> str:
+        """按**表格行首**取条数。
+
+        不能简单 `re.search(label + ...)`：`ui-check` 是 `console-ui-check`
+        的子串，会先匹配到后者的 93 —— 第一版就这么写，守卫静默失效
+        （我手工把 ui-check 改成 45 它也没红）。所以要求标签出现在行首的
+        `|` 或行首之后，且紧跟 "（"或空格。
+        """
+        # 两种文档格式都要吃得下：
+        #   交付说明：`| ui-check（客户端控制台） | 51 通过 / 0 失败 |`
+        #   验收清单：`ui-check             ✅ 51 通过 / 0 失败`
+        # 关键约束：标签必须**恰好**是这一行的行首标识（不能是 console-ui-check
+        # 里的一段），所以标签后面只允许 空格/✅/（…）/| 这些分隔，不能紧跟字母。
+        pat = (r"^\s*\|?\s*" + re.escape(label)
+               + r"(?![\w-])(?:[（(][^|\n]*)?[\s✅|]*?(\d+) (?:通过|passed)")
+        mm = re.search(pat, txt, re.M)
+        return mm.group(1) if mm else ""
+
+    for label in ("ui-check", "gui-check", "gateway-check", "console-ui-check",
+                  "remote-console", "tabs-check"):
+        a, b = grab(text, label), grab(checklist, label)
+        assert a, f"交付说明总表里找不到 {label} 的条数"
+        assert b, f"验收清单里找不到 {label} 的条数"
+        assert a == b, f"{label} 两份文档不一致：交付说明 {a} / 验收清单 {b}"
+
+    # pytest 的 passed 数也要两边一致
+    pa = re.search(r"(\d+) passed", text)
+    pb = re.search(r"(\d+) passed", checklist)
+    assert pa and pb, "两份文档都要写 pytest 的 passed 数"
+    assert pa.group(1) == pb.group(1), (
+        f"pytest passed 不一致：交付说明 {pa.group(1)} / 验收清单 {pb.group(1)}")

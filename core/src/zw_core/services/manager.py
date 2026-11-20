@@ -545,7 +545,19 @@ def create_profile(payload: dict[str, Any], profile_id: str | None = None) -> di
         except Exception as exc:  # noqa: BLE001 —— 见上
             logger.warning("写入初始检测页失败（环境已创建）：%s", exc)
 
-    return get_profile(pid)
+    prof = get_profile(pid)
+    # **建完就把"包没带上"的告警带回去**（2026-11-20 审查两次点名）。
+    #
+    # 以前这些告警只进 `_DEFAULT_PACK_WARNINGS`，而它要到 `start()` 才被 pop 出来 ——
+    # 用户建完环境看到的是干净的响应体，以为一切正常，直到第一次启动才发现
+    # 插件根本没带上。现在响应里就有 `warnings` 字段。
+    #
+    # 这里用 pop 而不是 peek：同一条告警不该在启动时再重复报一次。
+    pending = _DEFAULT_PACK_WARNINGS.pop(str(prof.get("id") or ""), [])
+    if pending:
+        prof = dict(prof)
+        prof["warnings"] = list(pending)
+    return prof
 
 
 def _clean_proxy_for_store(payload: dict[str, Any]) -> str:

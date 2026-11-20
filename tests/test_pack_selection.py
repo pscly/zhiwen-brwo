@@ -257,12 +257,35 @@ def test_service_takeover_endpoint_exists(tmp_path, monkeypatch):
 
     这条只验"接口存在且立刻返回"，不真去杀进程（那会打断测试自己）。
     """
+    import threading as _threading
+
     from fastapi.testclient import TestClient
 
     from zw_core import config
     monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
     monkeypatch.setenv("ZW_DEVICE_ID", "zwd_takeover_0001")
     config.reset_settings()
+
+    # ## 必须拦住真正的 respawn/exit（2026-11-21 实测踩到）
+    #
+    # 接口里用 `threading.Timer(1.0, ...)` 延后调用 `_respawn_and_exit()`，
+    # 而那个函数最后是 `os._exit(0)`。测试里调完立刻断言、pytest 继续跑别的用例 ——
+    # **1 秒后 timer 触发，把整个 pytest 进程杀掉**：输出停在 `................`，
+    # 没有汇总行，退出码却是 0。更糟的是同一次 `check-all.sh` 里
+    # core 也是被这个 timer 干掉的，于是 gateway/ui/remote 三项随机 `fetch failed`。
+    #
+    # 所以这里把 Timer 换成"立即执行但只记录"，绝不真退出。
+    fired: list[str] = []
+
+    class _FakeTimer:
+        def __init__(self, interval, fn, *a, **kw):
+            self._fn = fn
+            self.daemon = False
+
+        def start(self):
+            fired.append("timer-started")   # 记下来证明接口确实安排了动作
+
+    monkeypatch.setattr(_threading, "Timer", _FakeTimer, raising=False)
     try:
         from zw_core.main import app
         c = TestClient(app)
@@ -271,5 +294,84 @@ def test_service_takeover_endpoint_exists(tmp_path, monkeypatch):
         assert r.status_code == 200, r.text[:200]
         d = r.json().get("data") or {}
         assert d.get("started") is True, d
+        # **不能只退出、必须能自己回来**（2026-11-20 审查指出）：
+        # 上一版直接 `os._exit(0)`，注释假设"新版由守护进程拉起"，但裸跑和
+        # Windows 客户端都没有守护 → 点一下等于远程把服务关掉，永久失联。
+        # 现在改成"先拉起新进程（让它等端口释放）再退出"，这条检查代码里
+        # 确实走了 re-exec 那条路，而不是裸 exit。
+        import inspect as _inspect
+        from zw_core import api as _api_mod
+        _src = _inspect.getsource(_api_mod)
+        assert "_respawn_and_exit" in _src, "接管必须走自我重启，不能裸 exit"
+        assert "ZW_WAIT_PORT_MS" in _src, "新进程必须等旧进程放掉端口，否则 Errno 98"
+
+        # **必须带上真实端口与 pid**：前端据此提示"本进程将退出"。
+        # 早期版本这里新建了个 LocalCore 去调 take_over()，而它的 attached
+        # 恒为 False → 永远 no-op，接口回 200 却什么都没做（假成功）。
+        assert d.get("port"), d
+        assert d.get("pid"), d
+        # 接口必须**真的安排了**重启动作（否则就是个空壳）
+        assert fired, "接口没有安排接管动作"
+        # 而且我们自己还活着 —— 说明 timer 被测试拦住了，没真 exit
+        assert True
     finally:
+        config.reset_settings()
+
+
+def test_create_returns_pack_warnings_immediately(tmp_path, monkeypatch):
+    """包没带上时，**建环境的那一刻**就要告诉用户，不能等第一次启动。
+
+    ## 为什么（2026-11-20 审查两次点名）
+
+    告警只进 `_DEFAULT_PACK_WARNINGS`，而它要到 `start()` 才被读出来。
+    用户建完环境看到干净的响应体以为一切正常，直到启动才发现插件没带上。
+
+    走 HTTP 验（因为"响应里有没有这个字段"是接口层的事）。
+    """
+    from fastapi.testclient import TestClient
+
+    from zw_core import config
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("ZW_DEVICE_ID", "zwd_warn_0001")
+    config.reset_settings()
+    try:
+        from zw_core.main import app
+        c = TestClient(app)
+        hdr = {"Authorization": "Bearer zwd_warn_0001"}
+        # 指定一个不存在的包 → 建环境成功，但必须带 warnings
+        r = c.post("/api/v1/profiles",
+                   json={"name": "告警环境", "pack_ids": ["ghost-pack-xyz"]}, headers=hdr)
+        assert r.status_code == 200, r.text[:200]
+        d = r.json()["data"]
+        assert d.get("warnings"), f"建环境时没有返回告警：{d}"
+        assert any("ghost-pack-xyz" in str(w) for w in d["warnings"]), d["warnings"]
+    finally:
+        config.reset_settings()
+
+
+def test_pack_usage_running_reflects_state(tmp_path, monkeypatch):
+    """`pack_usage()` 的 `running` 必须真的反映环境状态。
+
+    ## 为什么（2026-11-20 审查实测）
+
+    原来写 `bool(prof.get("running"))`，而 `profiles` 表**没有 running 列** ——
+    实际状态在 `state`（`"running"` / `"stopped"`）。用错字段的结果是恒为 False：
+    界面上的「（运行中）」永远不显示，删包时也说不出"正被一个跑着的浏览器用着"。
+    """
+    manager, packs = _setup(tmp_path, monkeypatch)
+    try:
+        p = _make_pack(packs, tmp_path, "状态包", "状态扩展", "7" * 32)
+        prof = manager.create_profile({"name": "状态环境", "pack_ids": [p["id"]]})
+        rows = packs.pack_usage(p["id"])
+        assert rows, rows
+        assert rows[0]["running"] is False, f"没在跑却报 {rows[0]['running']}"
+
+        # 直接把库里的 state 改成 running（不真开浏览器，只看字段映射对不对）
+        with manager.get_db().conn() as c:
+            c.execute("UPDATE profiles SET state='running' WHERE id=?", (prof["id"],))
+            c.commit()
+        rows2 = packs.pack_usage(p["id"])
+        assert rows2[0]["running"] is True, f"state=running 却报 {rows2[0]['running']}"
+    finally:
+        from zw_core import config
         config.reset_settings()

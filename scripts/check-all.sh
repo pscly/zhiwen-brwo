@@ -30,6 +30,20 @@ TMP=$(mktemp -d /tmp/zw-checkall-XXXXXX)
 PIDFILE="$TMP/core.pid"
 
 NAMES=(); RESULTS=(); DETAILS=()
+# 失败时取一段可读详情：优先抓"失败项/❌/异常"，抓不到就取最后 3 行非空输出。
+# ## 为什么
+# 以前只 `grep -E '失败项|通过 N 项'`，脚本是"异常退出"而不是走正常收尾时
+# 这些行根本不存在 → 总表里 detail 是**空的**，用户只看到一个 ❌，不知道原因。
+detail_of() {
+  local txt="$1"
+  local hit
+  hit=$(printf '%s\n' "$txt" | grep -E '失败项|❌|异常|Error|Traceback' | tail -3)
+  if [ -z "$hit" ]; then
+    hit=$(printf '%s\n' "$txt" | grep -v '^[[:space:]]*$' | tail -3)
+  fi
+  printf '%s' "$(printf '%s\n' "$hit" | tr '\n' ' ' | cut -c1-200)"
+}
+
 pass(){ NAMES+=("$1"); RESULTS+=("✅ 通过"); DETAILS+=("$2"); }
 fail(){ NAMES+=("$1"); RESULTS+=("❌ 失败"); DETAILS+=("$2"); }
 skipn(){ NAMES+=("$1"); RESULTS+=("⚠️ 跳过"); DETAILS+=("$2"); }
@@ -53,8 +67,20 @@ cleanup(){
 trap cleanup EXIT
 
 echo "════════ 1/9 单元测试 ════════"
-if out=$("$VENV" -m pytest tests -q --timeout=200 2>&1); then
-  pass "pytest" "$(echo "$out"|grep -E '^[0-9]+ passed'|tail -1)"
+# **pytest 不能继承门禁的运行变量**（2026-11-21 实测）。
+#
+# 下面几行 export 的 ZW_ROOT / ZW_PORT / ZW_PORT_POOL_* 是给"自检 core 与
+# 各检查脚本"用的；pytest 继承后会出现只在门禁里复现、脱开跑就绿的假失败：
+#   · `test_localcore_falls_back_when_port_busy` 会撞上正在跑的 ZW_PORT
+#   · 端口池和门禁 core 用同一段区间
+# 所以这里用一个干净环境跑 pytest（`env -u` 逐个摘掉）。
+if out=$(env -u ZW_ROOT -u ZW_HOST -u ZW_PORT -u ZW_ADMIN_TOKEN \
+             -u ZW_SHELL_ENABLED -u ZW_CHROME_BIN -u ZW_SYNC_PASSWORD \
+             -u ZW_DEVICE_ID -u ZW_PORT_POOL_START -u ZW_PORT_POOL_END \
+             -u ZW_PORT_POOL_START_TABS -u ZW_PORT_POOL_END_TABS \
+             -u ZW_HUB_URL -u ZW_HUB_TOKEN \
+             "$VENV" -m pytest tests -q --timeout=200 2>&1); then
+  pass "pytest" "$(echo "$out"|grep -oE '[0-9]+ passed[^|]*'|tail -1)"
 else
   # **必须带出失败用例名**：只报"1 failed"时无从下手，得再手工复现一次。
   # 而且这个脚本会先 export ZW_ROOT / ZW_CHROME_BIN 等变量，pytest 会继承 ——
@@ -102,12 +128,35 @@ if [ -n "${ZW_HUB_URL:-}" ]; then
 else
   echo "  未配 ZW_HUB_URL → 同步相关项会跳过（表里会注明）"
 fi
+# 端口被上一轮残留的 core 占着时，新起的这个会直接 bind 失败退出 ——
+# 而以前等 20 秒后**不校验**，继续跑 9 项，于是同代码两次跑出两种总表
+# （2026-11-20 审查实测：第一轮 ui-check 红、第二轮 gateway-check 也红，
+#  日志里是 `[Errno 98] address already in use`）。
+# 先把占着这个端口的旧 core 清掉（只清本程序的），再起新的。
+_old=$(ss -lptnH "sport = :$PORT" 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)
+if [ -n "${_old:-}" ]; then
+  if ps -p "$_old" -o args= 2>/dev/null | grep -q 'zw_core'; then
+    echo "  端口 $PORT 被上一轮残留的 core（pid $_old）占着，先清掉"
+    kill -9 "$_old" 2>/dev/null || true
+    sleep 1
+  fi
+fi
+
 nohup "$VENV" -m zw_core.main > "$TMP/core.log" 2>&1 &
 echo $! > "$PIDFILE"
-for _ in $(seq 1 40); do
-  curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/healthz" && break
+_coreup=0
+for _ in $(seq 1 60); do
+  if curl -s -m 2 -o /dev/null "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then _coreup=1; break; fi
   sleep 0.5
 done
+if [ "$_coreup" != "1" ]; then
+  # **必须在这里就失败**：core 起不来后面每一项都会假红，总表毫无意义。
+  echo "════════ 自检 core 启动失败 ════════"
+  echo "  端口 $PORT 上 30 秒内没有 /healthz 响应。core.log 末尾："
+  tail -25 "$TMP/core.log" 2>/dev/null | sed 's/^/    /'
+  echo "  日志目录：$TMP"
+  exit 1
+fi
 LAN=$(python3 - <<'PY' 2>/dev/null || true
 import socket
 s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -210,7 +259,7 @@ if command -v node >/dev/null; then
             node scripts/ui-check.cjs 2>&1); then
     pass "ui-check" "$(echo "$out"|grep -E '通过 [0-9]+ 项'|tail -1)"
   else
-    fail "ui-check" "$(echo "$out"|grep -E '失败项|通过 [0-9]+ 项'|tail -1)"
+    fail "ui-check" "$(detail_of "$out")"
   fi
   echo "════════ 8/9 远程凭机器码进控制台 ════════"
   # 远程控制台：**从非回环地址**打开，验证"凭机器码进入"。
@@ -219,7 +268,7 @@ if command -v node >/dev/null; then
             node scripts/remote-console-check.cjs 2>&1); then
     pass "remote-console" "$(echo "$out"|grep -E '通过 [0-9]+ 项'|tail -1)"
   else
-    fail "remote-console" "$(echo "$out"|grep -E '失败 [0-9]+ 项|❌'|tail -1)"
+    fail "remote-console" "$(detail_of "$out")"
   fi
 else
   skipn "ui-check" "没有 node"
