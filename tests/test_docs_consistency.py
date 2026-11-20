@@ -659,9 +659,20 @@ def test_delivery_notes_counts_match_code():
         assert b, f"验收清单里找不到 {label} 的条数"
         assert a == b, f"{label} 两份文档不一致：交付说明 {a} / 验收清单 {b}"
 
-    # pytest 的 passed 数也要两边一致
-    pa = re.search(r"(\d+) passed", text)
-    pb = re.search(r"(\d+) passed", checklist)
-    assert pa and pb, "两份文档都要写 pytest 的 passed 数"
-    assert pa.group(1) == pb.group(1), (
-        f"pytest passed 不一致：交付说明 {pa.group(1)} / 验收清单 {pb.group(1)}")
+    # pytest 的 passed 数也要两边一致。
+    #
+    # **必须取出全部匹配再比对**（2026-11-21 审查指出）：以前 `re.search` 只拿
+    # 第一个命中，而交付说明里 `单元测试 752 项（750 passed…）` 在表格之前 ——
+    # 于是表格行 `| pytest | 749 passed |` 写成多少都不会红。实测把它改成 749
+    # 守卫仍然 19 passed，等于没守。
+    pa_all = sorted(set(re.findall(r"(\d+) passed", text)))
+    pb_all = sorted(set(re.findall(r"(\d+) passed", checklist)))
+    assert pa_all and pb_all, "两份文档都要写 pytest 的 passed 数"
+    assert pa_all == pb_all, (
+        f"pytest passed 不一致：交付说明 {pa_all} / 验收清单 {pb_all}")
+
+    # 顺带盯"共 N 项"（collected）：同一个盲区，它也只被第一个匹配盖住。
+    ca_all = sorted(set(re.findall(r"共\s*(\d+)\s*项", text)))
+    cb_all = sorted(set(re.findall(r"共\s*(\d+)\s*项", checklist)))
+    if ca_all and cb_all:
+        assert ca_all == cb_all, f"测试总数不一致：交付说明 {ca_all} / 验收清单 {cb_all}"

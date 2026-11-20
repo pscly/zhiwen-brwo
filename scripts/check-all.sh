@@ -18,6 +18,24 @@
 #   ZW_HUB_URL / ZW_HUB_TOKEN / ZW_PANEL_USER / ZW_PANEL_PASSWORD
 # 没有就自动跳过同步相关项（并在表里注明"未配置"，不是"通过"）。
 set -uo pipefail
+
+# ── 单实例锁 ────────────────────────────────────────────────
+# 两个 check-all.sh 同时跑会**互相杀掉对方的 core**：两边都用 8829 端口，
+# 而下面"清掉占端口的旧 core"那段只按"端口 + 进程名含 zw_core"判断，
+# 分不清"上一轮残留"和"另一轮正在跑"。后果是同一份代码跑出两种总表
+# （2026-11-21 审查实测：8 轮里有 6 轮因并发而红、1 轮全绿）。
+#
+# 用 flock 保证同一时刻只有一份在跑；拿不到锁就直接说明并退出，
+# 不要让人误以为是"代码有问题"。
+LOCK_FILE="${CHECK_ALL_LOCK:-/tmp/zw-checkall.lock}"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "另一个 check-all.sh 正在跑（锁：$LOCK_FILE）。"
+    echo "等它跑完再执行；确实要并行请给不同的 CHECK_ALL_LOCK 与 CHECK_PORT。"
+    exit 3
+  fi
+fi
 cd "$(dirname "$0")/.." || exit 1
 ROOT=$(pwd)
 VENV="$ROOT/.venv/bin/python"

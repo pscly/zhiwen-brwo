@@ -159,6 +159,17 @@ Name: "{autodesktop}\{#MyAppDirName}"; Filename: "{app}\{#MyAppExeName}"; Commen
 ; 装完直接打开（postinstall = 在完成页显示成勾选框，默认勾上）
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram}"; Flags: nowait postinstall skipifsilent
 
+; **静默安装也必须把程序拉起来**（2026-11-21 实测踩到）。
+;
+; 上面那条带 `skipifsilent`：静默安装时**不启动**。而升级脚本通常还会传
+; `/CLOSEAPPLICATIONS` 先把旧客户端关掉 —— 两者一叠加，静默升级的结果是
+; **程序被关了、新版的也没起来**，机器直接离线，必须人工去点一次。
+; 远程给云电脑升级时我就这么把它搞离线了（连续两次）。
+;
+; 这一条只在静默安装时生效（`skipifnotsilent`），保证装完立刻有进程在跑。
+; 用 `nowait` 不阻塞安装器退出；不弹任何窗口。
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent runhidden
+
 [Registry]
 ; 开机自启：勾了 autostart 才写，卸载时 uninsdeletevalue 把这个值删掉。
 ; 用户随时可以在 Windows「设置 → 应用 → 启动」或任务管理器「启动」里关掉它，

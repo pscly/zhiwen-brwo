@@ -514,6 +514,9 @@ def build_app() -> FastAPI:
         return ok({"status": "ready", "engine": eng, "root": str(s.root), "schema_version": get_db().schema_version()})
 
     # ── 元信息与 AI 自描述 ────────────────────────────────
+    # 接管过程中要跨线程传"停掉了哪些环境"，用一个极小容器（不引入新模块）
+    _STATE: dict[str, Any] = {}
+
     def _respawn_and_exit() -> None:
         """脱离父进程重新拉起自己，然后退出当前进程。
 
@@ -592,7 +595,10 @@ def build_app() -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             logger.warning("接管前收尾失败（继续退出）：%s", exc)
 
-        # 先把正在跑的环境停掉，避免留下孤儿 chrome
+        # 先把正在跑的环境停掉，避免留下孤儿 chrome。
+        # **并把停掉了哪些记下来**（2026-11-21 审查指出）：前端按钮只写"重启服务"，
+        # 用户不知道这一下会关掉所有正在跑的浏览器。
+        stopped: list[str] = []
         try:
             from zw_core.services import manager as _mgr
 
@@ -600,10 +606,17 @@ def build_app() -> FastAPI:
                 if _p.get("state") == "running":
                     try:
                         _mgr.stop(_p["id"])
+                        stopped.append(str(_p.get("name") or _p.get("id")))
                     except Exception:  # noqa: BLE001
                         pass
         except Exception as exc:  # noqa: BLE001
             logger.warning("接管前停止环境失败（继续退出）：%s", exc)
+        if stopped:
+            logger.warning("接管前已停止 %d 个运行中的环境：%s", len(stopped), "、".join(stopped[:5]))
+        try:
+            _STATE["stopped_profiles"] = stopped
+        except Exception:  # noqa: BLE001
+            pass
 
         kwargs["env"] = dict(os.environ, ZW_WAIT_PORT_MS="2500")
         # **必须走 proc.popen_hidden**（项目约定，tests/test_proc_hidden.py 会拦）：
@@ -678,8 +691,19 @@ def build_app() -> FastAPI:
         t.daemon = True
         t.start()
         result["started"] = True
+        # **明确告诉调用方"会关掉哪些正在跑的浏览器"** —— 以前只写"重启服务"，
+        # 用户在跑着 20 个环境时点一下全没了还不知道为什么。
+        try:
+            from zw_core.services import manager as _mgr2
+
+            running = [str(p.get("name") or p.get("id")) for p in _mgr2.list_profiles()
+                       if p.get("state") == "running"]
+        except Exception:  # noqa: BLE001
+            running = []
+        result["running_profiles"] = running
         result["hint"] = ("本进程将在约 1 秒后退出，把端口让给已安装的新版；"
-                          "随后请轮询 /healthz 确认版本")
+                          "随后请轮询 /healthz 确认版本"
+                          + (f"。注意：会先停掉 {len(running)} 个正在运行的环境" if running else ""))
         return ok(result)
 
     @app.get(f"{API_PREFIX}/meta", tags=["运维"], dependencies=[Auth, Cidr], summary="服务元信息")

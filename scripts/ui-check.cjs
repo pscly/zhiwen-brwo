@@ -253,6 +253,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   } catch (_) {
     rowVisible = false;
   }
+  if (!rowVisible) {
+    // **把现场打出来**：光说"看不见"没法定位。要看的是
+    //   · 前端到底拿到几个环境（S.profiles）
+    //   · 页面此刻显示什么（空态？报错？还是被筛掉了）
+    //   · 有没有 JS 报错把渲染打断
+    // `S` 是模块内 `const`，不是 globalThis —— 只能从 DOM 反推现场。
+    const dbg = await page.evaluate(() => {
+      const t = document.body.innerText || '';
+      const rows = [...document.querySelectorAll('#view tr')];
+      return {
+        rowCount: rows.length,
+        rowTexts: rows.slice(0, 6).map((r) => (r.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 40)),
+        emptyHint: /还没有环境|没有匹配|加载失败|出错了/.test(t),
+        hasListView: !!document.querySelector('#view'),
+        textSample: t.replace(/\s+/g, ' ').slice(0, 260),
+      };
+    }).catch((e) => ({ err: String(e) }));
+    console.log('    [诊断] ' + JSON.stringify(dbg).slice(0, 500));
+    const errs = await page.evaluate(() => (window.__zwErrors || []).slice(0, 3)).catch(() => []);
+    if (errs.length) console.log('    [诊断] JS 报错: ' + JSON.stringify(errs).slice(0, 300));
+  }
   check('列表里能看到刚建的环境', rowVisible);
 
   // **找不到行就跳过后面依赖它的步骤**（2026-11-21 实测）：
