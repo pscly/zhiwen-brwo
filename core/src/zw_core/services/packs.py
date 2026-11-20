@@ -648,12 +648,30 @@ def _import_from_chrome(raw_path: str, name: str = "") -> dict[str, Any]:
             400,
         )
 
+    # 把"这个浏览器里真正加载过的扩展 ID"也带上。
+    #
+    # `found` 里的 ID 是从**目录名**推的，对商店装的扩展没错；但**未打包加载**
+    # （开发者模式 / `--load-extension`）的扩展目录名可能是任意路径哈希，
+    # 而 `Preferences` 与 `Local Extension Settings/` 里记的才是它实际用的 ID。
+    #
+    # 这个函数以前写好了却**没人调用**（2026-11-20 审查指出），
+    # 于是"按源环境实测 ID 另放一份数据"那条分支拿不到权威 ID。
+    observed = set()
+    try:
+        # **注意层级**：这个函数要的是 User Data 那一层（它自己再拼 `Default/`），
+        # 不是 `Default` 本身。传错层级会静默返回空集合 —— 第一版就是这样，
+        # 于是"未打包扩展不记假 ID"的判断根本没生效。
+        observed = observed_extension_ids(default_dir.parent)
+    except Exception as exc:  # noqa: BLE001 —— 读不到就当没有，不影响导入
+        logger.debug("读源环境的扩展 ID 失败（忽略）：%s", exc)
+
     return _materialize_pack(
         found,
         settings_root,
         name=name or f"{default_dir.parent.name or 'chrome'}-扩展",
         source_kind="chrome",
         source_path=str(default_dir),
+        observed=observed,
     )
 
 
@@ -667,6 +685,7 @@ def _materialize_pack(
     source_path: str = "",
     audit_ref: str = "",
     profile_name: str = "",
+    observed: set[str] | None = None,
 ) -> dict[str, Any]:
     """把"已找到的扩展列表"落成一个包。
 
@@ -687,7 +706,21 @@ def _materialize_pack(
             if les_src.is_dir() and any(les_src.iterdir()):
                 data_dst = pdir / DATA_DIR / key
                 _copy_tree(les_src, data_dst)
-        exts.append(_ext_meta(code_src, key, ext_id=ext_id, data_dir=data_dst))
+        # 目录名**就是**这个浏览器实际在用的扩展 ID 吗？
+        #
+        # 判据不是"在不在 observed 里" —— 那个集合同时包含
+        # `Local Extension Settings/` 的目录名，而那个目录名恰恰就是我们从
+        # `Extensions/` 读到的同一个字符串，所以判断恒为真、毫无区分力
+        # （第一版就这么写，实测才发现）。
+        #
+        # 真正的判据：Chromium 的扩展 ID 是 **a-p 这 16 个字母**组成的 32 字符。
+        # 符合这个形状才是真 ID；否则（路径哈希、开发者模式的任意目录名）
+        # 宁可留空 —— 下游会按本机加载路径重新推算，比记一个错 ID 更安全。
+        import re as _re
+
+        is_real_id = bool(_re.fullmatch(r"[a-p]{32}", ext_id or ""))
+        trusted_id = ext_id if is_real_id else ""
+        exts.append(_ext_meta(code_src, key, ext_id=trusted_id, data_dir=data_dst))
 
     meta = {
         "id": pack_id,

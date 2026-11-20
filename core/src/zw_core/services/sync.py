@@ -496,9 +496,6 @@ def remote_history(ref: str) -> dict[str, Any]:
     }
 
 
-def adopt_remote(ref: str, password: str | None = None) -> dict[str, Any]:
-    """以远端为准强制覆盖本地（危险操作，需要显式调用）。"""
-    return pull(ref, password=password, force=True)
 
 
 def remote_delete(profile_id: str, revision: int | None = None) -> dict[str, Any]:

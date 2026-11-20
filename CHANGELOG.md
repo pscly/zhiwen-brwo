@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## 0.8.23 — 2026-11-20
+
+**接上"双写"那一半逻辑；删掉 100 行死代码。**
+
+### 一、`observed_extension_ids` 从没被调用
+
+审查指出它是零调用函数，而"按源环境实测 ID 另放一份数据"那条双写分支
+正建立在它之上。现在接进 `_import_from_chrome`。
+
+写的过程中我**错了两次**，都记下来：
+
+**第一次：传错层级。** 这个函数要的是 User Data 那一层（它自己再拼 `Default/`），
+我传了 `Default` 本身 → 静默返回空集合，判断没生效。
+
+**第二次：判据没有区分力。** 我改成"目录名在不在 `observed` 里"，
+但那个集合同时包含 `Local Extension Settings/` 的目录名 —— 就是从
+`Extensions/` 读到的**同一个字符串**，所以判断恒为真。
+
+最终判据：**Chromium 的扩展 ID 是 a-p 这 16 个字母组成的 32 字符**。
+符合才是真 ID；路径哈希之类一律留空（下游会按本机路径重新推算，
+比记一个错 ID 安全 —— 记错了数据会落到 Chromium 永远不读的位置，等于白搬）。
+
+实测：
+
+```
+非 a-p 形状（路径哈希）: ext_id=''      数据=True
+真 ID 形状:              ext_id='aaaa…' 数据=True
+```
+
+### 二、删掉 8 个零调用函数（约 100 行）
+
+| 文件 | 函数 | 处理 |
+|---|---|---|
+| `client.py` | `wait_for_approval` | **删** —— GUI 在 `gui.py` 自己重写了一份轮询，这份是重复实现 |
+| `sync.py` | `adopt_remote` | 删（3 行，`pull(force=True)` 的两行包装） |
+| `manager.py` | `resolve_ws_url` | 删（与 `local_ws` 并存，无人用） |
+| `engines.py` | `list_engine_candidates` | 删（23 行） |
+| `crypto.py` | `sha256_bytes` / `sha256_file` | 删（`enginesrc.py` 另有私有实现） |
+| `termhub.py` | `get_client` | 删 |
+| `logging_conf.py` | `profile_logger` | 删 —— 注释承诺"每个环境单独日志文件"，实际没有任何环境日志 |
+
+**删完 734 passed / 2 skipped，一切正常** —— 说明它们确实是死的。
+
+> 为什么删而不是留着：留着会让人以为"这个能力已经有了"，
+> 改代码时还可能改错那一份（`wait_for_approval` 就是典型 ——
+> 两份轮询逻辑，改了一份另一份还在）。
+
+### 测试
+
+735 → **736 项**（新增 ext_id 判据的正反两条）。
+九项门槛全绿（736 / 34 / 73 / 13 / 23 / 93 / 45 / 12 / 46）。
+
 ## 0.8.22 — 2026-11-20
 
 **补上"推"那一半：导出 zip、上传控制台，网页端也补了入口。**

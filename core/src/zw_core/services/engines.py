@@ -245,29 +245,6 @@ def prepare_engine_async(s: Settings | None = None) -> dict[str, Any]:
     return enginesrc.start_background(force=False)
 
 
-def list_engine_candidates(s: Settings) -> list[dict[str, str]]:
-    """给 doctor / 控制台用：列出所有能找到的内核（含版本），不抛异常。"""
-    out: list[dict[str, str]] = []
-    seen: set[str] = set()
-    probe: list[Path] = []
-    if s.chrome_bin:
-        probe.append(Path(s.chrome_bin).expanduser())
-    if Path(s.engine_dir).exists():
-        for name in ("chrome", "chrome.exe", "chromium"):
-            probe.extend(sorted(Path(s.engine_dir).rglob(name)))
-    for cand in (_WIN_CANDIDATES if IS_WIN else _POSIX_CANDIDATES):
-        probe.append(Path(os.path.expandvars(cand)))
-    for name in ("chrome", "chromium", "google-chrome"):
-        found = shutil.which(name)
-        if found:
-            probe.append(Path(found))
-    for p in probe:
-        key = str(p)
-        if key in seen or not p.is_file():
-            continue
-        seen.add(key)
-        out.append({"path": key, "version": engine_version(p), "source": _source_of(p, s)})
-    return out
 
 
 def _source_of(p: Path, s: Settings) -> str:

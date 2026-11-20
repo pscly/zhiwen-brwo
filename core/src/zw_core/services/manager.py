@@ -1019,15 +1019,6 @@ def cdp_info(p: dict[str, Any], ttl: int | None = None) -> dict[str, Any] | None
     return info
 
 
-def resolve_ws_url(profile_id: str, token: str, timeout: float = 8.0) -> str:
-    """在网关侧把「环境」解析成真正的 ws 地址（已带 token）。"""
-    import httpx
-
-    s = get_settings()
-    url = f"{s.gateway_public_base}/cdp/{profile_id}/json/version?token={token}"
-    resp = httpx.get(url, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()["webSocketDebuggerUrl"]
 
 
 def local_ws(profile: dict[str, Any]) -> str | None:

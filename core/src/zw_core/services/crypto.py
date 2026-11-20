@@ -95,13 +95,5 @@ def decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes = b"") -> by
         raise CryptoError("DECRYPT_FAILED", "解密失败：主密码不对，或这个包不是用这台机器的主密码加密的") from exc
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
-def sha256_file(path: os.PathLike[str] | str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()

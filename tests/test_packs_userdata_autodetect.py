@@ -205,3 +205,52 @@ def test_chrome_dir_as_zip_keeps_data(tmp_path, monkeypatch):
         assert "000003.log" in files, files
     finally:
         config.reset_settings()
+
+
+def test_ext_id_only_recorded_when_it_looks_like_a_real_id(tmp_path, monkeypatch):
+    """只有**真 ID 形状**才记进 `ext_id`。
+
+    ## 为什么（2026-11-20 审查 + 我自己的两次写错）
+
+    Chromium 的扩展 ID 是 **a-p 这 16 个字母**组成的 32 字符。目录名符合才算真 ID；
+    未打包加载（开发者模式）时目录名可能是任意路径哈希。
+
+    这个字段用于"按源环境实测 ID 另放一份数据"那条双写分支 —— 记错了，
+    数据会落到一个 Chromium 永远不会读的位置，等于白搬。
+
+    我的第一版判据是"在不在 `observed_extension_ids()` 里"，但那个集合
+    同时包含 `Local Extension Settings/` 的目录名（就是同一个字符串），
+    所以判断恒为真、毫无区分力。第二版才对。
+    """
+    from zw_core import config
+    from zw_core.services import packs
+
+    monkeypatch.setenv("ZW_ROOT", str(tmp_path / "root"))
+    config.reset_settings()
+    try:
+        # ① 非 a-p 形状 → 不记
+        d1 = tmp_path / "c1" / "Default"
+        (d1 / "Extensions" / "abcdefghijklmnop").mkdir(parents=True)
+        (d1 / "Extensions" / "abcdefghijklmnop" / "manifest.json").write_text(
+            json.dumps({"name": "未打包", "version": "1"}))
+        les1 = d1 / "Local Extension Settings" / "abcdefghijklmnop"
+        les1.mkdir(parents=True)
+        (les1 / "000003.log").write_bytes(b"S")
+        i1 = packs.import_pack(str(d1), name="非真 ID")
+        e1 = i1["extensions"][0]
+        assert e1["ext_id"] == "", f"不该记非真 ID：{e1['ext_id']!r}"
+        assert e1["has_data"] is True, "数据仍要带上"
+
+        # ② 真 ID 形状 → 记
+        real = "a" * 32
+        d2 = tmp_path / "c2" / "Default"
+        (d2 / "Extensions" / real).mkdir(parents=True)
+        (d2 / "Extensions" / real / "manifest.json").write_text(
+            json.dumps({"name": "真 ID", "version": "1"}))
+        les2 = d2 / "Local Extension Settings" / real
+        les2.mkdir(parents=True)
+        (les2 / "000003.log").write_bytes(b"S")
+        i2 = packs.import_pack(str(d2), name="真 ID")
+        assert i2["extensions"][0]["ext_id"] == real
+    finally:
+        config.reset_settings()

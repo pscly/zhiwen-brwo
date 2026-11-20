@@ -97,16 +97,3 @@ def setup_logging(log_level: str | None = None, force: bool = False) -> None:
     _CONFIGURED = True
 
 
-def profile_logger(profile_id: str, name: str) -> logging.Logger:
-    """返回一个会同时写入该环境专属日志文件的 logger。"""
-    s = get_settings()
-    lg = logging.getLogger(f"zw.profile.{profile_id}")
-    target = Path(s.profiles_dir) / profile_id / "profile.log"
-    if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(target) for h in lg.handlers):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(target, encoding="utf-8")
-        fh.setFormatter(JsonFormatter())
-        lg.addHandler(fh)
-        lg.propagate = True
-    lg = logging.LoggerAdapter(lg, {"profile_id": profile_id, "profile_name": name})  # type: ignore[assignment]
-    return lg  # type: ignore[return-value]

@@ -407,8 +407,6 @@ def start_client(hub_url: str, device_id: str, token: str = "", shell_enabled: b
         return _CLIENT
 
 
-def get_client() -> TermClient | None:
-    return _CLIENT
 
 
 def stop_client() -> None:
