@@ -929,12 +929,19 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
                 lease.release()
                 get_db().audit("profile.start", p["id"], result="fail", error=exc.message)
                 raise ProfileError(exc.code, exc.message, status=500) from exc
-            logger.warning("端口 %s 不可用（%s），换一个端口重试", port, exc.code)
+            logger.warning("端口 %s 不可用（%s），换一个端口重试（第 %d/%d 次）",
+                           port, exc.code, attempt, max_tries)
 
     if last_exc is not None:
-        _update(p["id"], state="failed", pid=None, cdp_port=None, last_error=last_exc.message)
+        # 已经把 `tried_ports` 里的端口都换过一遍还是不行 —— 告诉用户这一点，
+        # 否则他会以为程序"连换个端口都不会"。
+        msg = last_exc.message
+        if tried_ports:
+            msg += (f"（已自动换过 {len(tried_ports)} 个端口："
+                    f"{'、'.join(str(x) for x in sorted(tried_ports))}，都不行）")
+        _update(p["id"], state="failed", pid=None, cdp_port=None, last_error=msg)
         lease.release()
-        raise ProfileError(last_exc.code, last_exc.message, status=500) from last_exc
+        raise ProfileError(last_exc.code, msg, status=500) from last_exc
 
     from .. import gateway
 
