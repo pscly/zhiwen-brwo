@@ -445,6 +445,36 @@ def _port_free(port: int) -> bool:
 
 
 # ── 启动 ──────────────────────────────────────────────────
+def _window_label(name: str, profile_id: str = "") -> str:
+    """把环境名整理成安全的窗口标识。
+
+    ## 为什么要清洗
+
+    `--window-name` 的值会原样进命令行与窗口标题，所以：
+      · 换行/制表/控制字符会把命令行搞坏（Windows 上尤其）
+      · 双引号会截断参数
+      · 太长的话任务栏显示不下、也挤掉页面标题
+
+    过长时保留前面的可读部分 + 短 id 尾巴（能区分同名环境的那种极端情况，
+    虽然环境名本身是唯一的）。
+    """
+    raw = " ".join(str(name or "").split())          # 折叠所有空白/换行
+    raw = raw.replace('"', "'").replace("\\", "/")
+    raw = "".join(ch for ch in raw if ch.isprintable())
+    if not raw:
+        raw = str(profile_id or "")[:12]
+    if not raw:
+        return ""
+    # 上限 24：任务栏放得下、也不会把页面标题挤没。
+    # 截断后**总长必须仍 ≤24**（16 + 1 + 6 = 23），第一版写成 20+1+6=27 就超了。
+    if len(raw) <= 24:
+        return raw
+    tail = str(profile_id or "")[:6]
+    if tail:
+        return raw[: 24 - len(tail) - 1] + "…" + tail
+    return raw[:23] + "…"
+
+
 def build_cmdline(
     chrome: Path,
     udd: Path,
@@ -537,6 +567,42 @@ def build_cmdline(
         except json.JSONDecodeError:
             urls = []
 
+    # ── 窗口标识：让用户能分清"哪个窗口是哪个环境" ──────────────────────
+    #
+    # ## 为什么（2026-11-22 用户反馈）
+    #
+    # > 启动窗口的时候，浏览器上有个标识，而且下面任务栏的时候也有名字作为标识，
+    # > 不然我是真分不清哪个是哪个，我平时可能会开好几个
+    #
+    # 实测（云电脑 Windows，4 个环境同时开）窗口标题是：
+    #
+    #     5188  | 安装完成 | ScriptCat - Chromium
+    #     22852 | 安装完成 | ScriptCat - Chromium      ← 三个一模一样
+    #     23528 | 安装完成 | ScriptCat - Chromium
+    #     19352 | docs.scriptcat.org - Chromium
+    #
+    # 三个窗口标题完全相同，任务栏/Alt-Tab 里根本分不清。
+    #
+    # ## 为什么用 `--window-name`
+    #
+    # 实测这个开关在 Windows 上**真的设置窗口标题**，而且**导航后不会被页面标题覆盖**：
+    #     --window-name=测试标识ZZZ + about:blank  → 标题 "测试标识ZZZ"
+    #     --window-name=环境C01-标识 + browserleaks → 标题仍是 "环境C01-标识"
+    #
+    # 对比其他做法：
+    #   · `--app=` 会去掉标签栏和地址栏，指纹浏览器不能用
+    #   · 改页面 title 一导航就被覆盖
+    #   · `--user-data-dir` 的名字只在任务管理器可见，任务栏看不到
+    #
+    # 任务栏按钮的文字在 Windows 上就取自窗口标题，所以这一条同时解决
+    # "窗口上有个标识" 和 "任务栏也有名字" 两件事。
+    #
+    # 可用 `ZW_WINDOW_NAME=false` 关掉（万一某个内核不认这个开关）。
+    if get_settings().window_name:
+        label = _window_label(profile.get("name") or "", profile.get("id") or "")
+        if label:
+            args.append(f"--window-name={label}")
+
     args.extend(BASE_ARGS)
     if not IS_WIN:
         args.extend(_POSIX_ONLY_ARGS)
@@ -553,8 +619,11 @@ def build_cmdline(
         # 为什么不是反过来：这个开关以前只在配置里有定义、**全项目没人读**
         # （设了等于没设）。第一次修的时候我把它默认设成 false，
         # 结果本机（uid=0）21 个测试全红 —— 修一个死开关不能顺手把现有部署搞坏。
-        from ..config import get_settings
-
+        #
+        # 注：**不要再在这里 `from ..config import get_settings`** ——
+        # 函数体里出现这个导入语句会让 `get_settings` 在整个函数内变成局部名，
+        # 于是函数前面（窗口标识那段）用它就 UnboundLocalError。
+        # 模块顶部已经导入过了（第 36 行）。
         if not get_settings().allow_root:
             raise EngineError(
                 "ENGINE_RUN_AS_ROOT",
@@ -805,6 +874,32 @@ def port_owner_pid(port: int) -> int:
             if parts and parts[0] != "COMMAND" and len(parts) > 1 and parts[1].isdigit():
                 return int(parts[1])
     return 0
+
+
+def browser_cmdline(pid: int) -> str:
+    """取某个进程的完整命令行（拿不到就返回空串）。
+
+    单独抽出来是因为"接管已运行浏览器"要用它做**精确**归属判断：
+    `is_our_browser` 只判断"是不是我们的浏览器"（所有环境通用），
+    而接管时必须确认"是不是**这一个环境**的"，否则会把 A 的端口记到 B 头上。
+    """
+    if pid <= 0:
+        return ""
+    if IS_WIN:
+        try:
+            ps = f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\").CommandLine"
+            out = run_hidden(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+            )
+            return (out.stdout or "").strip()
+        except Exception:
+            return ""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+    except (OSError, PermissionError):
+        return ""
 
 
 def is_our_browser(pid: int, profiles_root: Path) -> bool:

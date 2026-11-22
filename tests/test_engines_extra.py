@@ -368,3 +368,70 @@ def test_engine_version_timeout_is_short_on_posix(tmp_path, monkeypatch):
     monkeypatch.setattr(E.sys, "platform", "linux")
     assert E.engine_version(bin_path) == "Google Chrome 1.2.3.4"
     assert seen.get("timeout", 99) <= 5, f"超时太长：{seen.get('timeout')}"
+
+
+def test_window_name_makes_instances_distinguishable(tmp_path):
+    """每个环境的浏览器窗口要带自己的名字，多开时分得清。
+
+    ## 为什么（2026-11-22 用户反馈）
+
+    > 启动窗口的时候，浏览器上有个标识，而且下面任务栏的时候也有名字作为标识，
+    > 不然我是真分不清哪个是哪个，我平时可能会开好几个
+
+    云电脑真机实测（4 个环境同开）窗口标题：
+        5188  | 安装完成 | ScriptCat - Chromium
+        22852 | 安装完成 | ScriptCat - Chromium   ← 三个完全一样
+        23528 | 安装完成 | ScriptCat - Chromium
+    任务栏/Alt-Tab 分不清。
+
+    `--window-name` 实测在 Windows 上真的改窗口标题，且**导航后不会被页面标题覆盖**
+    （这是它比"改页面 title"强的地方），任务栏文字也取自窗口标题。
+    """
+    one = engines.build_cmdline(Path("/x/chrome"), tmp_path / "a", 21001,
+                                _profile(name="甲-小红书", id="c01aaaa1111"))
+    two = engines.build_cmdline(Path("/x/chrome"), tmp_path / "b", 21002,
+                                _profile(name="乙-抖音", id="d02bbbb2222"))
+    w1 = [a for a in one if a.startswith("--window-name=")]
+    w2 = [a for a in two if a.startswith("--window-name=")]
+    assert w1 == ["--window-name=甲-小红书"], w1
+    assert w2 == ["--window-name=乙-抖音"], w2
+    assert w1 != w2, "两个环境的窗口标识不能相同"
+
+
+def test_window_name_sanitized(tmp_path):
+    """窗口名必须清洗：换行/引号/超长/空都不能把命令行搞坏。"""
+    cases = {
+        '带"引号"\\n和\\n换行': None,      # 见下逐条断言
+    }
+    # 引号变单引号、换行折叠成空格
+    c = engines.build_cmdline(Path("/x/chrome"), tmp_path / "c", 1,
+                              _profile(name='带"引号"\n和\n换行', id="e03cccc3333"))
+    val = [a for a in c if a.startswith("--window-name=")][0].split("=", 1)[1]
+    assert '"' not in val, val
+    assert "\n" not in val, val
+
+    # 超长要有上限（任务栏显示不下、也挤掉页面标题）
+    c2 = engines.build_cmdline(Path("/x/chrome"), tmp_path / "d", 1,
+                                _profile(name="超" * 40, id="f04dddd4444"))
+    val2 = [a for a in c2 if a.startswith("--window-name=")][0].split("=", 1)[1]
+    assert len(val2) <= 24, (len(val2), val2)
+
+    # 空名退化成短 id，不能整个开关消失
+    c3 = engines.build_cmdline(Path("/x/chrome"), tmp_path / "e", 1,
+                                _profile(name="", id="a05eeee5555"))
+    val3 = [a for a in c3 if a.startswith("--window-name=")][0].split("=", 1)[1]
+    assert val3, "空环境名时至少要退化出可识别的标识"
+
+
+def test_window_name_can_be_disabled(tmp_path, monkeypatch):
+    """`ZW_WINDOW_NAME=false` 时不能带这个参数（万一某个内核不认）。"""
+    from zw_core import config
+
+    monkeypatch.setenv("ZW_WINDOW_NAME", "false")
+    config.reset_settings()
+    try:
+        c = engines.build_cmdline(Path("/x/chrome"), tmp_path / "f", 1,
+                                  _profile(name="关闭测试", id="b06ffff6666"))
+        assert not [a for a in c if a.startswith("--window-name=")], "关掉开关后不该再带"
+    finally:
+        config.reset_settings()

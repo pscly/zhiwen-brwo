@@ -696,11 +696,113 @@ def _prepare_launch(profile: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _adopt_if_running(p: dict[str, Any]) -> dict[str, Any] | None:
+    """这个环境的浏览器其实还活着？那就**接管**，别再拉一个新的。
+
+    ## 为什么（2026-11-22 云电脑实机）
+
+    用户开着好几个环境，客户端/核心重启后，数据库里它们是 `failed`（或 `stopped`），
+    但 chrome 进程仍在跑、仍占着 CDP 端口。于是再点「启动」会撞上：
+
+        PORT_MISMATCH 端口 21002 被别的进程（pid=8992）占用，不是刚启动的浏览器
+
+    实测三个环境全变成 failed，而它们的浏览器好端端跑着。
+    用户看到的是"全是失败"，实际上什么都没坏 —— 只是 core 丢了账本。
+
+    ## 判据（三重，宁可不接管也不能串号）
+
+    1. 我们自己的 `udd/DevToolsActivePort` 写着端口 —— 这是**本环境**启动时写的
+    2. 那个端口真的能用 CDP 应答
+    3. 占着端口的进程，命令行里的 `--user-data-dir` **指向本环境的 udd**
+
+    第 3 条是关键：只看"是我们的浏览器"不够（那是所有环境通用的），
+    必须确认是**这一个**环境的，否则会把 A 的端口记到 B 头上。
+    """
+    from . import engines as engines_svc
+
+    udd = udd_path(p["id"])
+
+    # 端口来源按可靠性排序（2026-11-22 实测）：
+    #   ① 数据库里记的 `cdp_port` —— 启动时写进去的，最稳
+    #   ② `udd/DevToolsActivePort` —— **不可靠**：Chromium 正常退出时会删掉它，
+    #      异常的场合也可能没有，实测这里拿到 None 导致接管判断整个落空
+    candidates: list[int] = []
+    try:
+        booked = int(p.get("cdp_port") or 0)
+        if booked > 0:
+            candidates.append(booked)
+    except (TypeError, ValueError):
+        pass
+    got = engines_svc.read_devtools_port(udd)
+    if got and int(got[0] or 0) > 0:
+        candidates.append(int(got[0]))
+    # 去重保序
+    seen: set[int] = set()
+    port = 0
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+    ports = [c for c in candidates if c in seen]
+
+    port = 0
+    ws = ""
+    for cand in ports:
+        try:
+            import httpx
+
+            r = httpx.get(f"http://127.0.0.1:{cand}/json/version", timeout=2.0)
+            if r.status_code != 200:
+                continue
+            w = str((r.json() or {}).get("webSocketDebuggerUrl") or "")
+            if w:
+                port, ws = cand, w
+                break
+        except Exception:  # noqa: BLE001 —— 连不上就换下一个候选
+            continue
+    if port <= 0:
+        return None
+
+    # 第 3 条：持有端口的必须是**本环境**的浏览器
+    owner = engines_svc.port_owner_pid(port)
+    if owner > 0:
+        try:
+            cmd = engines_svc.browser_cmdline(owner)
+        except Exception:  # noqa: BLE001
+            cmd = ""
+        if not cmd:
+            # 查不到命令行就不敢认（宁可让用户手动停掉再起，也别串号）
+            logger.warning("环境 %s 的端口 %s 有响应，但查不到持有进程命令行，不接管",
+                           p.get("name"), port)
+            return None
+        want = str(udd.resolve()).lower()
+        if want not in cmd.lower():
+            logger.warning("环境 %s 的 udd 文件写着端口 %s，但该端口属于别的进程，不接管",
+                           p.get("name"), port)
+            return None
+
+    logger.info("接管已在运行的浏览器 环境=%s port=%s pid=%s", p.get("name"), port, owner)
+    _update(p["id"], state="running", pid=owner or None, cdp_port=port)
+    return {"port": port, "ws": ws, "adopted": True}
+
+
 def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[str, Any]:
     s = get_settings()
     p = get_profile(ref)
     if p["state"] in ("running", "starting"):
         return {"profile": p, "already_running": True, "cdp": cdp_info(p)}
+
+    # 状态是 stopped/failed，但浏览器可能还活着（核心重启过、上次启动中途失败）。
+    # 先试接管，成功了就别再拉第二个。
+    adopted = _adopt_if_running(p)
+    if adopted:
+        p = get_profile(ref)
+        return {
+            "profile": p,
+            "already_running": True,
+            "adopted": True,
+            "cdp": cdp_info(p),
+            "notice": "这个环境的浏览器本来就在运行，已重新接管（没有重复启动）",
+        }
 
     running = len(list_profiles(state="running"))
     if running >= s.max_running:
@@ -717,12 +819,33 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
     try:
         lease.acquire("run")
     except LeaseBusy as exc:
-        raise ProfileError(
-            "PROFILE_BUSY",
-            f"{p['name']} 正被 {exc.owner} 占用（{exc.kind}，剩余 {exc.remain} 秒）。"
-            "如果确认那是已经死掉的进程，可以用 zw profile unlock 强制释放。",
-            status=409,
-        ) from exc
+        # **先试着自己清掉死租约，再决定报不报错**（2026-11-22 云电脑实测）。
+        #
+        # core 被 kill / 客户端重启后，租约里写的持有者是那个**已经死掉的旧 core**，
+        # 但它还能挡 90 秒。用户看到的是"环境被占用（剩余 49 秒），请用
+        # zw profile unlock"——一个普通用户根本不知道那是什么命令。
+        #
+        # 持有进程真的不在了就自动接管；只有活着的进程才该拦住我们。
+        if lease.reap_if_stale():
+            logger.info("环境 %s 的旧租约持有者已不在，已自动清理后重试", p.get("name"))
+            try:
+                lease.acquire("run")
+            except LeaseBusy as exc2:
+                raise ProfileError(
+                    "PROFILE_BUSY",
+                    f"{p['name']} 正被 {exc2.owner} 占用（{exc2.kind}，剩余 {exc2.remain} 秒）。"
+                    "那个进程还活着 —— 先在它那边停掉这个环境；确实确定它卡死了，"
+                    "再用 zw profile unlock 强制释放。",
+                    status=409,
+                ) from exc2
+        else:
+            raise ProfileError(
+                "PROFILE_BUSY",
+                f"{p['name']} 正被 {exc.owner} 占用（{exc.kind}，剩余 {exc.remain} 秒）。"
+                "那个进程还活着 —— 先在它那边停掉这个环境；确实确定它卡死了，"
+                "再用 zw profile unlock 强制释放。",
+                status=409,
+            ) from exc
 
     # **先校验代理，再找内核**。
     #
@@ -1319,10 +1442,14 @@ def rebuild_gateway_routes() -> dict[str, Any]:
     crashed: list[str] = []
     reaped: list[str] = []
 
-    # 先清理"持有者进程已经死了"的本地租约，否则它会挡住下一次启动 90 秒
+    # 先清理"持有者进程已经死了"的本地租约，否则它会挡住下一次启动 90 秒。
+    #
+    # **不要跳过 running**（2026-11-22 实测）：以前这里 `if state == "running": continue`，
+    # 而 running 的环境恰恰是最可能持有租约的 —— 旧 core 被 kill 后，它的租约留着，
+    # 新 core 启动时却因为"状态是 running"而不去清，于是那个环境再也启动不了
+    # （报 PROFILE_BUSY，剩余几十秒倒计时）。
+    # `reap_if_stale` 自己会判断"持有进程还在不在"，交给它判断就够了。
     for p in list_profiles():
-        if p["state"] == "running":
-            continue
         try:
             if LocalLease(profile_dir(p["id"])).reap_if_stale():
                 reaped.append(p["name"])
