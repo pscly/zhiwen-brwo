@@ -119,8 +119,13 @@ jobs:
             cat "$REPORT" 2>/dev/null || true
             grep -q "全部" "$REPORT"
           else
-            wait "$PID"
-            CODE=$?
+            # **`wait` 失败时必须先接住退出码**（2026-11-22 实测）：
+            # 这一步的 shell 带 `-e`，`wait` 返回非 0（比如段错误 139）会**直接
+            # 中断脚本**，下面 `cat selftest.log` 根本没机会跑 —— 于是 CI 里
+            # 只能看到一个光秃秃的 exit code 139，完全不知道崩在哪一项。
+            # 用 `|| CODE=$?` 接住，才能把日志打出来。
+            CODE=0
+            wait "$PID" || CODE=$?
             cat selftest.log 2>/dev/null || true
             if [ "$CODE" != "0" ]; then
               echo "selftest 退出码 $CODE"
