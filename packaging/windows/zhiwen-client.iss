@@ -176,6 +176,16 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram}"; Flags: now
 ; 用 `nowait` 不阻塞安装器退出；不弹任何窗口。
 Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent runhidden
 
+; **再加一层保险：延时 20 秒后再拉一次**（2026-11-22 实测教训）。
+;
+; 直接拉起有个真实风险：exe 刚被替换，Windows Defender 可能正在扫它、
+; 或者文件句柄还没完全释放 → 新进程起不来就再也没人管了，机器直接下线。
+;
+; 这一条起一个**分离的 cmd**：它先等 20 秒（此时安装器早已退出、扫描也结束），
+; 再 `start` 客户端。cmd 是独立进程，安装器退出/崩溃都不影响它。
+; 用它兜底之后，"静默升级把机器搞下线"这个失败模式就不成立了。
+Filename: "{sys}\cmd.exe"; Parameters: "/c timeout /t 20 /nobreak >nul & start """" ""{app}\{#MyAppExeName}"""""; Flags: nowait skipifnotsilent runhidden
+
 [Registry]
 ; 开机自启：勾了 autostart 才写，卸载时 uninsdeletevalue 把这个值删掉。
 ; 用户随时可以在 Windows「设置 → 应用 → 启动」或任务管理器「启动」里关掉它，
