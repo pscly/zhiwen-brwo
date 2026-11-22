@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import signal
+import threading
 import socket
 import subprocess
 import sys
@@ -411,31 +412,68 @@ def supports_fingerprint(bin_path: Path) -> bool:
 
 # ── 端口池 ────────────────────────────────────────────────
 class PortPool:
-    """端口分配。同时做两层检查：内存里是否已分配、系统里是否被占。"""
+    """端口分配。同时做两层检查：内存里是否已分配、系统里是否被占。
+
+    ## 为什么必须有锁（2026-11-22 用户实测）
+
+    > 我同时启动好几个窗口的时候居然会报错，说我端口冲突
+
+    `start_many()` 用线程池真并发（默认 3 路），若 `allocate()` 是"先查再占"
+    两步且不加锁，两个线程会**同时**选中同一个空闲端口：
+
+        T1: 21001 不在 _used，_port_free(21001)=True
+        T2: 21001 不在 _used，_port_free(21001)=True      ← 两个都通过
+        T1: _used[21001]=A，返回 21001
+        T2: _used[21001]=B，返回 21001                    ← 撞了
+
+    结果是一个浏览器抢到端口、另一个启动后 `wait_ready` 发现端口被"别的进程"
+    占着，报 `PORT_MISMATCH 端口 21001 被别的进程占用`。
+
+    加了锁之后"查 + 占"是原子的，同一端口不可能发给两个环境。
+    """
 
     def __init__(self, start: int, end: int) -> None:
         self.start = start
         self.end = end
         self._used: dict[int, str] = {}
+        self._lock = threading.Lock()
 
-    def allocate(self, profile_id: str) -> int:
-        for port in range(self.start, self.end + 1):
-            if port in self._used:
-                continue
-            if _port_free(port):
-                self._used[port] = profile_id
-                return port
-        raise EngineError("PORT_EXHAUSTED", f"端口池 {self.start}-{self.end} 已用尽，请停掉一些环境或扩大池子")
+    def allocate(self, profile_id: str, exclude: set[int] | None = None) -> int:
+        """分配一个端口。
+
+        `exclude` 是"这一轮别再用"的端口集合（调用方刚撞过墙的那些）。
+
+        ## 为什么需要它（2026-11-22 实测）
+
+        "撞了端口 → release → 重新 allocate" 会**拿到同一个端口**：
+        `allocate` 从 `start` 往上扫，刚释放的那个正好是最小的空闲端口。
+        于是重试等于没重试，日志里看到 `两次用的是同一个端口：[31200, 31200]`。
+        """
+        bad = exclude or set()
+        with self._lock:
+            for port in range(self.start, self.end + 1):
+                if port in self._used or port in bad:
+                    continue
+                if _port_free(port):
+                    self._used[port] = profile_id
+                    return port
+        raise EngineError(
+            "PORT_EXHAUSTED",
+            f"端口池 {self.start}-{self.end} 已用尽，请停掉一些环境或扩大池子",
+        )
 
     def release(self, port: int) -> None:
-        self._used.pop(port, None)
+        with self._lock:
+            self._used.pop(port, None)
 
     def reserve(self, port: int, profile_id: str) -> None:
         if port:
-            self._used[port] = profile_id
+            with self._lock:
+                self._used[port] = profile_id
 
     def used(self) -> dict[int, str]:
-        return dict(self._used)
+        with self._lock:
+            return dict(self._used)
 
 
 def _port_free(port: int) -> bool:

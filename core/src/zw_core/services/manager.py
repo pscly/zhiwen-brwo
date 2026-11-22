@@ -872,34 +872,69 @@ def start(ref: str, urls: list[str] | None = None, wait: bool = True) -> dict[st
     if locks:
         logger.info("清理 %s 的残留锁文件：%s", p["name"], locks)
 
-    port = pool().allocate(p["id"])
     # 上面已经校验过一遍代理（为了报错顺序），这里复用结果，避免重复解析。
     row = pre_row
-
     if urls:
         row["start_urls"] = urls
-    cmdline = engines.build_cmdline(chrome, udd, port, row, extra_args=s.chrome_extra_args)
 
-    _update(p["id"], state="starting", cdp_port=port, last_error="")
-    logger.info("启动环境 name=%s port=%s", p["name"], port)
-    try:
-        proc = engines.spawn(cmdline, profile_dir(p["id"]) / "browser.log", env=engines.child_env(p))
-    except OSError as exc:
-        pool().release(port)
-        _update(p["id"], state="failed", last_error=str(exc))
-        lease.release()
-        raise ProfileError("SPAWN_FAILED", f"拉起浏览器失败：{exc}", status=500) from exc
+    # ── 端口：被占就换一个，别把"端口冲突"当失败甩给用户 ─────────────────
+    #
+    # ## 为什么（2026-11-22 用户反馈）
+    #
+    # > 我同时启动好几个窗口的时候居然会报错，说我端口冲突什么的
+    # > 端口这个如果被占用就换个端口就行，反正到时候服务端可以知道就行
+    #
+    # 两件事一起做：
+    #   · `PortPool.allocate` 加锁（已改）—— 消除并发选到同一端口的竞态
+    #   · 这里再加一层**重试**：即使分配到的端口在别处被抢（系统保留段、
+    #     用户自己的程序、上一轮还没退干净的 chrome），也自动换下一个再试，
+    #     而不是让用户看到 PORT_MISMATCH。
+    #
+    # 对外接口不用变：`/profiles/{ref}` 和 `/start` 返回的 `cdp` 里带的就是
+    # **最终真正连得上**的那个端口，服务端/AI 照着连即可。
+    max_tries = 4
+    tried_ports: set[int] = set()
+    port = 0
+    proc = None
+    ws_url = ""
+    http_url = ""
+    last_exc: Exception | None = None
+    for attempt in range(1, max_tries + 1):
+        port = pool().allocate(p["id"], exclude=tried_ports)
+        cmdline = engines.build_cmdline(chrome, udd, port, row, extra_args=s.chrome_extra_args)
+        _update(p["id"], state="starting", cdp_port=port, last_error="")
+        logger.info("启动环境 name=%s port=%s（第 %d 次尝试）", p["name"], port, attempt)
+        try:
+            proc = engines.spawn(cmdline, profile_dir(p["id"]) / "browser.log",
+                                 env=engines.child_env(p))
+        except OSError as exc:
+            pool().release(port)
+            _update(p["id"], state="failed", last_error=str(exc))
+            lease.release()
+            raise ProfileError("SPAWN_FAILED", f"拉起浏览器失败：{exc}", status=500) from exc
 
-    _update(p["id"], pid=proc.pid)
-    try:
-        ws_url, http_url = engines.wait_ready(port, timeout=s.launch_timeout, proc=proc, udd=udd)
-    except engines.EngineError as exc:
-        engines.terminate(proc.pid, grace=2)
-        pool().release(port)
-        _update(p["id"], state="failed", pid=None, cdp_port=None, last_error=exc.message)
+        _update(p["id"], pid=proc.pid)
+        try:
+            ws_url, http_url = engines.wait_ready(port, timeout=s.launch_timeout, proc=proc, udd=udd)
+            last_exc = None
+            break
+        except engines.EngineError as exc:
+            last_exc = exc
+            engines.terminate(proc.pid, grace=2)
+            pool().release(port)
+            tried_ports.add(port)      # 这一轮别再用它，否则重试会拿到同一个
+            # 只有"端口相关"的错才值得换端口重试；其它（内核崩、权限）重试也没用
+            if exc.code not in ("PORT_MISMATCH", "PORT_EXHAUSTED") or attempt >= max_tries:
+                _update(p["id"], state="failed", pid=None, cdp_port=None, last_error=exc.message)
+                lease.release()
+                get_db().audit("profile.start", p["id"], result="fail", error=exc.message)
+                raise ProfileError(exc.code, exc.message, status=500) from exc
+            logger.warning("端口 %s 不可用（%s），换一个端口重试", port, exc.code)
+
+    if last_exc is not None:
+        _update(p["id"], state="failed", pid=None, cdp_port=None, last_error=last_exc.message)
         lease.release()
-        get_db().audit("profile.start", p["id"], result="fail", error=exc.message)
-        raise ProfileError(exc.code, exc.message, status=500) from exc
+        raise ProfileError(last_exc.code, last_exc.message, status=500) from last_exc
 
     from .. import gateway
 
