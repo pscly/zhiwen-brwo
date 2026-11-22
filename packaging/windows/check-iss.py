@@ -728,8 +728,19 @@ def check_code(iss: IssScript, rep: Report) -> None:
         rep.add(cid, "[Code] 段的 begin/end 配平", "没有 [Code] 段")
         return
     text = "\n".join(code_lines)
+    # **原始文本要留一份**：下面的 `\{[^}]*\}` 会把 `{#MyAppExeName}` 整个吃掉
+    # （那是 Inno 的常量占位符，长得像花括号注释），所以"检查是否引用了
+    # {#MyAppExeName}"必须用未剥离的文本，否则永远查不到。
+    raw_text = text
+    # 先**保护 Inno 的常量占位符 `{#Name}`**，否则下面那条"删花括号注释"会把它
+    # 整个吃掉，于是"代码里有没有引用 {#MyAppExeName}"永远查不到。
+    _PH = "\x01"
+    guarded = re.sub(r"\{#[A-Za-z0-9_]+\}", lambda m: m.group(0).replace("{", _PH).replace("}", _PH), text)
     text = re.sub(r"//[^\n]*", "", text)   # 行注释
     text = re.sub(r"\{[^}]*\}", "", text)  # 花括号注释
+    # 注释剥干净后、但占位符仍在的版本，供"检查代码真的调用了某个常量"用
+    code_only = guarded.replace(_PH, "").replace("//", "\n//")
+    code_only = "\n".join(line.split("//")[0] for line in code_only.splitlines())
     begins = len(re.findall(r"\bbegin\b", text, re.I))
     ends = len(re.findall(r"\bend\b", text, re.I))
     if begins != ends:
@@ -751,6 +762,25 @@ def check_code(iss: IssScript, rep: Report) -> None:
                  "Inno 的 Reg* 函数返回 Boolean，写成 `<> 0` 是类型错误，ISCC 会直接拒编")
     else:
         rep.add(cid, "Pascal 里没把 Boolean 函数与数字比较（Reg* 返回 Boolean）")
+
+    # C36：升级时必须能结束掉"占着端口的旧进程"
+    #
+    # 2026-11-22 云电脑实测：客户端不响应 RestartManager，静默安装报
+    # "Some applications could not be shut down" → exit 5 回滚；
+    # 而 Releases 里的**便携版**还会一直占着 8730，导致"装了新版但版本号不变"。
+    # 两种都靠 [Code] 里的 taskkill 解决，这里钉住它别被删掉。
+    cid = "C38"
+    # 用 `code_only`（注释剥掉、占位符保留）判定，**不能用 raw_text**：
+    # 我第一版用了 raw_text，结果注释里提到 `zhiwen-client-Windows-x64.exe`
+    # 就让这条检查通过了 —— 删掉真正的 taskkill 也不报警。
+    has_own_kill = "taskkill" in code_only and "MyAppExeName" in code_only
+    has_portable_kill = "zhiwen-client-Windows-x64.exe" in code_only
+    if not (has_own_kill and has_portable_kill):
+        rep.fail(cid, "升级前会结束旧的自身进程与便携版",
+                 "缺少 taskkill 结束 {#MyAppExeName} 或 zhiwen-client-Windows-x64.exe "
+                 "—— 静默安装会因'关不掉应用'回滚，或新版永远抢不到 8730 端口")
+    else:
+        rep.add(cid, "升级前会结束旧的自身进程与便携版（装完由 [Run] 拉起新版）")
 
     cid = "C35"
     rep.warn(cid, "[Code] 段的语义只能在 Windows 上用 ISCC 验证",
@@ -934,6 +964,7 @@ CHECKS_HELP = [
     ("C33", "架构限制 x64 + 64 位安装模式"),
     ("C34", "Pascal 里没把 Boolean 函数当数字比较"),
     ("C35", "[Code] 段的语义只能 Windows 上验证（提示项）"),
+    ("C38", "升级前会结束旧的自身进程与便携版"),
 ]
 
 

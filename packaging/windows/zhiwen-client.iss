@@ -103,7 +103,13 @@ ShowLanguageDialog=no
 DisableWelcomePage=yes
 
 ; 覆盖安装时如果客户端还开着，让安装程序提示关闭
-CloseApplications=yes
+; **`force` 而不是 `yes`**（2026-11-22 实测）：`yes` 在静默安装时遇到正在运行的
+; 客户端会**弹确认框**，而静默模式下没人能点 → 安装器直接以 exit code 5 取消，
+; 远程升级就卡在"装不上"。
+; `force` 会直接关掉旧进程，配合下面 [Run] 的 `skipifnotsilent` 条目自动拉起新版，
+; 远程升级才算真正闭环（不需要额外传 /CLOSEAPPLICATIONS）。
+CloseApplications=force
+; 程序由我们自己 [Run] 拉起，不让 Inno 代劳（它的重启时机不可控）
 RestartApplications=no
 
 ; 装坏了能查：日志写 %TEMP%\Setup Log*.txt
@@ -281,6 +287,54 @@ OnlyOnTheseArchitectures=这个安装程序只能装在以下处理器架构的 
 //   function RegDeleteValue(const RootKey: HKEY; const SubKeyName, ValueName: String): Boolean;
 //   function WizardIsTaskSelected(const Tasks: String): Boolean;
 //   procedure CurStepChanged(CurStep: TSetupStep);   // ssPostInstall = 文件装完之后
+//
+// **升级前把自己的进程结束掉**（2026-11-22 云电脑实测）
+//
+// 现象：静默安装报 exit code 5 并回滚，日志里是
+//   RestartManager found an application using one of our files: zhiwen-client.exe
+//   Some applications could not be shut down.
+//   Defaulting to Abort for suppressed message box
+//   User canceled the installation process.
+//
+// 根因：客户端**不响应 RestartManager 的关闭请求**（它是常驻托盘程序，收到
+// WM_CLOSE 也不退）。Inno 的 `CloseApplications=force` 仍然走 RestartManager，
+// 于是"关不掉 → 问用户 → 静默模式下没人答 → Abort → 回滚"。
+//
+// 远程升级时这一条会让"装新版"永远失败。所以这里在写文件之前直接 taskkill
+// **我们自己**的那个 exe（只按 {app} 里的完整路径匹配，不动别的程序）。
+// 装完之后 [Run] 的 `skipifnotsilent` 条目会把新版拉起来。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  NeedsRestart := False;
+  if FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
+  begin
+    Log('升级前结束旧进程：' + ExpandConstant('{app}\{#MyAppExeName}'));
+    // /F 强制、/T 连子进程一起（core 是它的子进程）
+    Exec(ExpandConstant('{sys}\taskkill.exe'),
+         '/F /T /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Log('taskkill 返回码：' + IntToStr(ResultCode));
+
+    // **连便携版一起结束**（2026-11-22 云电脑实测的根因）。
+    //
+    // Releases 里除了安装包还提供免安装的 `zhiwen-client-Windows-x64.exe`。
+    // 用户双击跑过一次之后，那个便携版会**一直占着 8730 端口**；此后装再多遍
+    // 新版，端口还是被旧便携版占着 —— 表现就是"装了新版但版本号一直不变"。
+    // 这台云电脑反复踩了三次（0.8.29 / 0.8.31 / 0.8.34 各一次）。
+    //
+    // 它们是同一个程序的另一份拷贝，升级时一起关掉是应该的；只按名字前缀
+    // `zhiwen-client` 匹配，不会碰到别的软件。
+    Exec(ExpandConstant('{sys}\taskkill.exe'),
+         '/F /IM zhiwen-client-Windows-x64.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Log('结束便携版返回码：' + IntToStr(ResultCode));
+
+    // 给系统一点时间真正释放文件句柄与端口（任务管理器里进程消失 ≠ 端口立刻可用）
+    Sleep(2000);
+  end;
+  Result := '';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then

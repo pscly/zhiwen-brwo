@@ -1,5 +1,64 @@
 # CHANGELOG
 
+## 0.8.35 — 2026-11-22
+
+**静默升级装不上的两个真原因（都在云电脑上实测到了）。**
+
+### ① 客户端不响应 RestartManager → 安装器直接回滚
+
+云电脑上装 0.8.34，退出码 **5**，Inno 自己的日志说得非常清楚：
+
+```
+RestartManager found an application using one of our files: zhiwen-client.exe
+Some applications could not be shut down.
+Defaulting to Abort for suppressed message box (Abort/Retry/Ignore)
+User canceled the installation process.
+Rolling back changes.
+```
+
+根因：客户端是常驻托盘程序，收到 `WM_CLOSE` 也不退，所以 RestartManager 关不掉它；
+`CloseApplications=force` 仍然走 RestartManager，于是"关不掉 → 问用户 →
+静默模式下没人答 → Abort → 回滚"。
+
+修法：`[Code]` 里加 `PrepareToInstall`，写文件之前直接
+`taskkill /F /T /IM zhiwen-client.exe`（只按 `{app}` 里的程序名，不动别的软件），
+装完由 `[Run]` 的 `skipifnotsilent` 条目拉起新版。
+
+### ② 便携版一直占着 8730 → "装了新版但版本号不变"
+
+同一台机器反复踩了三次（0.8.29 / 0.8.31 / 0.8.34）。实测：
+
+```
+8730 <- pid=10528 | ...\Downloads\zhiwen-client-Windows-x64 (8).exe   ← 便携版在服务
+安装目录 exe: 11-22 11:22 size=24881132                              ← 其实已经装成 0.8.34 了
+```
+
+**新版装成功了，但端口被旧便携版占着**，所以 `/meta` 一直报旧版本。
+用户看到的就是"装了没反应"。
+
+`PrepareToInstall` 里把 `zhiwen-client-Windows-x64.exe`（Releases 里的免安装版）
+也一起结束掉 —— 同一个程序的另一份拷贝，升级时关掉是应该的。
+
+### 顺带修掉的两个 CI/检查盲区
+
+- **CI 看不到 selftest 崩在哪一项**：这一步的 shell 带 `-e`，`wait` 返回 139
+  会**直接中断脚本**，`cat selftest.log` 从来没执行过，日志里只有一个光秃秃的
+  exit code 139。改成 `wait "$PID" || CODE=$?`。
+  （这次 macOS 构建就撞上了：第一次段错误、重跑又好了 —— 偶发，但盲区是真的。）
+- **新的安装器检查被注释骗过**：我第一版用原始文本判断"有没有 taskkill 便携版"，
+  而说明性注释里就写着那个文件名，于是**删掉真正的 taskkill 它照样 PASS**。
+  改成用"剥掉注释但保留 `{#占位符}`"的文本判断，并实测：删掉 → FAIL，还原 → PASS。
+
+> 另一个坑：`check_code` 剥花括号注释用的正则是 `\{[^}]*\}`，
+> 它会把 Inno 的常量占位符 `{#MyAppExeName}` **整个吃掉**，
+> 所以"检查代码是否引用了某个常量"必须用保护过占位符的文本。
+
+### 测试
+
+`check-iss` 36 → **37 项**（新增 C38：升级前会结束旧的自身进程与便携版）。
+
+九项门槛全绿：**758 / 37 / 73 / 13 / 23 / 93 / 51 / 12 / 53**。
+
 ## 0.8.34 — 2026-11-22
 
 **多开时窗口分不清 + 核心重启后浏览器"全部变成失败"。**
