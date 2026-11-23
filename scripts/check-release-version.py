@@ -22,7 +22,7 @@ def checked_version(tag: str | None) -> str:
     versions = {}
     for package in ("core", "hub"):
         proj = ROOT / package / "pyproject.toml"
-        versions[str(proj.relative_to(ROOT))] = tomllib.loads(
+        versions[proj.relative_to(ROOT).as_posix()] = tomllib.loads(
             proj.read_text(encoding="utf-8")
         )["project"]["version"]
         source = ROOT / package / "src" / f"zw_{package}" / "__init__.py"
