@@ -149,10 +149,25 @@ async def _lifespan(app: Any):
         logger.error("远程命令行代理启动失败：%s", exc)
 
     app.state.health_task = asyncio.create_task(_health_loop())
+    badge_stop = None
+    badge_task = None
+    if os.name == "nt" and s.taskbar_badge:
+        from threading import Event
+
+        from .services import taskbar
+
+        badge_stop = Event()
+        badge_task = asyncio.create_task(asyncio.to_thread(
+            taskbar.watch, badge_stop, mgr.list_profiles,
+        ))
     started = time.time()
     try:
         yield
     finally:
+        if badge_stop is not None and badge_task is not None:
+            badge_stop.set()
+            with contextlib.suppress(Exception):
+                await badge_task
         try:
             from zw_core.services import termhub
 

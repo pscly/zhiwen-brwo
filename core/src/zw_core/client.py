@@ -1270,6 +1270,16 @@ def selftest(show_dialog: bool = True) -> int:
         return f"{len(paths)} 条路由"
 
     chk("core 应用可构建", _core_app)
+
+    if sys.platform == "win32":
+        def _taskbar_icons() -> str:
+            from zw_core.services import taskbar
+
+            system_icon = Path(os.environ["SystemRoot"]) / "System32" / "shell32.dll"
+            return taskbar.native_selftest(str(system_icon))
+
+        chk("Windows 任务栏徽标", _taskbar_icons)
+
     def _core_boot() -> str:
         """真的把本机服务拉起来一次并访问 /healthz。
 

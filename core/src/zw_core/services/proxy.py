@@ -245,6 +245,8 @@ def parse_single_proxy(raw: str) -> ProxySpec:
             f"代理地址不合法：{mask_url(raw)}（方括号里必须是合法 IPv6，例如 [::1]）",
         ) from exc
     scheme = (parts.scheme or "http").lower()
+    if scheme == "socks5h":
+        scheme = "socks5"  # SOCKS5 中继本来就把目标域名交给上游解析。
     if scheme not in ("http", "https", "socks5", "socks4", "socks"):
         raise ProxyError("PROXY_SCHEME_UNSUPPORTED", f"不支持的代理协议：{scheme}（可用 http / https / socks5）")
     if not parts.hostname:

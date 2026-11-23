@@ -370,7 +370,7 @@ def test_engine_version_timeout_is_short_on_posix(tmp_path, monkeypatch):
     assert seen.get("timeout", 99) <= 5, f"超时太长：{seen.get('timeout')}"
 
 
-def test_window_name_makes_instances_distinguishable(tmp_path):
+def test_window_name_makes_instances_distinguishable(tmp_path, monkeypatch):
     """每个环境的浏览器窗口要带自己的名字，多开时分得清。
 
     ## 为什么（2026-11-22 用户反馈）
@@ -396,6 +396,34 @@ def test_window_name_makes_instances_distinguishable(tmp_path):
     assert w1 == ["--window-name=甲-小红书"], w1
     assert w2 == ["--window-name=乙-抖音"], w2
     assert w1 != w2, "两个环境的窗口标识不能相同"
+
+    from zw_core import config
+
+    prefix = "--register-chrome-browser-suffix="
+    monkeypatch.setenv("ZW_TASKBAR_PER_PROFILE", "true")
+    config.reset_settings()
+    try:
+        monkeypatch.setattr(engines, "IS_WIN", True)
+
+        def group(root, name, port):
+            cmd = engines.build_cmdline(Path("/x/chrome"), root / "udd", port,
+                                        _profile(name=name))
+            return [arg for arg in cmd if arg.startswith(prefix)]
+
+        first = group(tmp_path / "first", "甲", 21001)
+        second = group(tmp_path / "second", "乙", 21002)
+        assert len(first) == len(second) == 1
+        assert first != second
+        assert first == group(tmp_path / "first", "改名后的甲", 21009)
+        monkeypatch.setattr(engines, "IS_WIN", False)
+        assert group(tmp_path / "first", "甲", 21001) == []
+
+        monkeypatch.setattr(engines, "IS_WIN", True)
+        monkeypatch.setenv("ZW_TASKBAR_PER_PROFILE", "false")
+        config.reset_settings()
+        assert group(tmp_path / "first", "甲", 21001) == []
+    finally:
+        config.reset_settings()
 
 
 def test_window_name_sanitized(tmp_path):

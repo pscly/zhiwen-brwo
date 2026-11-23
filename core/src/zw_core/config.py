@@ -269,9 +269,10 @@ class Settings:
     # ── 扩展包（Extension Packs）────────────────────────
     # 新建环境时是否自动把"默认包"（is_default=1）带上。
     default_packs: bool = field(default_factory=lambda: _env_bool("ZW_DEFAULT_PACKS", True))
-    # 给浏览器窗口起名（`--window-name=<环境名>`），让多开时分得清谁是谁。
-    # 任务栏按钮文字在 Windows 上取自窗口标题，所以这一条同时解决两处显示。
+    # 用环境名显示窗口标题及 Windows 任务栏文字（系统启用标签时）。
     window_name: bool = field(default_factory=lambda: _env_bool("ZW_WINDOW_NAME", True))
+    taskbar_per_profile: bool = field(default_factory=lambda: _env_bool("ZW_TASKBAR_PER_PROFILE", True))
+    taskbar_badge: bool = field(default_factory=lambda: _env_bool("ZW_TASKBAR_BADGE", True))
 
     # ── 代理中继 ────────────────────────────────────────
     # 带用户名密码的上游代理，改由本机回环上一个极简中继代做认证

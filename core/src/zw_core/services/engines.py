@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -565,12 +566,22 @@ def build_cmdline(
         args.append(f"--user-agent={profile['fp_ua']}")
 
     proxy = (profile.get("proxy") or "").strip()
+    socks_dns_rules = None
     if proxy:
         # 上游地址里绝不能带凭据：Chromium 会把它当成主机名的一部分而连不上。
         # 带凭据的代理改走本机中继（见 services/proxyrelay.py 顶部：
         # Chrome 149 已忽略 --load-extension，扩展那条路会静默失效）。
         server = _proxy_server_for(profile, proxy)
         args.append(f"--proxy-server={server}")
+        if _upstream_of(proxy).startswith(("socks5://", "socks://")):
+            from urllib.parse import urlsplit
+
+            # SOCKS5 handles destination names itself. Limit Chromium's
+            # independent local DNS lookups to the proxy endpoint.
+            proxy_host = urlsplit(server).hostname
+            socks_dns_rules = "MAP * ~NOTFOUND"
+            if proxy_host and re.fullmatch(r"[a-zA-Z0-9._:-]+", proxy_host):
+                socks_dns_rules += f", EXCLUDE {proxy_host}"
         # 把"其实指向本机中继"这件事回填给调用方：界面上那条 warning 要说真话
         # （旧文案说"通过内置认证扩展生效"，而扩展在 137+ 根本没被加载）。
         if server.startswith("http://127.0.0.1:"):
@@ -632,19 +643,27 @@ def build_cmdline(
     #   · 改页面 title 一导航就被覆盖
     #   · `--user-data-dir` 的名字只在任务管理器可见，任务栏看不到
     #
-    # 任务栏按钮的文字在 Windows 上就取自窗口标题，所以这一条同时解决
-    # "窗口上有个标识" 和 "任务栏也有名字" 两件事。
-    #
-    # 可用 `ZW_WINDOW_NAME=false` 关掉（万一某个内核不认这个开关）。
-    if get_settings().window_name:
+    # 标题用于 Windows 显示标签时的按钮文字，也用于 Alt+Tab。
+    settings = get_settings()
+    if settings.window_name:
         label = _window_label(profile.get("name") or "", profile.get("id") or "")
         if label:
             args.append(f"--window-name={label}")
+
+    # Chromium 的 Windows AppUserModelID 默认只用数据目录的末级名称。
+    # 知纹每个环境的末级名称都是 udd，必须额外提供稳定、独立的后缀。
+    # 使用目录路径的哈希，改环境名不会改变分组，不同数据根也各自独立。
+    if IS_WIN and settings.taskbar_per_profile:
+        identity = os.path.normcase(str(udd.resolve()))
+        suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        args.append(f"--register-chrome-browser-suffix=.Zhiwen{suffix}")
 
     args.extend(BASE_ARGS)
     if not IS_WIN:
         args.extend(_POSIX_ONLY_ARGS)
     args.extend(extra_args or [])
+    if socks_dns_rules:
+        args.append(f"--host-resolver-rules={socks_dns_rules}")
     if not IS_WIN and _is_root():
         # 坑：Linux 上以 root 跑 Chromium **必须**加 --no-sandbox，否则直接退出。
         #
@@ -770,9 +789,13 @@ def _upstream_of(proxy: str) -> str:
             raw = f"http://{raw}"
     parts = urlsplit(raw)
     host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
     if parts.port:
         host = f"{host}:{parts.port}"
     scheme = parts.scheme or "http"
+    if scheme == "socks5h":
+        scheme = "socks5"
     return urlunsplit((scheme, host, "", "", ""))
 
 

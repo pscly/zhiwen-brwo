@@ -61,6 +61,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: 核对发行版本
+        shell: bash
+        run: |
+          args=()
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          VER="$(python scripts/check-release-version.py "${args[@]}")"
+          echo "ZW_RELEASE_VERSION=$VER" >> "$GITHUB_ENV"
+
       - name: 安装依赖
         shell: bash
         run: |
@@ -133,6 +143,11 @@ jobs:
               exit "$CODE"
             fi
           fi
+          # 读取成品自检报告，防止文件名正确但包内还是旧版本。
+          tr -d '\r' < "$REPORT" | grep -Fx "  OK    zw_core 导入: $ZW_RELEASE_VERSION" || {
+            echo "::error::打包成品的版本与 $ZW_RELEASE_VERSION 不一致或自检报告缺失"
+            exit 1
+          }
 
       # ── Windows 安装包（Inno Setup 6）────────────────────────────────────
       # 下面三步只在 Windows 上跑；Linux/macOS 不需要安装引导程序。
@@ -171,13 +186,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          # 版本号：tag（v0.3.0）优先；手动触发时读 core 里的 __version__，
-          # 免得 release 页面上的版本号和包里的对不上。
-          VER=""
-          if [[ "${GITHUB_REF_NAME}" == v* ]]; then VER="${GITHUB_REF_NAME#v}"; fi
-          if [ -z "$VER" ]; then
-            VER="$(python -c "import re,pathlib;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('core/src/zw_core/__init__.py').read_text(encoding='utf-8')).group(1))")"
-          fi
+          VER="$ZW_RELEASE_VERSION"
           # [Messages] 键名优先用 runner 上真实的 Default.isl 校验（最准）；
           # 万一没装到那里，脚本会退回仓库里的名字快照。
           if [ -f "$INNO_DIR/Default.isl" ]; then
@@ -190,11 +199,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          VER=""
-          if [[ "${GITHUB_REF_NAME}" == v* ]]; then VER="${GITHUB_REF_NAME#v}"; fi
-          if [ -z "$VER" ]; then
-            VER="$(python -c "import re,pathlib;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('core/src/zw_core/__init__.py').read_text(encoding='utf-8')).group(1))")"
-          fi
+          VER="$ZW_RELEASE_VERSION"
           # Windows 文件属性里的版本必须是四段纯数字（x.y.z.w）
           case "$VER" in
             *.*.*.*) VER4="$VER" ;;

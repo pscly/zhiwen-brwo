@@ -159,3 +159,24 @@ def test_proxy_credentials_not_in_cmdline(tmp_path: Path):
     profile2 = dict(profile, proxy="http://u:p@10.0.0.1:8080")
     joined2 = " ".join(engines.build_cmdline(Path("/usr/bin/chrome"), tmp_path, 21002, profile2))
     assert "u:p@" not in joined2
+
+
+def test_socks5h_alias_keeps_remote_dns():
+    from zw_core.services.proxy import parse_single_proxy
+
+    spec = parse_single_proxy("socks5h://user:p%40ss@proxy.example:21080")
+    assert spec.scheme == "socks5"
+    assert spec.host == "proxy.example"
+    assert spec.port == 21080
+    assert spec.password == "p@ss"
+
+
+def test_socks5_chromium_resolver_only_excludes_proxy_host(tmp_path):
+    from zw_core.services import engines
+
+    profile = {"id": "dns-check", "proxy": "socks5h://proxy.example:21080"}
+    cmd = engines.build_cmdline(Path("/usr/bin/chrome"), tmp_path, 21001, profile)
+    assert "--proxy-server=socks5://proxy.example:21080" in cmd
+    assert "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE proxy.example" in cmd
+    direct = engines.build_cmdline(Path("/usr/bin/chrome"), tmp_path, 21001, {"id": "direct"})
+    assert not any(arg.startswith("--host-resolver-rules=") for arg in direct)
