@@ -273,6 +273,14 @@ class Settings:
     window_name: bool = field(default_factory=lambda: _env_bool("ZW_WINDOW_NAME", True))
     taskbar_per_profile: bool = field(default_factory=lambda: _env_bool("ZW_TASKBAR_PER_PROFILE", True))
     taskbar_badge: bool = field(default_factory=lambda: _env_bool("ZW_TASKBAR_BADGE", True))
+    # 无显卡机器（云电脑/虚拟机/远程桌面）上的 WebGL 软件渲染模式。
+    #
+    # 默认空字符串 = 关闭。这类机器不加参数时 WebGL 直接不可用（`getContext('webgl')`
+    # 返回 null），而"桌面 Chrome 没有 WebGL"本身就是强自动化信号，所以需要按机器开。
+    #   warp        Windows 的微软自带软件适配器（真实无显卡 Windows 原生就是这个）
+    #   swiftshader Chromium 自带 SwiftShader，字符串里带 SwiftShader，观感更差
+    #   auto        Windows 用 warp，其它平台用 swiftshader
+    software_gl: str = field(default_factory=lambda: _env("ZW_SOFTWARE_GL").lower())
 
     # ── 代理中继 ────────────────────────────────────────
     # 带用户名密码的上游代理，改由本机回环上一个极简中继代做认证

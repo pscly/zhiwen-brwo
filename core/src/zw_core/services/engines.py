@@ -659,6 +659,7 @@ def build_cmdline(
         args.append(f"--register-chrome-browser-suffix=.Zhiwen{suffix}")
 
     args.extend(BASE_ARGS)
+    args.extend(_software_gl_args(settings.software_gl))
     if not IS_WIN:
         args.extend(_POSIX_ONLY_ARGS)
     args.extend(extra_args or [])
@@ -703,6 +704,39 @@ def build_cmdline(
     else:
         args.extend(targets or ["about:blank"])
     return args
+
+
+def _software_gl_args(mode: str) -> list[str]:
+    """无显卡机器上让 WebGL 可用的启动参数（`ZW_SOFTWARE_GL`）。
+
+    为什么需要：没有可用 GPU 时，Chromium 157 不再自动回落到软件渲染，
+    `canvas.getContext('webgl')` 直接返回 null。而**桌面版 Chrome 没有 WebGL**
+    本身就是强自动化/虚拟化信号（真实用户极少遇到），所以这类机器必须显式开。
+
+    三种取值实测结果（云电脑 Windows，Chrome 157）：
+
+        ""（默认，关闭）  ctx=false
+        warp              ANGLE (Microsoft, Microsoft Basic Render Driver ... D3D11)
+        swiftshader       ANGLE (Google, Vulkan ... SwiftShader Device ...)
+
+    默认选 `warp` 的理由是"像真的"：微软这个适配器就是**没有任何显卡驱动的
+    Windows 原生渲染路径**，云电脑、远程桌面、虚拟机里本来就长这样；而
+    字符串里带 SwiftShader 的版本一眼软件渲染，是自动化环境的典型特征。
+
+    有独立显卡的机器**不要开**：强行指定会让真实 GPU 被替换成软件渲染，
+    反而更可疑。
+    """
+    choice = (mode or "").strip().lower()
+    if choice in ("", "off", "0", "false", "none"):
+        return []
+    if choice == "auto":
+        choice = "warp" if IS_WIN else "swiftshader"
+    if choice == "warp":
+        return ["--use-angle=warp"]
+    if choice == "swiftshader":
+        return ["--use-gl=angle", "--use-angle=swiftshader"]
+    logger.warning("ZW_SOFTWARE_GL 取值不认识：%s（可选 warp / swiftshader / auto），按关闭处理", mode)
+    return []
 
 
 def _proxy_server_for(profile: dict[str, Any], proxy: str) -> str:

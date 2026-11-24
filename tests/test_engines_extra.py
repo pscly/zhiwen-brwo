@@ -463,3 +463,41 @@ def test_window_name_can_be_disabled(tmp_path, monkeypatch):
         assert not [a for a in c if a.startswith("--window-name=")], "关掉开关后不该再带"
     finally:
         config.reset_settings()
+
+
+def test_software_gl_off_by_default(tmp_path, monkeypatch):
+    """`ZW_SOFTWARE_GL` 默认关闭：有显卡的机器不能被强行改成软件渲染。"""
+    from zw_core import config
+
+    monkeypatch.delenv("ZW_SOFTWARE_GL", raising=False)
+    config.reset_settings()
+    try:
+        cmd = engines.build_cmdline(Path("/x/chrome"), tmp_path / "a", 21001,
+                                    _profile(name="gl", id="a1" * 10))
+        assert not [a for a in cmd if a.startswith(("--use-gl", "--use-angle"))], cmd
+    finally:
+        config.reset_settings()
+
+
+def test_software_gl_modes(tmp_path, monkeypatch):
+    """warp / swiftshader / auto / 未识别值的行为。"""
+    from zw_core import config
+
+    def build(mode):
+        monkeypatch.setenv("ZW_SOFTWARE_GL", mode)
+        config.reset_settings()
+        try:
+            return engines.build_cmdline(Path("/x/chrome"), tmp_path / mode.replace("", "") , 21001,
+                                         _profile(name="gl", id="b2" * 10))
+        finally:
+            config.reset_settings()
+
+    assert [a for a in build("warp") if a.startswith("--use-")] == ["--use-angle=warp"]
+    assert [a for a in build("swiftshader") if a.startswith("--use-")] == [
+        "--use-gl=angle", "--use-angle=swiftshader"]
+    monkeypatch.setattr(engines, "IS_WIN", True)
+    assert [a for a in build("auto") if a.startswith("--use-")] == ["--use-angle=warp"]
+    monkeypatch.setattr(engines, "IS_WIN", False)
+    assert [a for a in build("auto") if a.startswith("--use-")] == [
+        "--use-gl=angle", "--use-angle=swiftshader"]
+    assert not [a for a in build("nonsense") if a.startswith("--use-")]

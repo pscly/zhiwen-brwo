@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.8.39 — 2026-11-24
+
+- 新增 `ZW_SOFTWARE_GL` 配置项（默认关闭）：无显卡机器上让 WebGL 可用。`warp` 走微软 Basic Render Driver（真实无显卡 Windows 的原生渲染路径），`swiftshader` 走 Chromium 自带实现，`auto` 按平台选择。
+- 实测对比：不设参数时 WebGL 为 null；warp 得到 `ANGLE (Microsoft, Microsoft Basic Render Driver ... D3D11)`；swiftshader 会暴露 `SwiftShader Device`。
+- 有独立显卡的机器保持关闭，避免真实 GPU 被换成软件渲染。
+
 ## 0.8.38 — 2026-11-23
 
 - 修正 Windows 发布校验中路径分隔符导致的版本检查错误。包含 0.8.37 候选的任务栏和 SOCKS5 更新。
