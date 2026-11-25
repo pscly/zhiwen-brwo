@@ -221,7 +221,7 @@ def test_default_pack_is_applied_on_create_profile():
     assert slug in slugs, "默认包没被应用到新环境"
 
     # 代码进了扩展库（这样 --load-extension 才有路径可用）
-    code_in_lib = config.get_settings().ext_dir / f"{slug}-1.0"
+    code_in_lib = config.get_settings().ext_dir / slug
     assert (code_in_lib / "manifest.json").is_file()
 
     # 数据进了新环境的 udd：算出来的 ID + 源环境实测 ID，两个位置各一份
@@ -264,7 +264,7 @@ def test_apply_to_profile_explicit_packs_and_delete():
     # `PACK_IN_USE`（免得用户不知道删了以后新建环境带不上插件）。
     # 这条用例本来就是要验"删完之后已应用的环境不受影响"，所以它必须强删 ——
     # 不加 force 会先撞上那条保护，测的就不是这里想测的东西了。
-    lib = config.get_settings().ext_dir / "apply-ext-1.0"
+    lib = config.get_settings().ext_dir / "apply-ext"
     packs.delete_pack(pack["id"], force=True)
     assert not (Path(pack["path"])).exists()
     assert (lib / "manifest.json").is_file()

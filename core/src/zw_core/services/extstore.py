@@ -391,7 +391,10 @@ def install(
         # 这一步必须在解包之后，因为解析要读 `_locales/`。
         display = _display_name(root, manifest, fallback=(ext_id or "ext"))
         slug = packs._slugify(display) or "ext"
-        dest = s.ext_dir / f"{slug}-{version}"
+        # 目录名**不带版本号**（2026-11-25 修，与 packs._ensure_in_library 一致）：
+        # 未打包扩展的 ID 由加载路径推导，目录带版本号会让 ID 随升级漂移，
+        # 表现是「扩展升级后登录态/脚本全丢」。固定成 <slug> 后 ID 恒定。
+        dest = s.ext_dir / slug
         # 兜底断言：不管上游怎么过滤，落盘目标必须真的在 ext_dir 下面。
         # 这条不是重复劳动 —— 它是"以后有人再往路径里塞东西"时的最后一道闸。
         try:
@@ -401,10 +404,24 @@ def install(
                              f"扩展要装到的位置不在扩展库里（{dest}），已拒绝") from exc
         existed = dest.is_dir()
         if existed and not update:
-            return {
-                "ok": True, "skipped": "这个版本已经在库里了",
-                "slug": slug, "version": version, "path": str(dest), "ext_id": ext_id,
-            }
+            # 目录固定了，"库里有没有"不能再靠目录名判断版本 —— 读已装版本的元信息。
+            have = ""
+            try:
+                meta = json.loads((dest / ".zw-ext-meta.json").read_text(encoding="utf-8"))
+                have = str(meta.get("version") or "")
+            except (OSError, json.JSONDecodeError):
+                have = ""
+            if not have:
+                try:
+                    have = _safe_version(json.loads((dest / "manifest.json").read_text(
+                        encoding="utf-8-sig", errors="replace")).get("version"))
+                except (OSError, json.JSONDecodeError, AttributeError, StoreError):
+                    have = ""
+            if have == version:
+                return {
+                    "ok": True, "skipped": "这个版本已经在库里了",
+                    "slug": slug, "version": version, "path": str(dest), "ext_id": ext_id,
+                }
         if not (root / "manifest.json").is_file():
             raise StoreError("EXT_STORE_NO_MANIFEST", "解包后找不到 manifest.json")
         # 解包出来的 manifest 才是最终真相（zip 里那份可能只是壳）。
@@ -419,7 +436,20 @@ def install(
                 version = _safe_version(manifest.get("version")) or version
         except (OSError, json.JSONDecodeError):
             pass
-        packs._copy_tree(root, dest)
+        # 原子替换：先落 staging，再 swap，避免"复制到一半"留下半个扩展。
+        import shutil as _sh
+
+        staging_lib = s.ext_dir / f"{slug}.staging"
+        _sh.rmtree(staging_lib, ignore_errors=True)
+        packs._copy_tree(root, staging_lib)
+        if dest.exists():
+            backup = s.ext_dir / f"{slug}.old"
+            _sh.rmtree(backup, ignore_errors=True)
+            dest.rename(backup)
+            staging_lib.rename(dest)
+            _sh.rmtree(backup, ignore_errors=True)
+        else:
+            staging_lib.rename(dest)
         # 记下商店扩展 ID：check_updates() 靠它回商店比对版本。
         # 不写的话更新功能只能靠猜（而猜错就是下载了别人的扩展）。
         if ext_id:

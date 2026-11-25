@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.8.40 — 2026-11-25
+
+- 扩展库目录固定为 `<slug>`（不再带版本号）：未打包扩展的 ID 由加载路径推导，目录带版本会让 ID 随升级漂移，表现为「扩展一升级，登录态/脚本全丢」。升级改成 staging → rename 原子替换。
+- 新增 `POST /api/v1/maintenance/extensions/repair`：把历史遗留的旧 ID 存储目录搬到当前 ID（复制 + 原子替换，目标已有数据不覆盖，旧目录改名 `.migrated` 保留）。
+- 扩展商店安装（extstore）同步跟进固定目录与原子替换，版本号改存 `.zw-ext-meta.json`。
+
 ## 0.8.39 — 2026-11-24
 
 - 新增 `ZW_SOFTWARE_GL` 配置项（默认关闭）：无显卡机器上让 WebGL 可用。`warp` 走微软 Basic Render Driver（真实无显卡 Windows 的原生渲染路径），`swiftshader` 走 Chromium 自带实现，`auto` 按平台选择。

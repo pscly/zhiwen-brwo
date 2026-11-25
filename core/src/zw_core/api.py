@@ -891,6 +891,7 @@ def build_app() -> FastAPI:
                         {"method": "POST", "path": f"{API_PREFIX}/maintenance/trim", "说明": "清理已停止环境的磁盘缓存"},
                         {"method": "POST", "path": f"{API_PREFIX}/maintenance/reap-orphans", "说明": "清理 core 重启后没人管的浏览器进程"},
                         {"method": "POST", "path": f"{API_PREFIX}/maintenance/cleanup", "说明": "清理 staging / 过期令牌 / 孤儿目录"},
+                        {"method": "POST", "path": f"{API_PREFIX}/maintenance/extensions/repair", "说明": "把扩展存储迁到当前库路径对应的 ID（修升级后登录态丢失）"},
                         {"method": "DELETE", "path": f"{API_PREFIX}/packs/{{pack_id}}", "说明": "删除扩展包"},
                         {"method": "DELETE", "path": f"{API_PREFIX}/profiles/{{ref}}/extensions/{{slug}}", "说明": "从环境解绑扩展"},
                         {"method": "DELETE", "path": f"{API_PREFIX}/extensions/{{slug}}/{{version}}", "说明": "从扩展库删除某个版本"},
@@ -1400,6 +1401,20 @@ def build_app() -> FastAPI:
 
         slugs = body.get("slugs") or body.get("extensions") or []
         return ok(packsvc.remove_extensions_from_profile(ref, [str(x) for x in slugs]))
+
+    @app.post(f"{API_PREFIX}/maintenance/extensions/repair", tags=["维护"], dependencies=[Auth],
+              summary="把扩展存储迁到当前库路径对应的 ID（修「升级后登录态丢失」）")
+    def maintenance_extensions_repair(body: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+        """未打包扩展的 ID 由加载路径推导，库目录换名就会换 ID、读不到旧数据。
+
+        现在库目录固定成 `<slug>`，ID 不再漂移；这个接口负责把**历史上已经漂过的**
+        环境搬回来（数据复制到新 ID 目录，旧目录改名成 `.migrated` 保留）。
+        环境应当先停掉，运行中迁移会因文件占用失败（失败会如实返回，不会假装成功）。
+        """
+        from zw_core.services import packs as packsvc
+
+        ref = str(body.get("profile") or "").strip()
+        return ok(packsvc.repair_extension_storage(ref or None))
 
     @app.get(f"{API_PREFIX}/packs/{{pack_id}}/export", tags=["扩展"], dependencies=[Auth],
              summary="把本机扩展包导出成 zip（用来上传到控制台）")

@@ -1034,6 +1034,127 @@ def set_default(pack_id: str, enabled: bool) -> dict[str, Any]:
     return _summary(meta)
 
 
+def repair_extension_storage(profile_ref: str | None = None) -> dict[str, Any]:
+    """把环境的扩展存储目录迁到**当前库路径**对应的 ID 上。
+
+    为什么需要它（2026-11-25 用户实测踩到）：
+
+    未打包扩展的 ID 由加载路径推导。库目录以前带版本号（`<slug>-<version>`），
+    扩展一升级，路径变、ID 变，浏览器就去一个空的 `Local Extension Settings/<新ID>/`
+    找数据 —— 表现是「Bitwarden 突然要重新登录」「脚本猫的脚本没了」。
+    数据其实还在旧 ID 的目录里，只是没人读了。
+
+    现在库目录固定成 `<slug>`（见 `_ensure_in_library`），ID 不再漂移；
+    但**历史上已经漂过的环境**还需要搬一次。这个函数就是那把手术刀：
+
+      · 对每个环境的每个已登记扩展，算出"当前应当使用的 ID"（按库路径）
+      · 找出该环境里同一扩展的其他候选 ID 目录（老的版本目录推导出来的那些）
+      · 把数据**复制**到当前 ID 目录（先复制到 `.tmp`，成功后再原子替换）
+      · 旧目录**保留**并改名成 `<旧ID>.migrated`，出问题能立刻改回去
+
+    只处理"确定的同一个扩展"，不做任何跨扩展搬运；扩展代码目录不动。
+    """
+    from . import manager
+
+    refs = [profile_ref] if profile_ref else [p["id"] for p in manager.list_profiles()]
+    report: dict[str, Any] = {"profiles": [], "migrated": 0, "skipped": 0}
+    for ref in refs:
+        try:
+            prof = manager.get_profile(ref)
+        except Exception as exc:  # noqa: BLE001
+            report["profiles"].append({"profile": ref, "error": str(exc)})
+            continue
+        udd = manager.udd_path(prof["id"])
+
+        # 这个环境装了哪些扩展（slug）→ 当前库路径 → 当前 ID
+        installed: dict[str, Path] = {}
+        with get_db().conn() as c:
+            for slug in _slugs_of(prof):
+                row = c.execute(
+                    "SELECT path FROM extensions WHERE slug=? ORDER BY added_at DESC LIMIT 1",
+                    (slug,),
+                ).fetchone()
+                if row and row["path"]:
+                    installed[slug] = Path(row["path"])
+        entry = {"profile": prof["name"], "udd_exists": udd.is_dir(), "moved": []}
+        if not udd.is_dir():
+            entry["note"] = "环境目录不存在，跳过"
+            report["profiles"].append(entry)
+            report["skipped"] += 1
+            continue
+        for slug, load_path in installed.items():
+            if not load_path.is_dir():
+                continue
+            want = chromium_unpacked_id(load_path)
+            moved = _migrate_storage_to(udd, want, slug, load_path)
+            if moved:
+                entry["moved"].append({"slug": slug, "to": want, "from": moved})
+                report["migrated"] += 1
+        report["profiles"].append(entry)
+    return report
+
+
+def _slugs_of(prof: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for x in prof.get("extensions") or []:
+        slug = x.get("slug") if isinstance(x, dict) else x
+        if slug:
+            out.append(str(slug))
+    return out
+
+
+def _migrate_storage_to(udd: Path, want_id: str, slug: str, load_path: Path) -> list[str]:
+    """把 `<旧ID>` 的三类存储目录迁到 `want_id`。返回迁移过的旧 ID 列表。"""
+    default = Path(udd) / "Default"
+    roots = {
+        "les": default / "Local Extension Settings",
+        "idb": default / "IndexedDB",
+        "sync": default / "Sync Extension Settings",
+    }
+    # 旧 ID 来源：同一 slug 的历史版本目录（`<slug>-<version>`）推导出的 ID
+    s = get_settings()
+    candidate_ids: list[str] = []
+    if s.ext_dir.is_dir():
+        prefix = f"{slug}-"
+        for d in s.ext_dir.iterdir():
+            if d.is_dir() and d.name.startswith(prefix) and d.name != slug:
+                cid = chromium_unpacked_id(d)
+                if cid != want_id:
+                    candidate_ids.append(cid)
+    moved: list[str] = []
+    for old in candidate_ids:
+        did = False
+        for kind, root in roots.items():
+            if not root.is_dir():
+                continue
+            if kind == "idb":
+                src = root / f"chrome-extension_{old}_0.indexeddb.leveldb"
+                dst = root / f"chrome-extension_{want_id}_0.indexeddb.leveldb"
+            else:
+                src = root / old
+                dst = root / want_id
+            if not src.is_dir():
+                continue
+            # 目标已经有数据就不覆盖：宁可留着，也不拿旧的把新的盖掉
+            if dst.is_dir() and any(dst.iterdir()):
+                continue
+            tmp = root / (dst.name + ".tmp")
+            shutil.rmtree(tmp, ignore_errors=True)
+            try:
+                shutil.copytree(src, tmp)
+                if dst.exists():
+                    shutil.rmtree(dst, ignore_errors=True)
+                tmp.rename(dst)
+                src.rename(root / (src.name + ".migrated"))
+                did = True
+            except OSError as exc:  # noqa: BLE001
+                shutil.rmtree(tmp, ignore_errors=True)
+                logger.warning("迁移扩展存储失败 slug=%s %s→%s：%s", slug, src.name, dst.name, exc)
+        if did:
+            moved.append(old)
+    return moved
+
+
 def delete_pack(pack_id: str, *, force: bool = False) -> dict[str, Any]:
     """删包。已经应用过的环境**不受影响**——apply 时扩展代码已经复制进
     `<数据目录>/extensions/`，包只是"出厂模板"，不是运行时的依赖。
@@ -1077,8 +1198,30 @@ def _ensure_in_library(code_src: Path, ext: dict[str, Any]) -> Path:
     """
     s = get_settings()
     s.ext_dir.mkdir(parents=True, exist_ok=True)
-    dest = s.ext_dir / f"{ext['slug']}-{ext['version']}"
-    _copy_tree(code_src, dest)
+    # 目录名**不含版本号**（2026-11-25 修）。
+    #
+    # 未打包扩展的 ID 由加载路径推导（见 chromium_unpacked_id）。以前目录是
+    # `<slug>-<version>`，于是扩展一升级就换了目录、换了 ID，浏览器随即去一个
+    # 全新的 `Local Extension Settings/<新ID>/` 找数据 —— 用户的登录态、设置
+    # 全部"消失"（数据其实还在旧的 ID 目录里）。Bitwarden 这类会登录的扩展
+    # 一升级就要重新登录，就是这么来的。
+    #
+    # 改成固定 `<slug>` 后路径不再随版本变，ID 恒定；升级只是把同一目录里的
+    # 代码换掉。**替换必须原子**：先完整复制到 `<slug>.staging`，再 rename
+    # 覆盖，避免中途失败留下半个扩展（半个扩展比旧版本更糟）。
+    dest = s.ext_dir / str(ext["slug"])
+    staging = s.ext_dir / f"{ext['slug']}.staging"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    _copy_tree(code_src, staging)
+    if dest.exists():
+        backup = s.ext_dir / f"{ext['slug']}.old"
+        shutil.rmtree(backup, ignore_errors=True)
+        dest.rename(backup)
+        staging.rename(dest)
+        shutil.rmtree(backup, ignore_errors=True)
+    else:
+        staging.rename(dest)
     digest = _tree_sha256(dest)
     with get_db().conn() as c:
         c.execute(

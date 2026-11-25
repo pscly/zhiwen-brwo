@@ -144,14 +144,23 @@ def test_install_from_zip_with_wrapping_dir(home, tmp_path):
     assert (dest / "a.js").is_file()
 
 
-def test_install_writes_id_marker_and_version_dir(home, tmp_path, monkeypatch):
-    """装完要留下扩展 ID 标记（更新检查靠它），目录名是 <slug>-<version>。"""
+def test_install_writes_id_marker_and_stable_dir(home, tmp_path, monkeypatch):
+    """装完要留下扩展 ID 标记（更新检查靠它），目录名固定是 <slug>（不带版本）。
+
+    为什么不带版本号：未打包扩展的 ID 由加载路径推导，目录带版本号会让
+    ID 随每次升级漂移，用户看到的是「扩展一升级，登录态/脚本全没了」。
+    版本信息存在 `.zw-ext-meta.json` 里，不靠目录名。
+    """
     z = _zip({"manifest.json": _manifest()})
     # 必须把下载也换掉：不换就会真去连商店（测试机连不上，白等 60 秒超时）
     monkeypatch.setattr(extstore, "download_crx", lambda *_a, **_k: z)
     r = extstore.install(url=COOKIEMANAGER)
-    assert Path(r["path"]).name == f"cookiemanager-{r['version']}"
+    assert Path(r["path"]).name == "cookiemanager"
     assert (Path(r["path"]) / ".zw-ext-id").read_text() == CM_ID
+    meta_path = Path(r["path"]) / ".zw-ext-meta.json"
+    import json as _json
+
+    assert _json.loads(meta_path.read_text())["version"] == r["version"]
 
 
 def test_install_rejects_zip_without_manifest(home, tmp_path):
