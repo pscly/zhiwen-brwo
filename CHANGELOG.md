@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.8.41 — 2026-11-25
+
+- 修 `chromium_unpacked_id` 的路径编码：Windows 必须用 UTF-16LE（Chromium 的 `FilePath::value()` 是 wstring），以前一律 UTF-8，算出来的 ID 与浏览器真实使用的不同，数据被写到错目录。云电脑实测对照：`bitwarden-password-manager-2026.10.2` → `ccgniplcdaeapohoocjeongbfnnihnjp`（UTF-16LE 吻合，UTF-8 不吻合）。
+- 新增 `path_bytes()` 并加真机对照断言，防止以后再退回 UTF-8。
+- 结果：应用扩展包写数据时用的 ID 与浏览器读取的 ID 一致，`maintenance/extensions/repair` 也能正确定位旧目录。
+
 ## 0.8.40 — 2026-11-25
 
 - 扩展库目录固定为 `<slug>`（不再带版本号）：未打包扩展的 ID 由加载路径推导，目录带版本会让 ID 随升级漂移，表现为「扩展一升级，登录态/脚本全丢」。升级改成 staging → rename 原子替换。

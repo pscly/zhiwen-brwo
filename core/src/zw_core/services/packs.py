@@ -225,9 +225,28 @@ def chromium_unpacked_id(load_path: Path) -> str:
     导出时会把**源环境里实测到的 ID**一起存进包里，应用时两个 ID 各写一份数据，
     以 Chromium 实际生效的那个为准 —— 算错了只会多一个没人读的目录，不会毁数据。
     """
-    text = str(Path(load_path).resolve())
-    digest = hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()[:32]
+    raw = path_bytes(Path(load_path).resolve())
+    digest = hashlib.sha256(raw).hexdigest()[:32]
     return "".join(chr(ord("a") + int(ch, 16)) for ch in digest)
+
+
+def path_bytes(path: Path) -> bytes:
+    """把路径编成 Chromium 做哈希时用的字节序列。
+
+    **编码必须跟平台走**（2026-11-25 云电脑实测纠正）：
+
+        Windows   UTF-16LE（`base::FilePath::value()` 在 Windows 上是 wstring）
+        其它      UTF-8
+
+    以前一律用 UTF-8，于是 Windows 上算出来的 ID 和 Chromium 真实使用的
+    完全不是一回事：数据被写到 `<算错的ID>/`，浏览器去 `<真实ID>/` 找，
+    表现是「扩展装上了但设置是空的」。用 UTF-16LE 后与真机
+    `Local Extension Settings/<id>` 的目录名逐字一致（bitwarden → 实测相符）。
+    """
+    text = str(path)
+    if os.name == "nt":
+        return text.encode("utf-16-le", errors="surrogatepass")
+    return text.encode("utf-8", errors="surrogatepass")
 
 
 def observed_extension_ids(udd: Path) -> set[str]:

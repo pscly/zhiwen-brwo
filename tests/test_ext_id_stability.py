@@ -121,3 +121,40 @@ def test_repair_does_not_overwrite_existing_newer_data(packs_env):
     packs.repair_extension_storage(prof["id"])
     assert (les / want / "new.log").read_bytes() == b"new", "新数据不能被旧的盖掉"
     assert not (les / want / "old.log").exists()
+
+
+def test_path_bytes_follows_platform_encoding():
+    """Windows 用 UTF-16LE，其它平台用 UTF-8 —— 算错就是"扩展设置了但读不到"。"""
+    from pathlib import Path
+
+    from zw_core.services import packs
+
+    p = Path("/tmp/ext/x")
+    assert packs.path_bytes(p) == b"/tmp/ext/x"
+
+    # 模拟 Windows：只看 os.name 分支，不依赖真机
+    import os as _os
+
+    real = _os.name
+    try:
+        _os.name = "nt"
+        assert packs.path_bytes(p) == str(p).encode("utf-16-le")
+    finally:
+        _os.name = real
+
+
+def test_known_windows_id_matches_chromium():
+    """真机对照：这条路径在云电脑上 Chromium 用的 ID 是 ccgniplcdaeapohoocjeongbfnnihnjp。"""
+    import os as _os
+
+    from pathlib import Path
+
+    from zw_core.services import packs
+
+    # 直接对"Windows 路径字符串"的字节序列做哈希（本机是 Linux，造不出 WindowsPath）
+    raw = r"C:\Users\Administrator\AppData\Local\zhiwen\extensions\bitwarden-password-manager-2026.10.2"
+    import hashlib
+
+    digest = hashlib.sha256(raw.encode("utf-16-le")).hexdigest()[:32]
+    got = "".join(chr(ord("a") + int(c, 16)) for c in digest)
+    assert got == "ccgniplcdaeapohoocjeongbfnnihnjp", "UTF-16LE 才算得出 Chromium 真机用的 ID"
