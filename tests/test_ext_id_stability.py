@@ -129,16 +129,19 @@ def test_path_bytes_follows_platform_encoding():
 
     from zw_core.services import packs
 
-    p = Path("/tmp/ext/x")
-    assert packs.path_bytes(p) == b"/tmp/ext/x"
-
-    # 模拟 Windows：只看 os.name 分支，不依赖真机
     import os as _os
 
+    p = Path("/tmp/ext/x")
+    # 当前平台自己的编码必须对（Windows runner 上 os.name 就是 nt）
+    expect = str(p).encode("utf-16-le") if _os.name == "nt" else str(p).encode("utf-8")
+    assert packs.path_bytes(p) == expect
+
+    # 另一条分支也要覆盖：显式切 os.name 再算一次
     real = _os.name
     try:
-        _os.name = "nt"
-        assert packs.path_bytes(p) == str(p).encode("utf-16-le")
+        _os.name = "utf8-branch" if real == "nt" else "nt"
+        expect2 = str(p).encode("utf-16-le") if _os.name == "nt" else str(p).encode("utf-8")
+        assert packs.path_bytes(p) == expect2
     finally:
         _os.name = real
 
